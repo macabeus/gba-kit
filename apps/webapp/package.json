@@ -1,0 +1,44 @@
+{
+  "name": "@gba-kit/webapp",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server/dev-server.ts",
+    "build": "vite build",
+    "check-types": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src/",
+    "check-deps": "depcruise src --config .dependency-cruiser.cjs"
+  },
+  "dependencies": {
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.40.0",
+    "@gba-kit/arm-emulator": "workspace:*",
+    "@gba-kit/gba-browser": "workspace:*",
+    "@gba-kit/gba-emulator": "workspace:*",
+    "@gba-kit/gba-react": "workspace:*",
+    "@hono/node-server": "^1.19.11",
+    "@uiw/react-codemirror": "^4.25.8",
+    "clsx": "^2.1.1",
+    "hono": "^4.12.9",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
+    "@types/node": "^25.5.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "dependency-cruiser": "^17.3.9",
+    "tailwindcss": "^4.2.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.2",
+    "vite-plugin-singlefile": "^2.3.2",
+    "vitest": "^4.1.1"
+  }
+}

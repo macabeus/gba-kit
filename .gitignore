@@ -1,0 +1,26 @@
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+.DS_Store
+
+# Environment and secrets
+*.env
+.env*
+.npmrc
+
+# Editor and IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# OS files
+Thumbs.db
+
+# Cache
+.cache/
+
