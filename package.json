@@ -1,0 +1,32 @@
+{
+  "name": "gba-kit",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "pnpm@9.14.4",
+  "scripts": {
+    "dev": "pnpm --filter @gba-kit/webapp dev",
+    "build": "turbo build",
+    "test": "turbo test",
+    "check-types": "turbo check-types",
+    "lint": "turbo lint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "release": "node scripts/check-npm-user.mjs && turbo build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.30.0",
+    "@trivago/prettier-plugin-sort-imports": "^6.0.2",
+    "@typescript-eslint/eslint-plugin": "^8.57.2",
+    "@typescript-eslint/parser": "^8.57.2",
+    "eslint": "^10.1.0",
+    "eslint-plugin-unused-imports": "^4.4.1",
+    "prettier": "^3.8.1",
+    "turbo": "^2.8.20",
+    "typescript": "^6.0.2"
+  }
+}

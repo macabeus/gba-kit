@@ -1,0 +1,56 @@
+{
+  "name": "@gba-kit/arm-emulator",
+  "version": "0.1.0",
+  "description": "ARM7TDMI CPU emulator supporting Thumb and ARM instruction sets",
+  "author": "macabeus",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./arm-cpu": {
+      "types": "./dist/arm-cpu.d.ts",
+      "import": "./dist/arm-cpu.js"
+    },
+    "./disassembler": {
+      "types": "./dist/disassembler.d.ts",
+      "import": "./dist/disassembler.js"
+    },
+    "./cpu-snapshot": {
+      "types": "./dist/cpu-snapshot.d.ts",
+      "import": "./dist/cpu-snapshot.js"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/macabeus/gba-kit",
+    "directory": "packages/arm-emulator"
+  },
+  "homepage": "https://github.com/macabeus/gba-kit",
+  "bugs": "https://github.com/macabeus/gba-kit/issues",
+  "keywords": [
+    "gba",
+    "gameboy-advance",
+    "emulator",
+    "arm7tdmi",
+    "typescript"
+  ],
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "vitest": "^4.1.1",
+    "typescript": "^6.0.2"
+  }
+}

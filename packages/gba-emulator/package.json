@@ -1,0 +1,50 @@
+{
+  "name": "@gba-kit/gba-emulator",
+  "version": "0.1.0",
+  "description": "Full GBA hardware emulation",
+  "author": "macabeus",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./savestate": {
+      "types": "./dist/savestate.d.ts",
+      "import": "./dist/savestate.js"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/macabeus/gba-kit",
+    "directory": "packages/gba-emulator"
+  },
+  "homepage": "https://github.com/macabeus/gba-kit",
+  "bugs": "https://github.com/macabeus/gba-kit/issues",
+  "keywords": [
+    "gba",
+    "gameboy-advance",
+    "emulator",
+    "arm7tdmi",
+    "typescript"
+  ],
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@gba-kit/arm-emulator": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.1"
+  }
+}

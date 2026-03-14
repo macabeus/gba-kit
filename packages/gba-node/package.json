@@ -1,0 +1,47 @@
+{
+  "name": "@gba-kit/gba-node",
+  "version": "0.1.0",
+  "description": "Headless Node.js runtime for scripted GBA emulation",
+  "author": "macabeus",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/macabeus/gba-kit",
+    "directory": "packages/gba-node"
+  },
+  "homepage": "https://github.com/macabeus/gba-kit",
+  "bugs": "https://github.com/macabeus/gba-kit/issues",
+  "keywords": [
+    "gba",
+    "gameboy-advance",
+    "emulator",
+    "arm7tdmi",
+    "typescript"
+  ],
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@gba-kit/arm-emulator": "workspace:*",
+    "@gba-kit/gba-emulator": "workspace:*",
+    "fast-png": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^6.0.2"
+  }
+}
