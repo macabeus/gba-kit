@@ -16,11 +16,14 @@ export type CodeAtlasNodeType = Node<CodeAtlasNodeData, 'codeAtlas'>;
  * Given the assembly text and a PC offset into the function,
  * return the 0-based line index that corresponds to the current instruction.
  *
- * Walks through lines accumulating byte sizes:
+ * Assumes Thumb mode (ARMv4T) instruction encoding:
  * - `.word` → 4 bytes, `.hword` → 2 bytes
- * - `bl`/`blx` (Thumb long branch) → 4 bytes
- * - other instructions → 2 bytes (Thumb)
+ * - `bl`/`blx` (long branch with link) → 4 bytes (two 16-bit half-words)
+ * - all other instructions → 2 bytes
  * - empty/whitespace lines → 0 bytes
+ *
+ * ARM-mode functions (4 bytes per instruction) are not supported.
+ * This is acceptable for GBA where nearly all game code is Thumb.
  */
 function computeActiveLine(asmCode: string, romAddress: number, pc: number): number | null {
   if (pc < romAddress) return null;

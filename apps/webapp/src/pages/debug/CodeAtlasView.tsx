@@ -11,7 +11,7 @@ import {
   useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Panel } from '../../components/Panel';
 import { CodeAtlasNode, type CodeAtlasNodeType } from './CodeAtlasNode';
@@ -69,6 +69,7 @@ function computeLayout(db: MizuchiDb) {
       type: 'codeAtlas',
       position: { x: nodeData.x - NODE_WIDTH / 2, y: nodeData.y - (nodeData.height ?? NODE_HEIGHT_BASE) / 2 },
       data: { fn, isActive: false, pc: 0 },
+      style: { pointerEvents: 'all' },
     });
   }
 
@@ -78,7 +79,7 @@ function computeLayout(db: MizuchiDb) {
       id: `${edge.v}->${edge.w}`,
       source: edge.v,
       target: edge.w,
-      style: { stroke: '#475569', strokeWidth: 1.5 },
+      style: { stroke: 'var(--color-slate-600)', strokeWidth: 1.5 },
       animated: false,
     });
   }
@@ -103,34 +104,36 @@ function CodeAtlasFlowInner({ db, activeFunctionId, pc }: CodeAtlasFlowInnerProp
   const [nodes, setNodes, onNodesChange] = useNodesState<CodeAtlasNodeType>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
-  // Set initial layout
+  // Set initial layout — wrapped in startTransition so dagre doesn't block the UI
   useEffect(() => {
-    setNodes(layoutResult.nodes);
-    setEdges(layoutResult.edges);
+    startTransition(() => {
+      setNodes(layoutResult.nodes);
+      setEdges(layoutResult.edges);
+    });
   }, [layoutResult, setNodes, setEdges]);
 
-  // Lightweight active-function + PC update — reuses references for unchanged nodes
+  // Only update the nodes that actually changed (old active → inactive, new active → active + pc)
+  const prevActiveRef = useRef<string | null>(null);
+
   useEffect(() => {
+    const prevId = prevActiveRef.current;
+    prevActiveRef.current = activeFunctionId;
+
     setNodes((prev) =>
       prev.map((node) => {
+        if (node.id !== activeFunctionId && node.id !== prevId) return node;
         const shouldBeActive = node.id === activeFunctionId;
-        if (node.data.isActive === shouldBeActive && (!shouldBeActive || node.data.pc === pc)) return node;
         return { ...node, data: { ...node.data, isActive: shouldBeActive, pc: shouldBeActive ? pc : node.data.pc } };
       }),
     );
     setEdges((prev) =>
       prev.map((edge) => {
+        if (edge.source !== activeFunctionId && edge.source !== prevId) return edge;
         const shouldAnimate = edge.source === activeFunctionId;
-        if (edge.animated === shouldAnimate) return edge;
         return { ...edge, animated: shouldAnimate };
       }),
     );
   }, [activeFunctionId, pc, setNodes, setEdges]);
-
-  // Track whether React Flow is initialized (getNode works only after init)
-  const initializedRef = useRef(false);
-  const activeFunctionIdRef = useRef(activeFunctionId);
-  activeFunctionIdRef.current = activeFunctionId;
 
   const centerOnActive = useCallback(
     (fnId: string) => {
@@ -145,19 +148,21 @@ function CodeAtlasFlowInner({ db, activeFunctionId, pc }: CodeAtlasFlowInnerProp
     [getNode, setCenter],
   );
 
-  // On init: center on the active function (handles paused-on-mount case)
-  const handleInit = useCallback(() => {
-    initializedRef.current = true;
-    if (activeFunctionIdRef.current) {
-      centerOnActive(activeFunctionIdRef.current);
-    }
-  }, [centerOnActive]);
+  // Center on active function — both on initial load and when it changes.
+  // Uses nodes.length to also trigger after the layout effect populates nodes
+  // (onInit fires too early, before nodes are set via startTransition).
+  const hasCenteredRef = useRef(false);
 
-  // Auto-center on active function when it changes (after init)
   useEffect(() => {
-    if (!initializedRef.current || !activeFunctionId) return;
+    if (!activeFunctionId || nodes.length === 0) return;
+    // On first mount, always center; after that, only when activeFunctionId changes
+    if (!hasCenteredRef.current) {
+      hasCenteredRef.current = true;
+      centerOnActive(activeFunctionId);
+      return;
+    }
     centerOnActive(activeFunctionId);
-  }, [activeFunctionId, centerOnActive]);
+  }, [activeFunctionId, nodes.length, centerOnActive]);
 
   return (
     <ReactFlow
@@ -166,8 +171,6 @@ function CodeAtlasFlowInner({ db, activeFunctionId, pc }: CodeAtlasFlowInnerProp
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       nodeTypes={nodeTypes}
-      onInit={handleInit}
-      onNodeClick={() => {}}
       onlyRenderVisibleElements
       nodesDraggable={false}
       nodesConnectable={false}

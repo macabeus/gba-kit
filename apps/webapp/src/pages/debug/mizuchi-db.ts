@@ -27,10 +27,15 @@ export interface MizuchiDb {
 
 // ─── Loading ────────────────────────────────────────────────────────
 
+const SUPPORTED_VERSION = 1;
+
 /** Strip fields the webapp doesn't need (vectors, indexMetadata). */
 function stripMizuchiDb(raw: Record<string, unknown>): MizuchiDb {
+  if (raw.version !== SUPPORTED_VERSION) {
+    throw new Error(`Unsupported mizuchi-db version: expected ${SUPPORTED_VERSION}, got ${raw.version}`);
+  }
   return {
-    version: raw.version as number,
+    version: raw.version,
     platform: raw.platform as string,
     decompFunctions: raw.decompFunctions as DecompFunction[],
   };
