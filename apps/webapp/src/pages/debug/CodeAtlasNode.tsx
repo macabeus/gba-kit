@@ -144,7 +144,12 @@ function CodeAtlasNodeInner({ data }: NodeProps<CodeAtlasNodeType>) {
         </div>
       </div>
 
-      <CollapsibleSection label="Assembly" pathLabel={fn.asmModulePath} open={asmOpen} onToggle={() => setAsmOpen(!asmOpen)}>
+      <CollapsibleSection
+        label="Assembly"
+        pathLabel={fn.asmModulePath}
+        open={asmOpen}
+        onToggle={() => setAsmOpen(!asmOpen)}
+      >
         <div className="nodrag nopan nowheel px-1 pb-2 overflow-auto max-h-[140px] font-mono text-[10px] leading-[1.5]">
           {asmLines.map((line, i) => {
             const isCurrent = i === activeLine;
