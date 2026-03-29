@@ -8,6 +8,7 @@ declare module '*.css' {}
 interface GbaKitConfig {
   serverBaseUrl: string;
   hasRom: boolean;
+  hasMizuchiDb: boolean;
 }
 
 interface Window {

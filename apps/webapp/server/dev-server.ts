@@ -16,18 +16,23 @@ async function main() {
   // Parse CLI args
   const args = process.argv.slice(2);
   let romPath: string | undefined;
+  let mizuchiDbPath: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--rom' && args[i + 1]) {
       romPath = path.resolve(args[i + 1]!);
       i++;
+    } else if (args[i] === '--mizuchi-db' && args[i + 1]) {
+      mizuchiDbPath = path.resolve(args[i + 1]!);
+      i++;
     }
   }
 
   const hasRom = !!romPath;
+  const hasMizuchiDb = !!mizuchiDbPath;
 
   // Start the API backend on port 3001
-  const apiApp = createServer({ romPath });
+  const apiApp = createServer({ romPath, mizuchiDbPath });
   const apiPort = 3001;
 
   await new Promise<void>((resolve) => {
@@ -43,6 +48,7 @@ async function main() {
         const config = JSON.stringify({
           serverBaseUrl: '',
           hasRom,
+          hasMizuchiDb,
         });
         const script = `<script>window.__GBAKIT_CONFIG__ = ${config};</script>`;
         return html.replace('</head>', `${script}\n</head>`);
@@ -65,6 +71,9 @@ async function main() {
   console.log(`  API:      http://localhost:${apiPort}/ (proxied via /api)`);
   if (romPath) {
     console.log(`  ROM:      ${romPath}`);
+  }
+  if (mizuchiDbPath) {
+    console.log(`  Mizuchi:  ${mizuchiDbPath}`);
   }
 }
 
