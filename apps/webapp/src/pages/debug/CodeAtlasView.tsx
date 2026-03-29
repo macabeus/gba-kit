@@ -28,6 +28,8 @@ interface CodeAtlasViewProps {
   hasMizuchiDb: boolean;
 }
 
+// Dagre space reservations — these control spacing between nodes in the layout,
+// not the rendered height (nodes size themselves based on content).
 const NODE_WIDTH = 380;
 const NODE_HEIGHT_BASE = 80;
 const NODE_HEIGHT_ASM = 200;
@@ -35,8 +37,11 @@ const NODE_HEIGHT_C = 320;
 
 const nodeTypes: NodeTypes = { codeAtlas: CodeAtlasNode };
 
+// ─── Layout computation ──────────────────────────────────────────────
+
 /** Compute dagre layout from the DB structure. Independent of active function. */
 function computeLayout(db: MizuchiDb) {
+  // Build the directed graph for dagre
   const g = new graphlib.Graph();
   g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 80, edgesep: 30 });
   g.setDefaultEdgeLabel(() => ({}));
@@ -58,6 +63,7 @@ function computeLayout(db: MizuchiDb) {
 
   layout(g);
 
+  // Convert dagre output to React Flow nodes and edges
   const nodes: CodeAtlasNodeType[] = [];
   for (const nodeId of g.nodes()) {
     const nodeData = g.node(nodeId);
@@ -87,32 +93,15 @@ function computeLayout(db: MizuchiDb) {
   return { nodes, edges };
 }
 
-// ─── Inner component (has access to useReactFlow) ────────────────────
+// ─── Hooks ───────────────────────────────────────────────────────────
 
-interface CodeAtlasFlowInnerProps {
-  db: MizuchiDb;
-  activeFunctionId: string | null;
-  pc: number;
-}
-
-function CodeAtlasFlowInner({ db, activeFunctionId, pc }: CodeAtlasFlowInnerProps) {
-  const { setCenter, getNode } = useReactFlow();
-
-  // Layout computed once when db loads — dagre never re-runs for active function changes
-  const layoutResult = useMemo(() => computeLayout(db), [db]);
-
-  const [nodes, setNodes, onNodesChange] = useNodesState<CodeAtlasNodeType>([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-
-  // Set initial layout — wrapped in startTransition so dagre doesn't block the UI
-  useEffect(() => {
-    startTransition(() => {
-      setNodes(layoutResult.nodes);
-      setEdges(layoutResult.edges);
-    });
-  }, [layoutResult, setNodes, setEdges]);
-
-  // Only update the nodes that actually changed (old active → inactive, new active → active + pc)
+/** Track which function is active and update only the affected nodes. */
+function useActiveFunction(
+  activeFunctionId: string | null,
+  pc: number,
+  setNodes: ReturnType<typeof useNodesState<CodeAtlasNodeType>>[1],
+  setEdges: ReturnType<typeof useEdgesState<Edge>>[1],
+) {
   const prevActiveRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -134,6 +123,11 @@ function CodeAtlasFlowInner({ db, activeFunctionId, pc }: CodeAtlasFlowInnerProp
       }),
     );
   }, [activeFunctionId, pc, setNodes, setEdges]);
+}
+
+/** Auto-center the viewport on the active function node. */
+function useCenterOnActiveFunction(activeFunctionId: string | null, nodesReady: boolean) {
+  const { setCenter, getNode } = useReactFlow();
 
   const centerOnActive = useCallback(
     (fnId: string) => {
@@ -148,21 +142,35 @@ function CodeAtlasFlowInner({ db, activeFunctionId, pc }: CodeAtlasFlowInnerProp
     [getNode, setCenter],
   );
 
-  // Center on active function — both on initial load and when it changes.
-  // Uses nodes.length to also trigger after the layout effect populates nodes
-  // (onInit fires too early, before nodes are set via startTransition).
-  const hasCenteredRef = useRef(false);
+  useEffect(() => {
+    if (!activeFunctionId || !nodesReady) return;
+    centerOnActive(activeFunctionId);
+  }, [activeFunctionId, nodesReady, centerOnActive]);
+}
+
+// ─── Inner component (has access to useReactFlow) ────────────────────
+
+interface CodeAtlasFlowInnerProps {
+  db: MizuchiDb;
+  activeFunctionId: string | null;
+  pc: number;
+}
+
+function CodeAtlasFlowInner({ db, activeFunctionId, pc }: CodeAtlasFlowInnerProps) {
+  const layoutResult = useMemo(() => computeLayout(db), [db]);
+
+  const [nodes, setNodes, onNodesChange] = useNodesState<CodeAtlasNodeType>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
   useEffect(() => {
-    if (!activeFunctionId || nodes.length === 0) return;
-    // On first mount, always center; after that, only when activeFunctionId changes
-    if (!hasCenteredRef.current) {
-      hasCenteredRef.current = true;
-      centerOnActive(activeFunctionId);
-      return;
-    }
-    centerOnActive(activeFunctionId);
-  }, [activeFunctionId, nodes.length, centerOnActive]);
+    startTransition(() => {
+      setNodes(layoutResult.nodes);
+      setEdges(layoutResult.edges);
+    });
+  }, [layoutResult, setNodes, setEdges]);
+
+  useActiveFunction(activeFunctionId, pc, setNodes, setEdges);
+  useCenterOnActiveFunction(activeFunctionId, nodes.length > 0);
 
   return (
     <ReactFlow
@@ -224,6 +232,8 @@ export function CodeAtlasView({ pc, hasMizuchiDb }: CodeAtlasViewProps) {
       setError(err instanceof Error ? err.message : 'Failed to load file');
     } finally {
       setLoading(false);
+      // Reset so re-selecting the same file triggers onChange again
+      e.target.value = '';
     }
   }, []);
 

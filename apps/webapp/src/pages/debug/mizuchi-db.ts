@@ -53,8 +53,8 @@ export async function fetchMizuchiDbFromServer(): Promise<MizuchiDb | null> {
   try {
     const res = await fetch('/api/mizuchiDb');
     if (!res.ok) return null;
-    const data = await res.json();
-    return data as MizuchiDb;
+    const raw = await res.json();
+    return stripMizuchiDb(raw);
   } catch {
     return null;
   }

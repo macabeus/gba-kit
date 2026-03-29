@@ -36,6 +36,7 @@ function computeActiveLine(asmCode: string, romAddress: number, pc: number): num
     const stripped = lines[i].trimStart();
     if (stripped === '') continue;
 
+    // Strip leading digits — these are objdiff label markers (e.g. "16ldrb"), not byte offsets
     const mnemonic = stripped.replace(/^\d+/, '').trimStart();
 
     let size: number;
@@ -58,6 +59,39 @@ function computeActiveLine(asmCode: string, romAddress: number, pc: number): num
   return null;
 }
 
+// ─── Collapsible section ─────────────────────────────────────────────
+
+function CollapsibleSection({
+  label,
+  pathLabel,
+  open,
+  onToggle,
+  children,
+}: {
+  label: string;
+  pathLabel?: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="border-b border-slate-700/60 last:border-b-0">
+      <button
+        type="button"
+        className="nodrag nopan w-full flex items-center gap-1 px-3 py-1 text-[10px] text-slate-400 hover:text-slate-300 transition-colors"
+        onClick={onToggle}
+      >
+        <span className={clsx('transition-transform', open && 'rotate-90')}>&#9656;</span>
+        {label}
+        {pathLabel && <span className="text-slate-600 ml-auto">{pathLabel}</span>}
+      </button>
+      {open && children}
+    </div>
+  );
+}
+
+// ─── Node component ──────────────────────────────────────────────────
+
 function CodeAtlasNodeInner({ data }: NodeProps<CodeAtlasNodeType>) {
   const { fn, isActive, pc } = data;
   const hasC = !!fn.cCode;
@@ -65,7 +99,6 @@ function CodeAtlasNodeInner({ data }: NodeProps<CodeAtlasNodeType>) {
   const [cOpen, setCOpen] = useState(isActive && hasC);
   const activeLineRef = useRef<HTMLDivElement>(null);
 
-  // Auto-expand when this node becomes the active function
   useEffect(() => {
     if (isActive) {
       setAsmOpen(true);
@@ -78,7 +111,6 @@ function CodeAtlasNodeInner({ data }: NodeProps<CodeAtlasNodeType>) {
     return computeActiveLine(fn.asmCode, fn.romAddress, pc);
   }, [isActive, fn.romAddress, fn.asmCode, pc]);
 
-  // Auto-scroll to the active line
   useEffect(() => {
     if (activeLine !== null && activeLineRef.current) {
       activeLineRef.current.scrollIntoView({ block: 'nearest' });
@@ -112,52 +144,29 @@ function CodeAtlasNodeInner({ data }: NodeProps<CodeAtlasNodeType>) {
         </div>
       </div>
 
-      {/* Assembly section */}
-      <div className="border-b border-slate-700/60">
-        <button
-          type="button"
-          className="nodrag nopan w-full flex items-center gap-1 px-3 py-1 text-[10px] text-slate-400 hover:text-slate-300 transition-colors"
-          onClick={() => setAsmOpen(!asmOpen)}
-        >
-          <span className={clsx('transition-transform', asmOpen && 'rotate-90')}>&#9656;</span>
-          Assembly
-          <span className="text-slate-600 ml-auto">{fn.asmModulePath}</span>
-        </button>
-        {asmOpen && (
-          <div className="nodrag nopan nowheel px-1 pb-2 overflow-auto max-h-[140px] font-mono text-[10px] leading-[1.5]">
-            {asmLines.map((line, i) => {
-              const isCurrent = i === activeLine;
-              return (
-                <div
-                  key={i}
-                  ref={isCurrent ? activeLineRef : undefined}
-                  className={clsx('px-2 whitespace-pre', isCurrent ? 'bg-sky-500/20 text-sky-200' : 'text-slate-300')}
-                >
-                  {line || '\u00A0'}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* C Code section */}
-      {hasC && (
-        <div>
-          <button
-            type="button"
-            className="nodrag nopan w-full flex items-center gap-1 px-3 py-1 text-[10px] text-slate-400 hover:text-slate-300 transition-colors"
-            onClick={() => setCOpen(!cOpen)}
-          >
-            <span className={clsx('transition-transform', cOpen && 'rotate-90')}>&#9656;</span>C Code
-            <span className="text-slate-600 ml-auto">{fn.cModulePath}</span>
-          </button>
-          {cOpen && (
-            <pre className="nodrag nopan nowheel px-3 pb-2 text-[10px] leading-[1.5] text-green-300/80 font-mono overflow-auto max-h-[140px] whitespace-pre">
-              {fn.cCode}
-            </pre>
-          )}
+      <CollapsibleSection label="Assembly" pathLabel={fn.asmModulePath} open={asmOpen} onToggle={() => setAsmOpen(!asmOpen)}>
+        <div className="nodrag nopan nowheel px-1 pb-2 overflow-auto max-h-[140px] font-mono text-[10px] leading-[1.5]">
+          {asmLines.map((line, i) => {
+            const isCurrent = i === activeLine;
+            return (
+              <div
+                key={i}
+                ref={isCurrent ? activeLineRef : undefined}
+                className={clsx('px-2 whitespace-pre', isCurrent ? 'bg-sky-500/20 text-sky-200' : 'text-slate-300')}
+              >
+                {line || '\u00A0'}
+              </div>
+            );
+          })}
         </div>
+      </CollapsibleSection>
+
+      {hasC && (
+        <CollapsibleSection label="C Code" pathLabel={fn.cModulePath} open={cOpen} onToggle={() => setCOpen(!cOpen)}>
+          <pre className="nodrag nopan nowheel px-3 pb-2 text-[10px] leading-[1.5] text-green-300/80 font-mono overflow-auto max-h-[140px] whitespace-pre">
+            {fn.cCode}
+          </pre>
+        </CollapsibleSection>
       )}
 
       <Handle type="source" position={Position.Bottom} className="!bg-slate-500 !w-2 !h-2 !border-0" />
