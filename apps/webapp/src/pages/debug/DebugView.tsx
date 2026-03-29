@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { BreakpointPanel } from './BreakpointPanel';
+import { CodeAtlasView } from './CodeAtlasView';
 import { DisassemblyView } from './DisassemblyView';
 import { IoRegisterView } from './IoRegisterView';
 import { MemoryViewer } from './MemoryViewer';
@@ -18,10 +19,12 @@ interface DebugViewProps {
   onStepOver: () => void;
 }
 
+type CenterPanel = 'disassembly' | 'code-atlas';
 type BottomRightPanel = 'breakpoints' | 'io-registers';
 
 export function DebugView({ emulator, emuState, onRun, onPause, onStep, onStepOver }: DebugViewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [centerPanel, setCenterPanel] = useState<CenterPanel>('disassembly');
   const [bottomRightPanel, setBottomRightPanel] = useState<BottomRightPanel>('breakpoints');
   const [breakpointVersion, setBreakpointVersion] = useState(0);
   const bumpBreakpoints = useCallback(() => setBreakpointVersion((v) => v + 1), []);
@@ -118,14 +121,32 @@ export function DebugView({ emulator, emuState, onRun, onPause, onStep, onStepOv
           <ScreenView canvasRef={canvasRef} />
         </div>
 
-        {/* Top-center: Disassembly */}
-        <div className="row-span-2 min-h-0">
-          <DisassemblyView
-            emulator={emulator}
-            pc={pc}
-            breakpointVersion={breakpointVersion}
-            onBreakpointChange={bumpBreakpoints}
-          />
+        {/* Top-center: Disassembly / Code Atlas */}
+        <div className="row-span-2 min-h-0 flex flex-col">
+          <div className="flex gap-1 mb-1">
+            <PanelTab
+              label="Disassembly"
+              active={centerPanel === 'disassembly'}
+              onClick={() => setCenterPanel('disassembly')}
+            />
+            <PanelTab
+              label="Code Atlas"
+              active={centerPanel === 'code-atlas'}
+              onClick={() => setCenterPanel('code-atlas')}
+            />
+          </div>
+          <div className="flex-1 min-h-0">
+            {centerPanel === 'disassembly' ? (
+              <DisassemblyView
+                emulator={emulator}
+                pc={pc}
+                breakpointVersion={breakpointVersion}
+                onBreakpointChange={bumpBreakpoints}
+              />
+            ) : (
+              <CodeAtlasView pc={pc} hasMizuchiDb={window.__GBAKIT_CONFIG__?.hasMizuchiDb ?? false} />
+            )}
+          </div>
         </div>
 
         {/* Top-right: Registers */}
