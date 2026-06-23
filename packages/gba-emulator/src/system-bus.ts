@@ -142,19 +142,28 @@ export class GbaSystemBus implements MemoryBus {
     this.#watchpoints.length = 0;
   }
 
+  /** Whether any data watchpoint is currently registered (cheap hot-path gate). */
+  hasWatchpoints(): boolean {
+    return this.#watchpoints.length > 0;
+  }
+
   /**
    * Notify any watchpoints overlapping a *committed* write of `value` (already
-   * masked to `size` bytes) at aligned base `base`. Hot-path: early-out when no
-   * watchpoints. Iterates a snapshot so a callback may dispose/clear safely.
+   * masked to `size` bytes) at the canonical aligned base `base`. Hot-path:
+   * early-out when no watchpoints, and avoid allocating in the common
+   * single-watchpoint case; only snapshot when several exist (so a callback may
+   * dispose/clear mid-notify without corrupting iteration).
    */
   #notifyWrite(base: number, value: number, size: number): void {
-    if (this.#watchpoints.length === 0) {
+    const wps = this.#watchpoints;
+    if (wps.length === 0) {
       return;
     }
     const lo = base >>> 0;
     const hi = (lo + size) >>> 0;
     const source = this.#writeSource;
-    for (const wp of this.#watchpoints.slice()) {
+    const list = wps.length === 1 ? wps : wps.slice();
+    for (const wp of list) {
       if (lo < wp.end && hi > wp.start) {
         // Report the specific watched byte within the access, not the access base.
         const address = (lo > wp.start ? lo : wp.start) >>> 0;
@@ -405,7 +414,7 @@ export class GbaSystemBus implements MemoryBus {
         break;
     }
     if (committed) {
-      this.#notifyWrite(address, value & 0xff, 1);
+      this.#notifyWrite(this.#canonicalWriteAddress(address), value & 0xff, 1);
     }
   }
 
@@ -433,8 +442,10 @@ export class GbaSystemBus implements MemoryBus {
         this.#write16To(this.oam, addr & 0x3ff, value);
         break;
       case 0x0d:
-        // EEPROM serial write — only bit 0 matters
+        // EEPROM serial write — only bit 0 matters; a serial port, no addressable
+        // byte, so it produces no watchpoint hit.
         this.#eeprom.write(value & 1);
+        committed = false;
         break;
       case 0x0e:
       case 0x0f:
@@ -451,7 +462,7 @@ export class GbaSystemBus implements MemoryBus {
         break;
     }
     if (committed) {
-      this.#notifyWrite(addr, value & 0xffff, 2);
+      this.#notifyWrite(this.#canonicalWriteAddress(addr), value & 0xffff, 2);
     }
   }
 
@@ -479,8 +490,9 @@ export class GbaSystemBus implements MemoryBus {
         this.#write32To(this.oam, addr & 0x3ff, value);
         break;
       case 0x0d:
-        // EEPROM serial write
+        // EEPROM serial write — a serial port, no addressable byte, so no hit.
         this.#eeprom.write(value & 1);
+        committed = false;
         break;
       case 0x0e:
       case 0x0f:
@@ -497,7 +509,7 @@ export class GbaSystemBus implements MemoryBus {
         break;
     }
     if (committed) {
-      this.#notifyWrite(addr, value >>> 0, 4);
+      this.#notifyWrite(this.#canonicalWriteAddress(addr), value >>> 0, 4);
     }
   }
 
@@ -549,6 +561,32 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   // ─── VRAM Mirroring ───────────────────────────────────────────────
+
+  /**
+   * Map a write address to the canonical (un-mirrored) address of the physical
+   * byte it stores to, mirroring the offset masks used by the storage paths.
+   * Watchpoints are registered on canonical addresses, so writes that reach the
+   * same byte through a region mirror still match.
+   */
+  #canonicalWriteAddress(address: number): number {
+    switch ((address >>> 24) & 0xff) {
+      case 0x02:
+        return (0x02000000 | (address & 0x3ffff)) >>> 0;
+      case 0x03:
+        return (0x03000000 | (address & 0x7fff)) >>> 0;
+      case 0x05:
+        return (0x05000000 | (address & 0x3ff)) >>> 0;
+      case 0x06:
+        return (0x06000000 | this.#mirrorVram(address)) >>> 0;
+      case 0x07:
+        return (0x07000000 | (address & 0x3ff)) >>> 0;
+      case 0x0e:
+      case 0x0f:
+        return (0x0e000000 | (address & 0xffff)) >>> 0;
+      default:
+        return address >>> 0;
+    }
+  }
 
   #mirrorVram(address: number): number {
     let offset = address & 0x1ffff;

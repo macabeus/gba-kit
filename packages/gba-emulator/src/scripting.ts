@@ -10,6 +10,7 @@ import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassem
 import { Gba } from './gba.js';
 import type { CpuSnapshot, GbaSnapshot } from './savestate.js';
 import { GbaButton } from './types.js';
+import { captureOrigin } from './write-source.js';
 
 // ─── ScriptingHost Interface ─────────────────────────────────────────
 
@@ -450,24 +451,21 @@ export class ScriptingEngine {
       if (maxHits !== undefined && hits.length >= maxHits) {
         return;
       }
-      let pc: number;
-      let instructionAddress: number;
-      let thumb: boolean;
-      let sourceLabel: WatchHit['source'];
-      if (source.kind === 'dma') {
-        pc = source.origin.pc;
-        instructionAddress = source.origin.instructionAddress;
-        thumb = source.origin.thumb;
-        sourceLabel = `dma${source.channel}` as WatchHit['source'];
-      } else {
-        // cpu (and HLE-BIOS, which runs inside a SWI): read Thumb state straight
-        // from the CPU so attribution is correct even if cpuCpsr wasn't wired.
-        pc = this.#gba.armCpu.registers[15]! >>> 0;
-        thumb = (this.#gba.armCpu.cpsr & 0x20) !== 0;
-        instructionAddress = (pc - (thumb ? 2 : 4)) >>> 0;
-        sourceLabel = 'cpu';
-      }
-      const hit: WatchHit = { pc, instructionAddress, address, value: value >>> 0, size, thumb, source: sourceLabel };
+      // For DMA, use the captured trigger instruction. For CPU (and HLE-BIOS,
+      // which runs inside a SWI), read the live PC + CPSR straight from the CPU,
+      // so attribution is correct even if the cpuCpsr callback wasn't wired.
+      const origin =
+        source.kind === 'dma' ? source.origin : captureOrigin(this.#gba.armCpu.registers[15]!, this.#gba.armCpu.cpsr);
+      const sourceLabel: WatchHit['source'] = source.kind === 'dma' ? (`dma${source.channel}` as WatchHit['source']) : 'cpu';
+      const hit: WatchHit = {
+        pc: origin.pc,
+        instructionAddress: origin.instructionAddress,
+        address,
+        value: value >>> 0,
+        size,
+        thumb: origin.thumb,
+        source: sourceLabel,
+      };
       if (filter) {
         let keep = false;
         try {

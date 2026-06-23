@@ -57,6 +57,8 @@ export interface DmaMemoryAccess {
   write32(address: number, value: number): void;
   /** Current CPU location (used to attribute the DMA's origin). Optional. */
   getOrigin?(): WriteOrigin;
+  /** Whether any data watchpoint is set — lets DMA skip source-tagging work when unused. Optional. */
+  hasWatchpoints?(): boolean;
   /** Run `fn` with writes attributed to `source` (for data watchpoints). Optional. */
   withSource?<T>(source: WriteSource, fn: () => T): T;
 }
@@ -192,13 +194,15 @@ export class DmaController {
 
   /** Run `fn` with this channel's writes attributed to its DMA source (for watchpoints). */
   #withChannelSource(index: number, fn: () => void): void {
-    const withSource = this.#memory?.withSource;
-    if (!withSource) {
+    const mem = this.#memory;
+    // Skip the source object + closure wrapping entirely when no watchpoint is set
+    // (the common case): DMA fires constantly, this keeps it allocation-free.
+    if (!mem?.withSource || (mem.hasWatchpoints && !mem.hasWatchpoints())) {
       fn();
       return;
     }
     const source: WriteSource = { kind: 'dma', channel: index, origin: this.#channels[index]!.startOrigin };
-    withSource(source, fn);
+    mem.withSource(source, fn);
   }
 
   #executeTransfer(index: number): void {

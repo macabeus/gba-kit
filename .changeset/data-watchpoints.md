@@ -21,3 +21,8 @@ Thumb state is read straight from the CPU (so attribution is correct even withou
 optional `cpuCpsr` wiring). `watchMemory` also takes `maxHits` to cap recorded hits
 (unbounded growth guard for wide/long watches), and `clearWatchpoints()` removes only the
 watchpoints created via that engine, leaving any others intact.
+
+Writes are matched on their canonical address, so a write reaching a watched byte through
+a region mirror (EWRAM/IWRAM/palette/OAM/VRAM) still fires. EEPROM serial writes no longer
+produce spurious hits. The hot path avoids allocating in the common single-watchpoint case,
+and DMA skips its source-tagging work entirely when no watchpoint is set.

@@ -91,6 +91,27 @@ describe('GbaSystemBus write watchpoints', () => {
     expect(order).toEqual(['a', 'b']);
   });
 
+  it('matches writes that reach the watched byte through a region mirror', () => {
+    const bus = new GbaSystemBus();
+    const hits: number[] = [];
+    bus.addWriteWatchpoint(0x05000010, 2, (info) => hits.push(info.address)); // canonical palette addr
+
+    bus.write16(0x05000010, 0x1111); // direct
+    bus.write16(0x05000410, 0x2222); // palette mirror (offset & 0x3ff) -> same physical byte
+
+    expect(hits).toEqual([0x05000010, 0x05000010]); // both report the canonical address
+  });
+
+  it('does NOT fire for EEPROM serial writes (no addressable byte)', () => {
+    const bus = new GbaSystemBus();
+    let count = 0;
+    bus.addWriteWatchpoint(0x0d000000, 4, () => count++);
+
+    bus.write16(0x0d000000, 1);
+    bus.write32(0x0d000000, 1);
+    expect(count).toBe(0);
+  });
+
   it('attributes DMA writes to a dma source with the channel and start origin', () => {
     const bus = new GbaSystemBus();
     const hits: WriteSource[] = [];
@@ -135,6 +156,20 @@ describe('GbaSystemBus write watchpoints', () => {
       origin: { pc: 0x08001236, instructionAddress: 0x08001234, thumb: true },
     });
     expect(hits[0]!.value).toBe(0xbeef);
+  });
+
+  it('still performs the DMA copy when no watchpoint is set (source-tag work is skipped)', () => {
+    const gba = new Gba();
+    const bus = gba.bus;
+    expect(bus.hasWatchpoints()).toBe(false);
+
+    bus.write16(0x02000000, 0xcafe);
+    bus.write32(0x040000d4, 0x02000000); // DMA3SAD
+    bus.write32(0x040000d8, 0x02000100); // DMA3DAD
+    bus.write16(0x040000dc, 1);
+    bus.write16(0x040000de, 0x8000); // enable immediate
+
+    expect(bus.read16(0x02000100)).toBe(0xcafe); // copy still happens
   });
 });
 

@@ -17,6 +17,7 @@ import type { GbaSnapshot } from './savestate.js';
 import { Scheduler } from './scheduler.js';
 import { GbaSystemBus } from './system-bus.js';
 import { TimerController } from './timers.js';
+import { captureOrigin } from './write-source.js';
 import {
   CYCLES_PER_FRAME,
   CYCLES_PER_SCANLINE,
@@ -97,11 +98,9 @@ export class Gba {
       write32: (addr, val) => this.bus.write32(addr, val),
       // For data watchpoints: attribute DMA writes to the channel + the instruction
       // that started it (armCpu is created just below; only invoked later, during DMA).
-      getOrigin: () => {
-        const pc = this.armCpu.registers[15]! >>> 0;
-        const thumb = (this.armCpu.cpsr & 0x20) !== 0;
-        return { pc, instructionAddress: (pc - (thumb ? 2 : 4)) >>> 0, thumb };
-      },
+      getOrigin: () => captureOrigin(this.armCpu.registers[15]!, this.armCpu.cpsr),
+      // Only wrap a transfer's writes when a watchpoint actually exists.
+      hasWatchpoints: () => this.bus.hasWatchpoints(),
       withSource: (source, fn) => this.bus.runWithWriteSource(source, fn),
     });
 
