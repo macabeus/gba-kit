@@ -288,20 +288,25 @@ searchMemory({ value: 3, region: 'both' }); // Both (default)
 
 ### `watchMemory(options)` — Data Watchpoint (find _which code_ writes an address)
 
-Registers a write watchpoint over a memory range. Every time the CPU (or DMA) writes the range, a hit is appended to the returned handle's `hits` array, recording the **program counter** — i.e. which code performed the write.
+Registers a write watchpoint over a memory range. Every time a write **commits** to the range, a hit is appended to the returned handle's `hits` array, recording **which code performed the write** — a CPU instruction, or a DMA channel.
 
 ```javascript
 const w = watchMemory({ address: 0x03005220 }); // watch 1 byte
 await press('right', { hold: 30 }); // make the value change
 w.stop(); // remove the watchpoint
 for (const h of w.hits) {
-  // h.instructionAddress is the writing instruction (pc-2 in Thumb, pc-4 in ARM)
+  // h.instructionAddress is the responsible instruction (pc-2 in Thumb, pc-4 in ARM)
   const dis = disassemble(h.instructionAddress, 1, h.thumb ? 'thumb' : 'arm')[0];
-  console.log(`value ${h.value} written by 0x${h.instructionAddress.toString(16)}: ${dis.instruction}`);
+  console.log(`${h.source} wrote ${h.value} at 0x${h.instructionAddress.toString(16)}: ${dis.instruction}`);
 }
 ```
 
-Each hit has: `pc`, `instructionAddress`, `address`, `value`, `size`, `thumb`.
+Each hit has: `pc`, `instructionAddress`, `address`, `value`, `size`, `thumb`, `source`.
+
+- `source` is `'cpu'` or `'dma0'`..`'dma3'`.
+- For a **DMA** write, `instructionAddress` is the instruction that _started_ the DMA (the store to `DMAxCNT_H`) — the per-word copies have no instruction of their own. So a watchpoint on a DMA-filled buffer (VRAM, palette, OAM…) points you at the code that kicked off the copy, e.g. a decompress-to-VRAM routine.
+- `address` is the specific watched byte that changed (clamped into the range, even when a wide store straddles it); `value` is masked to `size`.
+- Writes the hardware ignores (8-bit writes to OAM / OBJ-VRAM, writes to ROM) do **not** produce hits.
 
 **Options:**
 

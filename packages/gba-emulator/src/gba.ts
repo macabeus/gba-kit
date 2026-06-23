@@ -95,6 +95,14 @@ export class Gba {
       read32: (addr) => this.bus.read32(addr),
       write16: (addr, val) => this.bus.write16(addr, val),
       write32: (addr, val) => this.bus.write32(addr, val),
+      // For data watchpoints: attribute DMA writes to the channel + the instruction
+      // that started it (armCpu is created just below; only invoked later, during DMA).
+      getOrigin: () => {
+        const pc = this.armCpu.registers[15]! >>> 0;
+        const thumb = (this.armCpu.cpsr & 0x20) !== 0;
+        return { pc, instructionAddress: (pc - (thumb ? 2 : 4)) >>> 0, thumb };
+      },
+      withSource: (source, fn) => this.bus.runWithWriteSource(source, fn),
     });
 
     // Create CPU with GBA BIOS SWI handler

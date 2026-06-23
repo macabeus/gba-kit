@@ -9,6 +9,7 @@ import type { InterruptController } from './interrupts.js';
 import type { DmaSnapshot } from './savestate.js';
 import type { Scheduler } from './scheduler.js';
 import { DmaAddrControl, DmaStartTiming, EventId, IrqFlag } from './types.js';
+import type { WriteOrigin, WriteSource } from './write-source.js';
 
 /** State for a single DMA channel */
 interface DmaChannel {
@@ -38,7 +39,15 @@ interface DmaChannel {
   irqEnable: boolean;
   /** DMA enabled */
   enabled: boolean;
+  /**
+   * CPU location captured when this channel was last enabled (the instruction
+   * that started the DMA). Reported to data watchpoints as the origin of DMA
+   * writes, since the per-word copies don't belong to any single instruction.
+   */
+  startOrigin: WriteOrigin;
 }
+
+const ZERO_ORIGIN: WriteOrigin = { pc: 0, instructionAddress: 0, thumb: false };
 
 /** Memory read/write functions injected from the system bus */
 export interface DmaMemoryAccess {
@@ -46,6 +55,10 @@ export interface DmaMemoryAccess {
   read32(address: number): number;
   write16(address: number, value: number): void;
   write32(address: number, value: number): void;
+  /** Current CPU location (used to attribute the DMA's origin). Optional. */
+  getOrigin?(): WriteOrigin;
+  /** Run `fn` with writes attributed to `source` (for data watchpoints). Optional. */
+  withSource?<T>(source: WriteSource, fn: () => T): T;
 }
 
 const DMA_EVENT_IDS = [EventId.Dma0, EventId.Dma1, EventId.Dma2, EventId.Dma3] as const;
@@ -76,6 +89,7 @@ export class DmaController {
         startTiming: DmaStartTiming.Immediately,
         irqEnable: false,
         enabled: false,
+        startOrigin: ZERO_ORIGIN,
       });
     }
   }
@@ -131,6 +145,10 @@ export class DmaController {
     ch.enabled = (value & (1 << 15)) !== 0;
 
     if (ch.enabled) {
+      // Capture the PC of the code that started this DMA (this control write runs
+      // mid-instruction, so registers[15] is the trigger). Reported to watchpoints
+      // as the origin of the channel's writes, including later scheduled/timed ones.
+      ch.startOrigin = this.#memory?.getOrigin?.() ?? ZERO_ORIGIN;
       // (Re-)enabling DMA always reloads addresses and word count from latches,
       // whether transitioning from disabled→enabled OR re-writing while enabled.
       // Real GBA hardware reloads on any control write with enable=1.
@@ -172,44 +190,61 @@ export class DmaController {
     });
   }
 
+  /** Run `fn` with this channel's writes attributed to its DMA source (for watchpoints). */
+  #withChannelSource(index: number, fn: () => void): void {
+    const withSource = this.#memory?.withSource;
+    if (!withSource) {
+      fn();
+      return;
+    }
+    const source: WriteSource = { kind: 'dma', channel: index, origin: this.#channels[index]!.startOrigin };
+    withSource(source, fn);
+  }
+
   #executeTransfer(index: number): void {
-    if (!this.#memory) {
+    const memory = this.#memory;
+    if (!memory) {
       return;
     }
     const ch = this.#channels[index]!;
     const step = ch.wordSize ? 4 : 2;
 
-    for (let i = 0; i < ch.wordCount; i++) {
-      if (ch.wordSize) {
-        const value = this.#memory.read32(ch.srcAddr);
-        this.#memory.write32(ch.dstAddr, value);
-      } else {
-        const value = this.#memory.read16(ch.srcAddr);
-        this.#memory.write16(ch.dstAddr, value);
-      }
+    this.#withChannelSource(index, () => {
+      for (let i = 0; i < ch.wordCount; i++) {
+        if (ch.wordSize) {
+          const value = memory.read32(ch.srcAddr);
+          memory.write32(ch.dstAddr, value);
+        } else {
+          const value = memory.read16(ch.srcAddr);
+          memory.write16(ch.dstAddr, value);
+        }
 
-      // Update source address
-      ch.srcAddr = this.#updateAddr(ch.srcAddr, ch.srcControl, step);
-      // Update destination address
-      ch.dstAddr = this.#updateAddr(ch.dstAddr, ch.dstControl, step);
-    }
+        // Update source address
+        ch.srcAddr = this.#updateAddr(ch.srcAddr, ch.srcControl, step);
+        // Update destination address
+        ch.dstAddr = this.#updateAddr(ch.dstAddr, ch.dstControl, step);
+      }
+    });
 
     this.#onTransferComplete(index);
   }
 
   /** Special FIFO transfer: always 4 words of 32-bit, destination fixed */
   #executeFifoTransfer(index: number): void {
-    if (!this.#memory) {
+    const memory = this.#memory;
+    if (!memory) {
       return;
     }
     const ch = this.#channels[index]!;
 
-    for (let i = 0; i < 4; i++) {
-      const value = this.#memory.read32(ch.srcAddr);
-      this.#memory.write32(ch.dstAddr, value);
-      ch.srcAddr = this.#updateAddr(ch.srcAddr, ch.srcControl, 4);
-      // Destination fixed for FIFO
-    }
+    this.#withChannelSource(index, () => {
+      for (let i = 0; i < 4; i++) {
+        const value = memory.read32(ch.srcAddr);
+        memory.write32(ch.dstAddr, value);
+        ch.srcAddr = this.#updateAddr(ch.srcAddr, ch.srcControl, 4);
+        // Destination fixed for FIFO
+      }
+    });
 
     // FIFO DMA always repeats — don't disable
     if (ch.irqEnable) {

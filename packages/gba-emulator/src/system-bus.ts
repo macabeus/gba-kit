@@ -24,6 +24,19 @@ import type { InterruptController } from './interrupts.js';
 import type { EepromSnapshot, SystemBusSnapshot } from './savestate.js';
 import type { TimerController } from './timers.js';
 import { MMIO } from './types.js';
+import { CPU_WRITE_SOURCE, type WriteSource } from './write-source.js';
+
+/** A committed write reported to a data watchpoint. */
+export interface WatchpointWrite {
+  /** The watched byte that was written (within the access, clamped to the watch range). */
+  address: number;
+  /** Value committed, masked to `size` bytes. */
+  value: number;
+  /** Access size in bytes (1, 2 or 4). */
+  size: number;
+  /** What performed the write (CPU instruction, a DMA channel, or HLE BIOS). */
+  source: WriteSource;
+}
 
 export class GbaSystemBus implements MemoryBus {
   /** BIOS ROM (16 KB) — set via loadBios() */
@@ -79,31 +92,46 @@ export class GbaSystemBus implements MemoryBus {
   onBgRefPointWrite?: (bgIndex: 2 | 3, isX: boolean) => void;
 
   /**
-   * Data watchpoints. Each fires its callback whenever a CPU/DMA write touches
-   * the byte range [start, start+length). Used to discover *which code* writes a
-   * given RAM address (reverse-engineering / decomp assist). Kept empty by
-   * default so the write fast-path pays nothing until a watchpoint is set.
+   * Data watchpoints. Each fires its callback whenever a write *commits* to a
+   * byte in the range [start, end). Used to discover *which code* writes a given
+   * address (reverse-engineering / decomp assist). Kept empty by default so the
+   * write fast-path pays nothing until a watchpoint is set.
    */
   readonly #watchpoints: Array<{
     start: number;
     end: number;
-    onWrite: (info: { address: number; value: number; size: number }) => void;
+    onWrite: (info: WatchpointWrite) => void;
   }> = [];
+
+  /** Attribution for the write currently in flight (CPU unless a DMA/BIOS sets it). */
+  #writeSource: WriteSource = CPU_WRITE_SOURCE;
+
+  /**
+   * Run `fn` with every committed write attributed to `source` (for watchpoints).
+   * Restores the previous source afterwards, so nested/immediate DMA is safe.
+   */
+  runWithWriteSource<T>(source: WriteSource, fn: () => T): T {
+    const prev = this.#writeSource;
+    this.#writeSource = source;
+    try {
+      return fn();
+    } finally {
+      this.#writeSource = prev;
+    }
+  }
 
   /**
    * Register a write watchpoint over [address, address+length). Returns a
-   * disposer that removes it.
+   * disposer that removes it. A length < 1 is clamped to 1 so the start byte is
+   * always watched (rather than silently matching nothing).
    */
-  addWriteWatchpoint(
-    address: number,
-    length: number,
-    onWrite: (info: { address: number; value: number; size: number }) => void,
-  ): () => void {
-    const wp = { start: address >>> 0, end: (address + length) >>> 0, onWrite };
+  addWriteWatchpoint(address: number, length: number, onWrite: (info: WatchpointWrite) => void): () => void {
+    const len = length >= 1 ? length : 1;
+    const wp = { start: address >>> 0, end: (address + len) >>> 0, onWrite };
     this.#watchpoints.push(wp);
     return () => {
       const i = this.#watchpoints.indexOf(wp);
-      if (i >= 0) this.#watchpoints.splice(i, 1);
+      if (i >= 0) {this.#watchpoints.splice(i, 1);}
     };
   }
 
@@ -112,14 +140,21 @@ export class GbaSystemBus implements MemoryBus {
     this.#watchpoints.length = 0;
   }
 
-  /** Notify any watchpoints overlapping the written range. Hot-path: early-out when none. */
-  #notifyWrite(address: number, value: number, size: number): void {
-    if (this.#watchpoints.length === 0) return;
-    const lo = address >>> 0;
-    const hi = (address + size) >>> 0;
-    for (const wp of this.#watchpoints) {
+  /**
+   * Notify any watchpoints overlapping a *committed* write of `value` (already
+   * masked to `size` bytes) at aligned base `base`. Hot-path: early-out when no
+   * watchpoints. Iterates a snapshot so a callback may dispose/clear safely.
+   */
+  #notifyWrite(base: number, value: number, size: number): void {
+    if (this.#watchpoints.length === 0) {return;}
+    const lo = base >>> 0;
+    const hi = (lo + size) >>> 0;
+    const source = this.#writeSource;
+    for (const wp of this.#watchpoints.slice()) {
       if (lo < wp.end && hi > wp.start) {
-        wp.onWrite({ address: lo, value, size });
+        // Report the specific watched byte within the access, not the access base.
+        const address = (lo > wp.start ? lo : wp.start) >>> 0;
+        wp.onWrite({ address, value, size, source });
       }
     }
   }
@@ -314,8 +349,8 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   write8(address: number, value: number): void {
-    this.#notifyWrite(address, value, 1);
     const region = (address >>> 24) & 0xff;
+    let committed = true;
     switch (region) {
       case 0x02:
         this.ewram[address & 0x3ffff] = value;
@@ -344,27 +379,34 @@ export class GbaSystemBus implements MemoryBus {
           // OBJ boundary: 0x10000 in tile modes (0-2), 0x14000 in bitmap modes (3-5)
           const objBoundary = mode >= 3 ? 0x14000 : 0x10000;
           if (a >= objBoundary) {
-            break; // Ignore 8-bit writes to OBJ VRAM
+            committed = false; // Ignore 8-bit writes to OBJ VRAM
+            break;
           }
           const aligned = a & ~1;
           this.vram[aligned] = value;
           this.vram[aligned + 1] = value;
         }
         break;
-      // OAM ignores 8-bit writes
       case 0x0e:
       case 0x0f:
         if (this.#hasSram) {
           this.sram[address & 0xffff] = value;
+        } else {
+          committed = false;
         }
         break;
+      // OAM (0x07) ignores 8-bit writes; ROM/BIOS/unmapped regions are read-only.
+      default:
+        committed = false;
+        break;
     }
+    if (committed) {this.#notifyWrite(address, value & 0xff, 1);}
   }
 
   write16(address: number, value: number): void {
     const addr = address & ~1;
-    this.#notifyWrite(addr, value, 2);
     const region = (addr >>> 24) & 0xff;
+    let committed = true;
     switch (region) {
       case 0x02:
         this.#write16To(this.ewram, addr & 0x3ffff, value);
@@ -393,15 +435,22 @@ export class GbaSystemBus implements MemoryBus {
         if (this.#hasSram) {
           // SRAM has 8-bit bus: wider writes only write the low byte
           this.sram[address & 0xffff] = value & 0xff;
+        } else {
+          committed = false;
         }
         break;
+      // ROM/BIOS/unmapped regions are read-only.
+      default:
+        committed = false;
+        break;
     }
+    if (committed) {this.#notifyWrite(addr, value & 0xffff, 2);}
   }
 
   write32(address: number, value: number): void {
     const addr = address & ~3;
-    this.#notifyWrite(addr, value, 4);
     const region = (addr >>> 24) & 0xff;
+    let committed = true;
     switch (region) {
       case 0x02:
         this.#write32To(this.ewram, addr & 0x3ffff, value);
@@ -430,9 +479,16 @@ export class GbaSystemBus implements MemoryBus {
         if (this.#hasSram) {
           // SRAM has 8-bit bus: wider writes only write the low byte
           this.sram[address & 0xffff] = value & 0xff;
+        } else {
+          committed = false;
         }
         break;
+      // ROM/BIOS/unmapped regions are read-only.
+      default:
+        committed = false;
+        break;
     }
+    if (committed) {this.#notifyWrite(addr, value >>> 0, 4);}
   }
 
   // ─── BIOS Access ──────────────────────────────────────────────────

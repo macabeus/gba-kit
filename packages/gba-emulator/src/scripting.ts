@@ -127,18 +127,27 @@ interface RecordingState {
 
 /** A single recorded write captured by a data watchpoint. */
 export interface WatchHit {
-  /** CPU PC at the moment of the write (pipeline-ahead of the instruction). */
+  /**
+   * CPU PC (pipeline-ahead of the instruction). For a `dma*` source this is the
+   * PC at the moment the DMA was started, not a per-word write.
+   */
   pc: number;
-  /** Address of the writing instruction (pc-2 in Thumb, pc-4 in ARM). */
+  /**
+   * Address of the responsible instruction (`pc-2` in Thumb, `pc-4` in ARM).
+   * For a `dma*` source this is the instruction that *started* the DMA (the store
+   * to DMAxCNT_H) — the per-word copies have no instruction of their own.
+   */
   instructionAddress: number;
-  /** Address that was written. */
+  /** The watched byte that was written (clamped into the watch range). */
   address: number;
-  /** Value written (masked to the access size by the caller as needed). */
+  /** Value committed to memory, already masked to the access size. */
   value: number;
   /** Access size in bytes (1, 2 or 4). */
   size: number;
-  /** Whether the CPU was in Thumb state. */
+  /** Whether the responsible code was in Thumb state. */
   thumb: boolean;
+  /** What performed the write: `'cpu'` or `'dma0'`..`'dma3'`. */
+  source: 'cpu' | 'dma0' | 'dma1' | 'dma2' | 'dma3';
 }
 
 // ─── Scripting Engine ────────────────────────────────────────────────
@@ -399,14 +408,15 @@ export class ScriptingEngine {
    * program counter — i.e. *which code* performed the write. This is the core
    * primitive for finding where a value (HP, score, a flag...) is defined.
    *
-   * `instructionAddress` is the address of the writing instruction (the CPU
-   * pre-increments PC before executing, so it is `pc - 2` in Thumb state and
-   * `pc - 4` in ARM state). Use it directly with `disassemble()` or a symbol map.
+   * `instructionAddress` is the address of the writing instruction. CPU writes
+   * use the live PC (pre-incremented, so `pc - 2` in Thumb / `pc - 4` in ARM);
+   * DMA writes use the instruction that *started* the DMA, with `source` set to
+   * `'dma0'`..`'dma3'`. Use it directly with `disassemble()` or a symbol map.
    *
    * @example
    *   const w = watchMemory({ address: 0x030055C0 });
    *   await press('right', { hold: 60 }); // take a hit
-   *   for (const h of w.hits) console.log(hex(h.instructionAddress), h.value);
+   *   for (const h of w.hits) console.log(h.source, hex(h.instructionAddress), h.value);
    *   w.stop();
    */
   watchMemory(options: {
@@ -416,7 +426,8 @@ export class ScriptingEngine {
      * Optional predicate evaluated for every overlapping write; the hit is only
      * recorded when it returns true. Lets you watch a large region yet keep only
      * the writes you care about (e.g. ignore the sound engine, keep small
-     * values). Keeps the hits array bounded when watching wide ranges.
+     * values). Keeps the hits array bounded when watching wide ranges. A throw
+     * is contained (treated as `false`) so it can't abort the emulation.
      */
     filter?: (hit: WatchHit) => boolean;
   }): {
@@ -426,12 +437,34 @@ export class ScriptingEngine {
     const length = options.length ?? 1;
     const filter = options.filter;
     const hits: WatchHit[] = [];
-    const dispose = this.#gba.bus.addWriteWatchpoint(options.address, length, ({ address, value, size }) => {
-      const pc = this.#gba.armCpu.registers[15]! >>> 0;
-      const thumb = this.cpuCpsr ? (this.cpuCpsr() & 0x20) !== 0 : false;
-      const instructionAddress = (pc - (thumb ? 2 : 4)) >>> 0;
-      const hit: WatchHit = { pc, instructionAddress, address, value: value >>> 0, size, thumb };
-      if (!filter || filter(hit)) hits.push(hit);
+    const dispose = this.#gba.bus.addWriteWatchpoint(options.address, length, ({ address, value, size, source }) => {
+      let pc: number;
+      let instructionAddress: number;
+      let thumb: boolean;
+      let sourceLabel: WatchHit['source'];
+      if (source.kind === 'dma') {
+        pc = source.origin.pc;
+        instructionAddress = source.origin.instructionAddress;
+        thumb = source.origin.thumb;
+        sourceLabel = `dma${source.channel}` as WatchHit['source'];
+      } else {
+        // cpu (and HLE-BIOS, which runs inside a SWI): use the live CPU PC.
+        pc = this.#gba.armCpu.registers[15]! >>> 0;
+        thumb = this.cpuCpsr ? (this.cpuCpsr() & 0x20) !== 0 : false;
+        instructionAddress = (pc - (thumb ? 2 : 4)) >>> 0;
+        sourceLabel = 'cpu';
+      }
+      const hit: WatchHit = { pc, instructionAddress, address, value: value >>> 0, size, thumb, source: sourceLabel };
+      if (filter) {
+        let keep = false;
+        try {
+          keep = filter(hit);
+        } catch {
+          keep = false; // a throwing filter must not abort emulation mid-instruction
+        }
+        if (!keep) {return;}
+      }
+      hits.push(hit);
     });
     return { hits, stop: dispose };
   }
