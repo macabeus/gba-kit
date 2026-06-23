@@ -286,6 +286,40 @@ searchMemory({ value: 3, region: 'ewram' }); // EWRAM only
 searchMemory({ value: 3, region: 'both' }); // Both (default)
 ```
 
+### `watchMemory(options)` — Data Watchpoint (find _which code_ writes an address)
+
+Registers a write watchpoint over a memory range. Every time a write **commits** to the range, a hit is appended to the returned handle's `hits` array, recording **which code performed the write** — a CPU instruction, or a DMA channel.
+
+```javascript
+const w = watchMemory({ address: 0x03005220 }); // watch 1 byte
+await press('right', { hold: 30 }); // make the value change
+w.stop(); // remove the watchpoint
+for (const h of w.hits) {
+  // h.instructionAddress is the responsible instruction (pc-2 in Thumb, pc-4 in ARM)
+  const dis = disassemble(h.instructionAddress, 1, h.thumb ? 'thumb' : 'arm')[0];
+  console.log(`${h.source} wrote ${h.value} at 0x${h.instructionAddress.toString(16)}: ${dis.instruction}`);
+}
+```
+
+Each hit has: `pc`, `instructionAddress`, `address`, `value`, `size`, `thumb`, and `source` (`'cpu'` or `'dma0'`..`'dma3'`). For a **DMA** write, `instructionAddress` is the instruction that started the DMA, so a watchpoint on a DMA-filled buffer (VRAM, palette, OAM) points at the code that kicked off the copy.
+
+**Options:**
+
+- `length` — watch a multi-byte range (default 1).
+- `filter(hit)` — record only matching hits, so you can watch a wide region without the `hits` array exploding.
+- `maxHits` — cap recorded hits (keeps the first N).
+
+```javascript
+watchMemory({
+  address: 0x03000000,
+  length: 0x8000, // all of IWRAM
+  filter: (h) => h.source === 'cpu' && (h.value & 0xff) <= 6,
+  maxHits: 1000,
+});
+```
+
+`clearWatchpoints()` removes the watchpoints you created.
+
 ### `filterMemory(addresses, options)` — Narrow Down Candidates
 
 Takes addresses from a previous `searchMemory` call and keeps only those matching a new value. This is step 2+: change the game state, then filter for the new value.

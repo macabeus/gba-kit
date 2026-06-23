@@ -24,6 +24,21 @@ import type { InterruptController } from './interrupts.js';
 import type { EepromSnapshot, SystemBusSnapshot } from './savestate.js';
 import type { TimerController } from './timers.js';
 import { MMIO } from './types.js';
+import type { WriteOrigin } from './write-source.js';
+
+/** A committed write reported to a data watchpoint. */
+export interface WatchpointWrite {
+  /** The watched byte that was written (within the access, clamped to the watch range). */
+  address: number;
+  /** Value committed, masked to `size` bytes. */
+  value: number;
+  /** Access size in bytes (1, 2 or 4). */
+  size: number;
+  /** Active DMA channel (0-3) if a DMA performed the write, else -1 (a CPU/BIOS store). */
+  dmaChannel: number;
+  /** The DMA's start instruction when `dmaChannel >= 0`, else null. */
+  dmaOrigin: WriteOrigin | null;
+}
 
 export class GbaSystemBus implements MemoryBus {
   /** BIOS ROM (16 KB) — set via loadBios() */
@@ -77,6 +92,74 @@ export class GbaSystemBus implements MemoryBus {
 
   /** Callback when BG2/BG3 reference point registers are written (for PPU ref point reload) */
   onBgRefPointWrite?: (bgIndex: 2 | 3, isX: boolean) => void;
+
+  /** Data watchpoints: fire when a write commits to [start, end). Empty until set. */
+  readonly #watchpoints: Array<{
+    start: number;
+    end: number;
+    onWrite: (info: WatchpointWrite) => void;
+  }> = [];
+
+  /** DMA channel (0-3) currently transferring, or -1 for CPU writes; attributes hits. */
+  #dmaChannel = -1;
+  #dmaOrigin: WriteOrigin | null = null;
+
+  /** Attribute subsequent committed writes to a DMA channel (called by the DMA controller). */
+  setDmaSource(channel: number, origin: WriteOrigin): void {
+    this.#dmaChannel = channel;
+    this.#dmaOrigin = origin;
+  }
+
+  clearDmaSource(): void {
+    this.#dmaChannel = -1;
+    this.#dmaOrigin = null;
+  }
+
+  /**
+   * Register a write watchpoint over [address, address+length); returns a disposer.
+   * `length` is clamped to >= 1.
+   */
+  addWriteWatchpoint(address: number, length: number, onWrite: (info: WatchpointWrite) => void): () => void {
+    const len = length >= 1 ? length : 1;
+    const wp = { start: address >>> 0, end: (address + len) >>> 0, onWrite };
+    this.#watchpoints.push(wp);
+    return () => {
+      const i = this.#watchpoints.indexOf(wp);
+      if (i >= 0) {
+        this.#watchpoints.splice(i, 1);
+      }
+    };
+  }
+
+  /** Remove every registered watchpoint. */
+  clearWriteWatchpoints(): void {
+    this.#watchpoints.length = 0;
+  }
+
+  /** Whether any data watchpoint is registered (hot-path gate). */
+  hasWatchpoints(): boolean {
+    return this.#watchpoints.length > 0;
+  }
+
+  /**
+   * Notify watchpoints overlapping a committed write of `value` (masked to `size`)
+   * at canonical base `base`. Callers gate on `hasWatchpoints()` first.
+   */
+  #notifyWrite(base: number, value: number, size: number): void {
+    const wps = this.#watchpoints;
+    const lo = base >>> 0;
+    const hi = (lo + size) >>> 0;
+    const dmaChannel = this.#dmaChannel;
+    const dmaOrigin = this.#dmaOrigin;
+    // Snapshot when several exist, so a callback may dispose/clear mid-notify safely.
+    const list = wps.length === 1 ? wps : wps.slice();
+    for (const wp of list) {
+      if (lo < wp.end && hi > wp.start) {
+        const address = (lo > wp.start ? lo : wp.start) >>> 0; // the watched byte, not the access base
+        wp.onWrite({ address, value, size, dmaChannel, dmaOrigin });
+      }
+    }
+  }
 
   /** Wire up subsystem references */
   connect(parts: {
@@ -269,6 +352,7 @@ export class GbaSystemBus implements MemoryBus {
 
   write8(address: number, value: number): void {
     const region = (address >>> 24) & 0xff;
+    let committed = true;
     switch (region) {
       case 0x02:
         this.ewram[address & 0x3ffff] = value;
@@ -297,26 +381,36 @@ export class GbaSystemBus implements MemoryBus {
           // OBJ boundary: 0x10000 in tile modes (0-2), 0x14000 in bitmap modes (3-5)
           const objBoundary = mode >= 3 ? 0x14000 : 0x10000;
           if (a >= objBoundary) {
-            break; // Ignore 8-bit writes to OBJ VRAM
+            committed = false; // Ignore 8-bit writes to OBJ VRAM
+            break;
           }
           const aligned = a & ~1;
           this.vram[aligned] = value;
           this.vram[aligned + 1] = value;
         }
         break;
-      // OAM ignores 8-bit writes
       case 0x0e:
       case 0x0f:
         if (this.#hasSram) {
           this.sram[address & 0xffff] = value;
+        } else {
+          committed = false;
         }
         break;
+      // OAM (0x07) ignores 8-bit writes; ROM/BIOS/unmapped regions are read-only.
+      default:
+        committed = false;
+        break;
+    }
+    if (committed && this.#watchpoints.length > 0) {
+      this.#notifyWrite(this.#canonicalWriteAddress(address), value & 0xff, 1);
     }
   }
 
   write16(address: number, value: number): void {
     const addr = address & ~1;
     const region = (addr >>> 24) & 0xff;
+    let committed = true;
     switch (region) {
       case 0x02:
         this.#write16To(this.ewram, addr & 0x3ffff, value);
@@ -337,22 +431,33 @@ export class GbaSystemBus implements MemoryBus {
         this.#write16To(this.oam, addr & 0x3ff, value);
         break;
       case 0x0d:
-        // EEPROM serial write — only bit 0 matters
+        // EEPROM serial write — only bit 0 matters; serial port, no addressable byte.
         this.#eeprom.write(value & 1);
+        committed = false;
         break;
       case 0x0e:
       case 0x0f:
         if (this.#hasSram) {
           // SRAM has 8-bit bus: wider writes only write the low byte
           this.sram[address & 0xffff] = value & 0xff;
+        } else {
+          committed = false;
         }
         break;
+      // ROM/BIOS/unmapped regions are read-only.
+      default:
+        committed = false;
+        break;
+    }
+    if (committed && this.#watchpoints.length > 0) {
+      this.#notifyWrite(this.#canonicalWriteAddress(addr), value & 0xffff, 2);
     }
   }
 
   write32(address: number, value: number): void {
     const addr = address & ~3;
     const region = (addr >>> 24) & 0xff;
+    let committed = true;
     switch (region) {
       case 0x02:
         this.#write32To(this.ewram, addr & 0x3ffff, value);
@@ -373,16 +478,26 @@ export class GbaSystemBus implements MemoryBus {
         this.#write32To(this.oam, addr & 0x3ff, value);
         break;
       case 0x0d:
-        // EEPROM serial write
+        // EEPROM serial write — serial port, no addressable byte.
         this.#eeprom.write(value & 1);
+        committed = false;
         break;
       case 0x0e:
       case 0x0f:
         if (this.#hasSram) {
           // SRAM has 8-bit bus: wider writes only write the low byte
           this.sram[address & 0xffff] = value & 0xff;
+        } else {
+          committed = false;
         }
         break;
+      // ROM/BIOS/unmapped regions are read-only.
+      default:
+        committed = false;
+        break;
+    }
+    if (committed && this.#watchpoints.length > 0) {
+      this.#notifyWrite(this.#canonicalWriteAddress(addr), value >>> 0, 4);
     }
   }
 
@@ -434,6 +549,30 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   // ─── VRAM Mirroring ───────────────────────────────────────────────
+
+  /**
+   * Canonical (un-mirrored) address of the byte a write stores to, so writes via a
+   * region mirror match watchpoints registered on the canonical address.
+   */
+  #canonicalWriteAddress(address: number): number {
+    switch ((address >>> 24) & 0xff) {
+      case 0x02:
+        return (0x02000000 | (address & 0x3ffff)) >>> 0;
+      case 0x03:
+        return (0x03000000 | (address & 0x7fff)) >>> 0;
+      case 0x05:
+        return (0x05000000 | (address & 0x3ff)) >>> 0;
+      case 0x06:
+        return (0x06000000 | this.#mirrorVram(address)) >>> 0;
+      case 0x07:
+        return (0x07000000 | (address & 0x3ff)) >>> 0;
+      case 0x0e:
+      case 0x0f:
+        return (0x0e000000 | (address & 0xffff)) >>> 0;
+      default:
+        return address >>> 0;
+    }
+  }
 
   #mirrorVram(address: number): number {
     let offset = address & 0x1ffff;

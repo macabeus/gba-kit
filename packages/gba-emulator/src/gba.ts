@@ -29,6 +29,7 @@ import {
   TOTAL_SCANLINES,
   VISIBLE_SCANLINES,
 } from './types.js';
+import { captureOrigin } from './write-source.js';
 
 /** PPU rendering interface */
 export interface PpuInterface {
@@ -95,6 +96,10 @@ export class Gba {
       read32: (addr) => this.bus.read32(addr),
       write16: (addr, val) => this.bus.write16(addr, val),
       write32: (addr, val) => this.bus.write32(addr, val),
+      // Data-watchpoint attribution for DMA writes (armCpu is created below; invoked during DMA).
+      getOrigin: () => captureOrigin(this.armCpu.registers[15]!, this.armCpu.cpsr),
+      setDmaSource: (channel, origin) => this.bus.setDmaSource(channel, origin),
+      clearDmaSource: () => this.bus.clearDmaSource(),
     });
 
     // Create CPU with GBA BIOS SWI handler

@@ -10,6 +10,7 @@ import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassem
 import { Gba } from './gba.js';
 import type { CpuSnapshot, GbaSnapshot } from './savestate.js';
 import { GbaButton } from './types.js';
+import { captureOrigin } from './write-source.js';
 
 // ─── ScriptingHost Interface ─────────────────────────────────────────
 
@@ -125,6 +126,25 @@ interface RecordingState {
   frames: Uint32Array[];
 }
 
+/**
+ * A recorded write captured by a data watchpoint. For a `dma*` source, `pc` /
+ * `instructionAddress` refer to the instruction that started the DMA.
+ */
+export interface WatchHit {
+  /** CPU PC (pipeline-ahead of the instruction). */
+  pc: number;
+  /** Address of the responsible instruction (pc-2 in Thumb, pc-4 in ARM). */
+  instructionAddress: number;
+  /** The watched byte that was written. */
+  address: number;
+  /** Value committed, masked to the access size. */
+  value: number;
+  /** Access size in bytes (1, 2 or 4). */
+  size: number;
+  thumb: boolean;
+  source: 'cpu' | 'dma0' | 'dma1' | 'dma2' | 'dma3';
+}
+
 // ─── Scripting Engine ────────────────────────────────────────────────
 
 export class ScriptingEngine {
@@ -134,6 +154,8 @@ export class ScriptingEngine {
   #recording: RecordingState | null = null;
   #onFrameCallback: ((frame: number) => void) | null = null;
   #frameCount = 0;
+  /** Disposers for watchpoints created via this engine (so clearWatchpoints() only clears ours). */
+  readonly #watchDisposers = new Set<() => void>();
 
   /** CPU interface — set externally since Gba doesn't expose full CPU */
   cpuRegisters: Uint32Array | undefined;
@@ -375,6 +397,87 @@ export class ScriptingEngine {
       data[i] = this.#gba.bus.read8(address + i);
     }
     return data;
+  }
+
+  /**
+   * Watch a memory range; each write appends a {@link WatchHit} to the returned
+   * handle's `hits` array, recording which code performed it. The core primitive
+   * for finding where a value is written.
+   *
+   * @example
+   *   const w = watchMemory({ address: 0x030055C0 });
+   *   await press('right', { hold: 60 }); // take a hit
+   *   for (const h of w.hits) console.log(h.source, hex(h.instructionAddress), h.value);
+   *   w.stop();
+   */
+  watchMemory(options: {
+    address: number;
+    length?: number;
+    /**
+     * Keep a hit only when this returns true — watch a wide region but record only
+     * what matters. A throw is treated as `false` (never aborts the emulation).
+     */
+    filter?: (hit: WatchHit) => boolean;
+    /**
+     * Cap recorded hits (first `maxHits` kept); guards memory on wide/long watches.
+     * The watchpoint stays active — call `stop()` to remove it.
+     */
+    maxHits?: number;
+  }): {
+    hits: WatchHit[];
+    stop: () => void;
+  } {
+    const length = options.length ?? 1;
+    const filter = options.filter;
+    const maxHits = options.maxHits;
+    const hits: WatchHit[] = [];
+    const busDispose = this.#gba.bus.addWriteWatchpoint(
+      options.address,
+      length,
+      ({ address, value, size, dmaChannel, dmaOrigin }) => {
+        if (maxHits !== undefined && hits.length >= maxHits) {
+          return;
+        }
+        // DMA: the captured trigger instruction; CPU: the live PC + CPSR.
+        const origin = dmaOrigin ?? captureOrigin(this.#gba.armCpu.registers[15]!, this.#gba.armCpu.cpsr);
+        const hit: WatchHit = {
+          pc: origin.pc,
+          instructionAddress: origin.instructionAddress,
+          address,
+          value: value >>> 0,
+          size,
+          thumb: origin.thumb,
+          source: dmaChannel >= 0 ? (`dma${dmaChannel}` as WatchHit['source']) : 'cpu',
+        };
+        if (filter) {
+          let keep = false;
+          try {
+            keep = filter(hit);
+          } catch {
+            keep = false; // a throwing filter must not abort emulation
+          }
+          if (!keep) {
+            return;
+          }
+        }
+        hits.push(hit);
+      },
+    );
+    const stop = (): void => {
+      if (this.#watchDisposers.delete(busDispose)) {
+        busDispose();
+      }
+    };
+    this.#watchDisposers.add(busDispose);
+    return { hits, stop };
+  }
+
+  /** Remove the data watchpoints created via this engine's `watchMemory`. */
+  clearWatchpoints(): void {
+    for (const dispose of this.#watchDisposers) {
+      dispose();
+    }
+    this.#watchDisposers.clear();
   }
 
   read16(address: number): number {

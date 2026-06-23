@@ -124,6 +124,8 @@ export class HeadlessRuntime {
       searchMemory: (options: Parameters<ScriptingEngine['searchMemory']>[0]) => engine.searchMemory(options),
       filterMemory: (addresses: number[], options: Parameters<ScriptingEngine['filterMemory']>[1]) =>
         engine.filterMemory(addresses, options),
+      watchMemory: (options: Parameters<ScriptingEngine['watchMemory']>[0]) => engine.watchMemory(options),
+      clearWatchpoints: () => engine.clearWatchpoints(),
 
       // Save states
       saveState: (options: Parameters<ScriptingEngine['saveState']>[0]) => engine.saveState(options),
