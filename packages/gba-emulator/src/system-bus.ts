@@ -131,7 +131,9 @@ export class GbaSystemBus implements MemoryBus {
     this.#watchpoints.push(wp);
     return () => {
       const i = this.#watchpoints.indexOf(wp);
-      if (i >= 0) {this.#watchpoints.splice(i, 1);}
+      if (i >= 0) {
+        this.#watchpoints.splice(i, 1);
+      }
     };
   }
 
@@ -146,7 +148,9 @@ export class GbaSystemBus implements MemoryBus {
    * watchpoints. Iterates a snapshot so a callback may dispose/clear safely.
    */
   #notifyWrite(base: number, value: number, size: number): void {
-    if (this.#watchpoints.length === 0) {return;}
+    if (this.#watchpoints.length === 0) {
+      return;
+    }
     const lo = base >>> 0;
     const hi = (lo + size) >>> 0;
     const source = this.#writeSource;
@@ -400,7 +404,9 @@ export class GbaSystemBus implements MemoryBus {
         committed = false;
         break;
     }
-    if (committed) {this.#notifyWrite(address, value & 0xff, 1);}
+    if (committed) {
+      this.#notifyWrite(address, value & 0xff, 1);
+    }
   }
 
   write16(address: number, value: number): void {
@@ -444,7 +450,9 @@ export class GbaSystemBus implements MemoryBus {
         committed = false;
         break;
     }
-    if (committed) {this.#notifyWrite(addr, value & 0xffff, 2);}
+    if (committed) {
+      this.#notifyWrite(addr, value & 0xffff, 2);
+    }
   }
 
   write32(address: number, value: number): void {
@@ -488,7 +496,9 @@ export class GbaSystemBus implements MemoryBus {
         committed = false;
         break;
     }
-    if (committed) {this.#notifyWrite(addr, value >>> 0, 4);}
+    if (committed) {
+      this.#notifyWrite(addr, value >>> 0, 4);
+    }
   }
 
   // ─── BIOS Access ──────────────────────────────────────────────────

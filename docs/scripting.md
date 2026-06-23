@@ -319,9 +319,11 @@ watchMemory({
   length: 0x8000, // all of IWRAM
   filter: (h) => h.instructionAddress >= 0x08000000 && (h.value & 0xff) <= 6,
 });
+// maxHits: cap recorded hits (keeps the first N) so a wide/long watch can't grow unbounded
+watchMemory({ address: 0x06000000, length: 0x18000, maxHits: 1000 });
 ```
 
-Call `clearWatchpoints()` to remove every watchpoint at once. Watchpoints are free when none are set (the write fast-path early-outs), so leaving the API unused costs nothing.
+Call `clearWatchpoints()` to remove the watchpoints you created (it doesn't touch watchpoints set by other code). Watchpoints are free when none are set (the write fast-path early-outs), so leaving the API unused costs nothing.
 
 ### `filterMemory(addresses, options)` — Narrow Down Candidates
 

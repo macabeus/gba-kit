@@ -159,6 +159,8 @@ export class ScriptingEngine {
   #recording: RecordingState | null = null;
   #onFrameCallback: ((frame: number) => void) | null = null;
   #frameCount = 0;
+  /** Disposers for watchpoints created via this engine (so clearWatchpoints() only clears ours). */
+  readonly #watchDisposers = new Set<() => void>();
 
   /** CPU interface — set externally since Gba doesn't expose full CPU */
   cpuRegisters: Uint32Array | undefined;
@@ -430,14 +432,24 @@ export class ScriptingEngine {
      * is contained (treated as `false`) so it can't abort the emulation.
      */
     filter?: (hit: WatchHit) => boolean;
+    /**
+     * Cap the number of recorded hits (the first `maxHits` are kept; later ones
+     * are dropped). Prevents unbounded memory growth on wide/long watches. The
+     * watchpoint stays active — call `stop()` to remove it.
+     */
+    maxHits?: number;
   }): {
     hits: WatchHit[];
     stop: () => void;
   } {
     const length = options.length ?? 1;
     const filter = options.filter;
+    const maxHits = options.maxHits;
     const hits: WatchHit[] = [];
-    const dispose = this.#gba.bus.addWriteWatchpoint(options.address, length, ({ address, value, size, source }) => {
+    const busDispose = this.#gba.bus.addWriteWatchpoint(options.address, length, ({ address, value, size, source }) => {
+      if (maxHits !== undefined && hits.length >= maxHits) {
+        return;
+      }
       let pc: number;
       let instructionAddress: number;
       let thumb: boolean;
@@ -448,9 +460,10 @@ export class ScriptingEngine {
         thumb = source.origin.thumb;
         sourceLabel = `dma${source.channel}` as WatchHit['source'];
       } else {
-        // cpu (and HLE-BIOS, which runs inside a SWI): use the live CPU PC.
+        // cpu (and HLE-BIOS, which runs inside a SWI): read Thumb state straight
+        // from the CPU so attribution is correct even if cpuCpsr wasn't wired.
         pc = this.#gba.armCpu.registers[15]! >>> 0;
-        thumb = this.cpuCpsr ? (this.cpuCpsr() & 0x20) !== 0 : false;
+        thumb = (this.#gba.armCpu.cpsr & 0x20) !== 0;
         instructionAddress = (pc - (thumb ? 2 : 4)) >>> 0;
         sourceLabel = 'cpu';
       }
@@ -462,16 +475,27 @@ export class ScriptingEngine {
         } catch {
           keep = false; // a throwing filter must not abort emulation mid-instruction
         }
-        if (!keep) {return;}
+        if (!keep) {
+          return;
+        }
       }
       hits.push(hit);
     });
-    return { hits, stop: dispose };
+    const stop = (): void => {
+      if (this.#watchDisposers.delete(busDispose)) {
+        busDispose();
+      }
+    };
+    this.#watchDisposers.add(busDispose);
+    return { hits, stop };
   }
 
-  /** Remove all data watchpoints. */
+  /** Remove the data watchpoints created via this engine's `watchMemory`. */
   clearWatchpoints(): void {
-    this.#gba.bus.clearWriteWatchpoints();
+    for (const dispose of this.#watchDisposers) {
+      dispose();
+    }
+    this.#watchDisposers.clear();
   }
 
   read16(address: number): number {

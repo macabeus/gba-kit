@@ -16,3 +16,8 @@ OAM/OBJ-VRAM and ROM writes are skipped), report the specific watched byte for w
 straddling stores, mask `value` to the access size, clamp `length` to ≥1, iterate
 snapshot-safe so a callback may clear watchpoints mid-write, and contain a throwing
 `filter` so it can't abort emulation.
+
+Thumb state is read straight from the CPU (so attribution is correct even without the
+optional `cpuCpsr` wiring). `watchMemory` also takes `maxHits` to cap recorded hits
+(unbounded growth guard for wide/long watches), and `clearWatchpoints()` removes only the
+watchpoints created via that engine, leaving any others intact.

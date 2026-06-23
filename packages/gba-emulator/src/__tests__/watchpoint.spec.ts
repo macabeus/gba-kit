@@ -1,8 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
 import { Gba } from '../gba.js';
+import { ScriptingEngine, type ScriptingHost } from '../scripting.js';
 import { GbaSystemBus, type WatchpointWrite } from '../system-bus.js';
 import type { WriteSource } from '../write-source.js';
+
+const stubHost: ScriptingHost = {
+  writeScreenshot: async () => {},
+  writeMemorySnapshot: async () => {},
+  writeSaveState: async () => {},
+  readSaveState: async () => {
+    throw new Error('not used');
+  },
+  log: () => {},
+};
 
 // ─── Data watchpoints (system bus) ───────────────────────────────────
 
@@ -124,5 +135,52 @@ describe('GbaSystemBus write watchpoints', () => {
       origin: { pc: 0x08001236, instructionAddress: 0x08001234, thumb: true },
     });
     expect(hits[0]!.value).toBe(0xbeef);
+  });
+});
+
+describe('ScriptingEngine watchMemory', () => {
+  it('reads Thumb state from the CPU (no reliance on the optional cpuCpsr callback)', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    // cpuCpsr is intentionally left unwired; armCpu is in Thumb at a known PC.
+    gba.armCpu.registers[15] = 0x08000100;
+    gba.armCpu.cpsr |= 0x20; // Thumb
+
+    const w = engine.watchMemory({ address: 0x03000000 });
+    gba.bus.write8(0x03000000, 7);
+
+    expect(w.hits).toHaveLength(1);
+    expect(w.hits[0]!.thumb).toBe(true);
+    expect(w.hits[0]!.instructionAddress).toBe(0x080000fe); // pc - 2 (Thumb)
+    w.stop();
+  });
+
+  it('caps recorded hits at maxHits', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchMemory({ address: 0x03000000, maxHits: 2 });
+    for (let i = 0; i < 5; i++) {
+      gba.bus.write8(0x03000000, i);
+    }
+    expect(w.hits).toHaveLength(2);
+    w.stop();
+  });
+
+  it('clearWatchpoints() removes only watchpoints this engine created', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+
+    const a = engine.watchMemory({ address: 0x03000000 });
+    const b = engine.watchMemory({ address: 0x03000000 });
+    // A watchpoint registered directly on the bus (e.g. another engine) must survive.
+    let busCount = 0;
+    gba.bus.addWriteWatchpoint(0x03000000, 1, () => busCount++);
+
+    engine.clearWatchpoints();
+    gba.bus.write8(0x03000000, 1);
+
+    expect(a.hits).toHaveLength(0);
+    expect(b.hits).toHaveLength(0);
+    expect(busCount).toBe(1); // foreign watchpoint untouched
   });
 });
