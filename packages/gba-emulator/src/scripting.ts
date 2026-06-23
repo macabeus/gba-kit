@@ -431,34 +431,38 @@ export class ScriptingEngine {
     const filter = options.filter;
     const maxHits = options.maxHits;
     const hits: WatchHit[] = [];
-    const busDispose = this.#gba.bus.addWriteWatchpoint(options.address, length, ({ address, value, size, dmaChannel, dmaOrigin }) => {
-      if (maxHits !== undefined && hits.length >= maxHits) {
-        return;
-      }
-      // DMA: the captured trigger instruction; CPU: the live PC + CPSR.
-      const origin = dmaOrigin ?? captureOrigin(this.#gba.armCpu.registers[15]!, this.#gba.armCpu.cpsr);
-      const hit: WatchHit = {
-        pc: origin.pc,
-        instructionAddress: origin.instructionAddress,
-        address,
-        value: value >>> 0,
-        size,
-        thumb: origin.thumb,
-        source: dmaChannel >= 0 ? (`dma${dmaChannel}` as WatchHit['source']) : 'cpu',
-      };
-      if (filter) {
-        let keep = false;
-        try {
-          keep = filter(hit);
-        } catch {
-          keep = false; // a throwing filter must not abort emulation
-        }
-        if (!keep) {
+    const busDispose = this.#gba.bus.addWriteWatchpoint(
+      options.address,
+      length,
+      ({ address, value, size, dmaChannel, dmaOrigin }) => {
+        if (maxHits !== undefined && hits.length >= maxHits) {
           return;
         }
-      }
-      hits.push(hit);
-    });
+        // DMA: the captured trigger instruction; CPU: the live PC + CPSR.
+        const origin = dmaOrigin ?? captureOrigin(this.#gba.armCpu.registers[15]!, this.#gba.armCpu.cpsr);
+        const hit: WatchHit = {
+          pc: origin.pc,
+          instructionAddress: origin.instructionAddress,
+          address,
+          value: value >>> 0,
+          size,
+          thumb: origin.thumb,
+          source: dmaChannel >= 0 ? (`dma${dmaChannel}` as WatchHit['source']) : 'cpu',
+        };
+        if (filter) {
+          let keep = false;
+          try {
+            keep = filter(hit);
+          } catch {
+            keep = false; // a throwing filter must not abort emulation
+          }
+          if (!keep) {
+            return;
+          }
+        }
+        hits.push(hit);
+      },
+    );
     const stop = (): void => {
       if (this.#watchDisposers.delete(busDispose)) {
         busDispose();

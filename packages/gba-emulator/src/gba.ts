@@ -17,7 +17,6 @@ import type { GbaSnapshot } from './savestate.js';
 import { Scheduler } from './scheduler.js';
 import { GbaSystemBus } from './system-bus.js';
 import { TimerController } from './timers.js';
-import { captureOrigin } from './write-source.js';
 import {
   CYCLES_PER_FRAME,
   CYCLES_PER_SCANLINE,
@@ -30,6 +29,7 @@ import {
   TOTAL_SCANLINES,
   VISIBLE_SCANLINES,
 } from './types.js';
+import { captureOrigin } from './write-source.js';
 
 /** PPU rendering interface */
 export interface PpuInterface {
