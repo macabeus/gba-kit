@@ -286,6 +286,38 @@ searchMemory({ value: 3, region: 'ewram' }); // EWRAM only
 searchMemory({ value: 3, region: 'both' }); // Both (default)
 ```
 
+### `watchMemory(options)` — Data Watchpoint (find _which code_ writes an address)
+
+Registers a write watchpoint over a memory range. Every time the CPU (or DMA) writes the range, a hit is appended to the returned handle's `hits` array, recording the **program counter** — i.e. which code performed the write.
+
+```javascript
+const w = watchMemory({ address: 0x03005220 }); // watch 1 byte
+await press('right', { hold: 30 }); // make the value change
+w.stop(); // remove the watchpoint
+for (const h of w.hits) {
+  // h.instructionAddress is the writing instruction (pc-2 in Thumb, pc-4 in ARM)
+  const dis = disassemble(h.instructionAddress, 1, h.thumb ? 'thumb' : 'arm')[0];
+  console.log(`value ${h.value} written by 0x${h.instructionAddress.toString(16)}: ${dis.instruction}`);
+}
+```
+
+Each hit has: `pc`, `instructionAddress`, `address`, `value`, `size`, `thumb`.
+
+**Options:**
+
+```javascript
+watchMemory({ address: 0x03005220, length: 4 }); // watch a 4-byte range
+// filter: keep only the writes you care about — lets you watch a wide region
+// without the hits array exploding (e.g. ignore the sound engine, keep small values)
+watchMemory({
+  address: 0x03000000,
+  length: 0x8000, // all of IWRAM
+  filter: (h) => h.instructionAddress >= 0x08000000 && (h.value & 0xff) <= 6,
+});
+```
+
+Call `clearWatchpoints()` to remove every watchpoint at once. Watchpoints are free when none are set (the write fast-path early-outs), so leaving the API unused costs nothing.
+
 ### `filterMemory(addresses, options)` — Narrow Down Candidates
 
 Takes addresses from a previous `searchMemory` call and keeps only those matching a new value. This is step 2+: change the game state, then filter for the new value.

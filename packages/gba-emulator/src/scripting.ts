@@ -125,6 +125,22 @@ interface RecordingState {
   frames: Uint32Array[];
 }
 
+/** A single recorded write captured by a data watchpoint. */
+export interface WatchHit {
+  /** CPU PC at the moment of the write (pipeline-ahead of the instruction). */
+  pc: number;
+  /** Address of the writing instruction (pc-2 in Thumb, pc-4 in ARM). */
+  instructionAddress: number;
+  /** Address that was written. */
+  address: number;
+  /** Value written (masked to the access size by the caller as needed). */
+  value: number;
+  /** Access size in bytes (1, 2 or 4). */
+  size: number;
+  /** Whether the CPU was in Thumb state. */
+  thumb: boolean;
+}
+
 // ─── Scripting Engine ────────────────────────────────────────────────
 
 export class ScriptingEngine {
@@ -375,6 +391,54 @@ export class ScriptingEngine {
       data[i] = this.#gba.bus.read8(address + i);
     }
     return data;
+  }
+
+  /**
+   * Set a data watchpoint on a memory range. Every time code writes the range,
+   * a hit is appended to the returned handle's `hits` array, recording the CPU
+   * program counter — i.e. *which code* performed the write. This is the core
+   * primitive for finding where a value (HP, score, a flag...) is defined.
+   *
+   * `instructionAddress` is the address of the writing instruction (the CPU
+   * pre-increments PC before executing, so it is `pc - 2` in Thumb state and
+   * `pc - 4` in ARM state). Use it directly with `disassemble()` or a symbol map.
+   *
+   * @example
+   *   const w = watchMemory({ address: 0x030055C0 });
+   *   await press('right', { hold: 60 }); // take a hit
+   *   for (const h of w.hits) console.log(hex(h.instructionAddress), h.value);
+   *   w.stop();
+   */
+  watchMemory(options: {
+    address: number;
+    length?: number;
+    /**
+     * Optional predicate evaluated for every overlapping write; the hit is only
+     * recorded when it returns true. Lets you watch a large region yet keep only
+     * the writes you care about (e.g. ignore the sound engine, keep small
+     * values). Keeps the hits array bounded when watching wide ranges.
+     */
+    filter?: (hit: WatchHit) => boolean;
+  }): {
+    hits: WatchHit[];
+    stop: () => void;
+  } {
+    const length = options.length ?? 1;
+    const filter = options.filter;
+    const hits: WatchHit[] = [];
+    const dispose = this.#gba.bus.addWriteWatchpoint(options.address, length, ({ address, value, size }) => {
+      const pc = this.#gba.armCpu.registers[15]! >>> 0;
+      const thumb = this.cpuCpsr ? (this.cpuCpsr() & 0x20) !== 0 : false;
+      const instructionAddress = (pc - (thumb ? 2 : 4)) >>> 0;
+      const hit: WatchHit = { pc, instructionAddress, address, value: value >>> 0, size, thumb };
+      if (!filter || filter(hit)) hits.push(hit);
+    });
+    return { hits, stop: dispose };
+  }
+
+  /** Remove all data watchpoints. */
+  clearWatchpoints(): void {
+    this.#gba.bus.clearWriteWatchpoints();
   }
 
   read16(address: number): number {

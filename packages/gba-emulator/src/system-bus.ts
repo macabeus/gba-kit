@@ -78,6 +78,52 @@ export class GbaSystemBus implements MemoryBus {
   /** Callback when BG2/BG3 reference point registers are written (for PPU ref point reload) */
   onBgRefPointWrite?: (bgIndex: 2 | 3, isX: boolean) => void;
 
+  /**
+   * Data watchpoints. Each fires its callback whenever a CPU/DMA write touches
+   * the byte range [start, start+length). Used to discover *which code* writes a
+   * given RAM address (reverse-engineering / decomp assist). Kept empty by
+   * default so the write fast-path pays nothing until a watchpoint is set.
+   */
+  readonly #watchpoints: Array<{
+    start: number;
+    end: number;
+    onWrite: (info: { address: number; value: number; size: number }) => void;
+  }> = [];
+
+  /**
+   * Register a write watchpoint over [address, address+length). Returns a
+   * disposer that removes it.
+   */
+  addWriteWatchpoint(
+    address: number,
+    length: number,
+    onWrite: (info: { address: number; value: number; size: number }) => void,
+  ): () => void {
+    const wp = { start: address >>> 0, end: (address + length) >>> 0, onWrite };
+    this.#watchpoints.push(wp);
+    return () => {
+      const i = this.#watchpoints.indexOf(wp);
+      if (i >= 0) this.#watchpoints.splice(i, 1);
+    };
+  }
+
+  /** Remove every registered watchpoint. */
+  clearWriteWatchpoints(): void {
+    this.#watchpoints.length = 0;
+  }
+
+  /** Notify any watchpoints overlapping the written range. Hot-path: early-out when none. */
+  #notifyWrite(address: number, value: number, size: number): void {
+    if (this.#watchpoints.length === 0) return;
+    const lo = address >>> 0;
+    const hi = (address + size) >>> 0;
+    for (const wp of this.#watchpoints) {
+      if (lo < wp.end && hi > wp.start) {
+        wp.onWrite({ address: lo, value, size });
+      }
+    }
+  }
+
   /** Wire up subsystem references */
   connect(parts: {
     interrupts: InterruptController;
@@ -268,6 +314,7 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   write8(address: number, value: number): void {
+    this.#notifyWrite(address, value, 1);
     const region = (address >>> 24) & 0xff;
     switch (region) {
       case 0x02:
@@ -316,6 +363,7 @@ export class GbaSystemBus implements MemoryBus {
 
   write16(address: number, value: number): void {
     const addr = address & ~1;
+    this.#notifyWrite(addr, value, 2);
     const region = (addr >>> 24) & 0xff;
     switch (region) {
       case 0x02:
@@ -352,6 +400,7 @@ export class GbaSystemBus implements MemoryBus {
 
   write32(address: number, value: number): void {
     const addr = address & ~3;
+    this.#notifyWrite(addr, value, 4);
     const region = (addr >>> 24) & 0xff;
     switch (region) {
       case 0x02:
