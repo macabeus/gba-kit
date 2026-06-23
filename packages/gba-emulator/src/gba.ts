@@ -96,8 +96,7 @@ export class Gba {
       read32: (addr) => this.bus.read32(addr),
       write16: (addr, val) => this.bus.write16(addr, val),
       write32: (addr, val) => this.bus.write32(addr, val),
-      // For data watchpoints: attribute DMA writes to the channel + the instruction
-      // that started it (armCpu is created just below; only invoked later, during DMA).
+      // Data-watchpoint attribution for DMA writes (armCpu is created below; invoked during DMA).
       getOrigin: () => captureOrigin(this.armCpu.registers[15]!, this.armCpu.cpsr),
       setDmaSource: (channel, origin) => this.bus.setDmaSource(channel, origin),
       clearDmaSource: () => this.bus.clearDmaSource(),

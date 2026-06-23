@@ -39,11 +39,7 @@ interface DmaChannel {
   irqEnable: boolean;
   /** DMA enabled */
   enabled: boolean;
-  /**
-   * CPU location captured when this channel was last enabled (the instruction
-   * that started the DMA). Reported to data watchpoints as the origin of DMA
-   * writes, since the per-word copies don't belong to any single instruction.
-   */
+  /** Instruction that last enabled this channel (the origin of its writes for watchpoints). */
   startOrigin: WriteOrigin;
 }
 
@@ -55,9 +51,9 @@ export interface DmaMemoryAccess {
   read32(address: number): number;
   write16(address: number, value: number): void;
   write32(address: number, value: number): void;
-  /** Current CPU location, captured when a channel is enabled to attribute its writes. Optional. */
+  /** Current CPU location, captured on channel enable to attribute its writes (watchpoints). */
   getOrigin?(): WriteOrigin;
-  /** Mark / unmark subsequent writes as coming from a DMA channel (for data watchpoints). Optional. */
+  /** Mark/unmark subsequent writes as coming from a DMA channel (watchpoints). */
   setDmaSource?(channel: number, origin: WriteOrigin): void;
   clearDmaSource?(): void;
 }
@@ -146,9 +142,7 @@ export class DmaController {
     ch.enabled = (value & (1 << 15)) !== 0;
 
     if (ch.enabled) {
-      // Capture the PC of the code that started this DMA (this control write runs
-      // mid-instruction, so registers[15] is the trigger). Reported to watchpoints
-      // as the origin of the channel's writes, including later scheduled/timed ones.
+      // Capture the instruction that started this DMA (for watchpoint attribution).
       ch.startOrigin = this.#memory?.getOrigin?.() ?? ZERO_ORIGIN;
       // (Re-)enabling DMA always reloads addresses and word count from latches,
       // whether transitioning from disabled→enabled OR re-writing while enabled.

@@ -126,28 +126,22 @@ interface RecordingState {
   frames: Uint32Array[];
 }
 
-/** A single recorded write captured by a data watchpoint. */
+/**
+ * A recorded write captured by a data watchpoint. For a `dma*` source, `pc` /
+ * `instructionAddress` refer to the instruction that started the DMA.
+ */
 export interface WatchHit {
-  /**
-   * CPU PC (pipeline-ahead of the instruction). For a `dma*` source this is the
-   * PC at the moment the DMA was started, not a per-word write.
-   */
+  /** CPU PC (pipeline-ahead of the instruction). */
   pc: number;
-  /**
-   * Address of the responsible instruction (`pc-2` in Thumb, `pc-4` in ARM).
-   * For a `dma*` source this is the instruction that *started* the DMA (the store
-   * to DMAxCNT_H) — the per-word copies have no instruction of their own.
-   */
+  /** Address of the responsible instruction (pc-2 in Thumb, pc-4 in ARM). */
   instructionAddress: number;
-  /** The watched byte that was written (clamped into the watch range). */
+  /** The watched byte that was written. */
   address: number;
-  /** Value committed to memory, already masked to the access size. */
+  /** Value committed, masked to the access size. */
   value: number;
   /** Access size in bytes (1, 2 or 4). */
   size: number;
-  /** Whether the responsible code was in Thumb state. */
   thumb: boolean;
-  /** What performed the write: `'cpu'` or `'dma0'`..`'dma3'`. */
   source: 'cpu' | 'dma0' | 'dma1' | 'dma2' | 'dma3';
 }
 
@@ -406,15 +400,9 @@ export class ScriptingEngine {
   }
 
   /**
-   * Set a data watchpoint on a memory range. Every time code writes the range,
-   * a hit is appended to the returned handle's `hits` array, recording the CPU
-   * program counter — i.e. *which code* performed the write. This is the core
-   * primitive for finding where a value (HP, score, a flag...) is defined.
-   *
-   * `instructionAddress` is the address of the writing instruction. CPU writes
-   * use the live PC (pre-incremented, so `pc - 2` in Thumb / `pc - 4` in ARM);
-   * DMA writes use the instruction that *started* the DMA, with `source` set to
-   * `'dma0'`..`'dma3'`. Use it directly with `disassemble()` or a symbol map.
+   * Watch a memory range; each write appends a {@link WatchHit} to the returned
+   * handle's `hits` array, recording which code performed it. The core primitive
+   * for finding where a value is written.
    *
    * @example
    *   const w = watchMemory({ address: 0x030055C0 });
@@ -426,17 +414,13 @@ export class ScriptingEngine {
     address: number;
     length?: number;
     /**
-     * Optional predicate evaluated for every overlapping write; the hit is only
-     * recorded when it returns true. Lets you watch a large region yet keep only
-     * the writes you care about (e.g. ignore the sound engine, keep small
-     * values). Keeps the hits array bounded when watching wide ranges. A throw
-     * is contained (treated as `false`) so it can't abort the emulation.
+     * Keep a hit only when this returns true — watch a wide region but record only
+     * what matters. A throw is treated as `false` (never aborts the emulation).
      */
     filter?: (hit: WatchHit) => boolean;
     /**
-     * Cap the number of recorded hits (the first `maxHits` are kept; later ones
-     * are dropped). Prevents unbounded memory growth on wide/long watches. The
-     * watchpoint stays active — call `stop()` to remove it.
+     * Cap recorded hits (first `maxHits` kept); guards memory on wide/long watches.
+     * The watchpoint stays active — call `stop()` to remove it.
      */
     maxHits?: number;
   }): {
@@ -451,9 +435,7 @@ export class ScriptingEngine {
       if (maxHits !== undefined && hits.length >= maxHits) {
         return;
       }
-      // For DMA, use the captured trigger instruction. For CPU (and HLE-BIOS,
-      // which runs inside a SWI), read the live PC + CPSR straight from the CPU,
-      // so attribution is correct even if the cpuCpsr callback wasn't wired.
+      // DMA: the captured trigger instruction; CPU: the live PC + CPSR.
       const origin = dmaOrigin ?? captureOrigin(this.#gba.armCpu.registers[15]!, this.#gba.armCpu.cpsr);
       const hit: WatchHit = {
         pc: origin.pc,
@@ -469,7 +451,7 @@ export class ScriptingEngine {
         try {
           keep = filter(hit);
         } catch {
-          keep = false; // a throwing filter must not abort emulation mid-instruction
+          keep = false; // a throwing filter must not abort emulation
         }
         if (!keep) {
           return;

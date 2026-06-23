@@ -301,29 +301,24 @@ for (const h of w.hits) {
 }
 ```
 
-Each hit has: `pc`, `instructionAddress`, `address`, `value`, `size`, `thumb`, `source`.
-
-- `source` is `'cpu'` or `'dma0'`..`'dma3'`.
-- For a **DMA** write, `instructionAddress` is the instruction that _started_ the DMA (the store to `DMAxCNT_H`) — the per-word copies have no instruction of their own. So a watchpoint on a DMA-filled buffer (VRAM, palette, OAM…) points you at the code that kicked off the copy, e.g. a decompress-to-VRAM routine.
-- `address` is the specific watched byte that changed (clamped into the range, even when a wide store straddles it); `value` is masked to `size`.
-- Writes the hardware ignores (8-bit writes to OAM / OBJ-VRAM, writes to ROM) do **not** produce hits.
+Each hit has: `pc`, `instructionAddress`, `address`, `value`, `size`, `thumb`, and `source` (`'cpu'` or `'dma0'`..`'dma3'`). For a **DMA** write, `instructionAddress` is the instruction that started the DMA, so a watchpoint on a DMA-filled buffer (VRAM, palette, OAM) points at the code that kicked off the copy.
 
 **Options:**
 
+- `length` — watch a multi-byte range (default 1).
+- `filter(hit)` — record only matching hits, so you can watch a wide region without the `hits` array exploding.
+- `maxHits` — cap recorded hits (keeps the first N).
+
 ```javascript
-watchMemory({ address: 0x03005220, length: 4 }); // watch a 4-byte range
-// filter: keep only the writes you care about — lets you watch a wide region
-// without the hits array exploding (e.g. ignore the sound engine, keep small values)
 watchMemory({
   address: 0x03000000,
   length: 0x8000, // all of IWRAM
-  filter: (h) => h.instructionAddress >= 0x08000000 && (h.value & 0xff) <= 6,
+  filter: (h) => h.source === 'cpu' && (h.value & 0xff) <= 6,
+  maxHits: 1000,
 });
-// maxHits: cap recorded hits (keeps the first N) so a wide/long watch can't grow unbounded
-watchMemory({ address: 0x06000000, length: 0x18000, maxHits: 1000 });
 ```
 
-Call `clearWatchpoints()` to remove the watchpoints you created (it doesn't touch watchpoints set by other code). Watchpoints are free when none are set (the write fast-path early-outs), so leaving the API unused costs nothing.
+`clearWatchpoints()` removes the watchpoints you created.
 
 ### `filterMemory(addresses, options)` — Narrow Down Candidates
 

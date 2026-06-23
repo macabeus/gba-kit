@@ -93,12 +93,7 @@ export class GbaSystemBus implements MemoryBus {
   /** Callback when BG2/BG3 reference point registers are written (for PPU ref point reload) */
   onBgRefPointWrite?: (bgIndex: 2 | 3, isX: boolean) => void;
 
-  /**
-   * Data watchpoints. Each fires its callback whenever a write *commits* to a
-   * byte in the range [start, end). Used to discover *which code* writes a given
-   * address (reverse-engineering / decomp assist). Kept empty by default so the
-   * write fast-path pays nothing until a watchpoint is set.
-   */
+  /** Data watchpoints: fire when a write commits to [start, end). Empty until set. */
   readonly #watchpoints: Array<{
     start: number;
     end: number;
@@ -115,16 +110,14 @@ export class GbaSystemBus implements MemoryBus {
     this.#dmaOrigin = origin;
   }
 
-  /** Return write attribution to the CPU. */
   clearDmaSource(): void {
     this.#dmaChannel = -1;
     this.#dmaOrigin = null;
   }
 
   /**
-   * Register a write watchpoint over [address, address+length). Returns a
-   * disposer that removes it. A length < 1 is clamped to 1 so the start byte is
-   * always watched (rather than silently matching nothing).
+   * Register a write watchpoint over [address, address+length); returns a disposer.
+   * `length` is clamped to >= 1.
    */
   addWriteWatchpoint(address: number, length: number, onWrite: (info: WatchpointWrite) => void): () => void {
     const len = length >= 1 ? length : 1;
@@ -143,17 +136,14 @@ export class GbaSystemBus implements MemoryBus {
     this.#watchpoints.length = 0;
   }
 
-  /** Whether any data watchpoint is currently registered (cheap hot-path gate). */
+  /** Whether any data watchpoint is registered (hot-path gate). */
   hasWatchpoints(): boolean {
     return this.#watchpoints.length > 0;
   }
 
   /**
-   * Notify any watchpoints overlapping a *committed* write of `value` (already
-   * masked to `size` bytes) at the canonical aligned base `base`. Hot-path:
-   * early-out when no watchpoints, and avoid allocating in the common
-   * single-watchpoint case; only snapshot when several exist (so a callback may
-   * dispose/clear mid-notify without corrupting iteration).
+   * Notify watchpoints overlapping a committed write of `value` (masked to `size`)
+   * at canonical base `base`. Callers gate on `hasWatchpoints()` first.
    */
   #notifyWrite(base: number, value: number, size: number): void {
     const wps = this.#watchpoints;
@@ -161,13 +151,11 @@ export class GbaSystemBus implements MemoryBus {
     const hi = (lo + size) >>> 0;
     const dmaChannel = this.#dmaChannel;
     const dmaOrigin = this.#dmaOrigin;
-    // Snapshot only when several watchpoints exist, so a callback may dispose/clear
-    // mid-notify without corrupting iteration (the single-watchpoint case is alloc-free).
+    // Snapshot when several exist, so a callback may dispose/clear mid-notify safely.
     const list = wps.length === 1 ? wps : wps.slice();
     for (const wp of list) {
       if (lo < wp.end && hi > wp.start) {
-        // Report the specific watched byte within the access, not the access base.
-        const address = (lo > wp.start ? lo : wp.start) >>> 0;
+        const address = (lo > wp.start ? lo : wp.start) >>> 0; // the watched byte, not the access base
         wp.onWrite({ address, value, size, dmaChannel, dmaOrigin });
       }
     }
@@ -443,8 +431,7 @@ export class GbaSystemBus implements MemoryBus {
         this.#write16To(this.oam, addr & 0x3ff, value);
         break;
       case 0x0d:
-        // EEPROM serial write — only bit 0 matters; a serial port, no addressable
-        // byte, so it produces no watchpoint hit.
+        // EEPROM serial write — only bit 0 matters; serial port, no addressable byte.
         this.#eeprom.write(value & 1);
         committed = false;
         break;
@@ -491,7 +478,7 @@ export class GbaSystemBus implements MemoryBus {
         this.#write32To(this.oam, addr & 0x3ff, value);
         break;
       case 0x0d:
-        // EEPROM serial write — a serial port, no addressable byte, so no hit.
+        // EEPROM serial write — serial port, no addressable byte.
         this.#eeprom.write(value & 1);
         committed = false;
         break;
@@ -564,10 +551,8 @@ export class GbaSystemBus implements MemoryBus {
   // ─── VRAM Mirroring ───────────────────────────────────────────────
 
   /**
-   * Map a write address to the canonical (un-mirrored) address of the physical
-   * byte it stores to, mirroring the offset masks used by the storage paths.
-   * Watchpoints are registered on canonical addresses, so writes that reach the
-   * same byte through a region mirror still match.
+   * Canonical (un-mirrored) address of the byte a write stores to, so writes via a
+   * region mirror match watchpoints registered on the canonical address.
    */
   #canonicalWriteAddress(address: number): number {
     switch ((address >>> 24) & 0xff) {
