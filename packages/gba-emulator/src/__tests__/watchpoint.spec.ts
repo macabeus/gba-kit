@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import { Gba } from '../gba.js';
 import { ScriptingEngine, type ScriptingHost } from '../scripting.js';
 import { GbaSystemBus, type WatchpointWrite } from '../system-bus.js';
-import type { WriteSource } from '../write-source.js';
 
 const stubHost: ScriptingHost = {
   writeScreenshot: async () => {},
@@ -28,8 +27,8 @@ describe('GbaSystemBus write watchpoints', () => {
     bus.write16(0x03005220, 0x1234); // hit (size 2)
 
     expect(hits).toEqual([
-      { address: 0x03005220, value: 2, size: 1, source: { kind: 'cpu' } },
-      { address: 0x03005220, value: 0x1234, size: 2, source: { kind: 'cpu' } },
+      { address: 0x03005220, value: 2, size: 1, dmaChannel: -1, dmaOrigin: null },
+      { address: 0x03005220, value: 0x1234, size: 2, dmaChannel: -1, dmaOrigin: null },
     ]);
   });
 
@@ -112,20 +111,23 @@ describe('GbaSystemBus write watchpoints', () => {
     expect(count).toBe(0);
   });
 
-  it('attributes DMA writes to a dma source with the channel and start origin', () => {
+  it('attributes DMA writes to a dma channel + start origin, then back to the CPU', () => {
     const bus = new GbaSystemBus();
-    const hits: WriteSource[] = [];
-    bus.addWriteWatchpoint(0x02000000, 1, (info) => hits.push(info.source));
+    const hits: Array<Pick<WatchpointWrite, 'dmaChannel' | 'dmaOrigin'>> = [];
+    bus.addWriteWatchpoint(0x02000000, 1, ({ dmaChannel, dmaOrigin }) => hits.push({ dmaChannel, dmaOrigin }));
 
-    // Emulate what the DMA controller does: writes wrapped in a dma source.
+    // Emulate what the DMA controller does: mark the source around its writes.
     const origin = { pc: 0x08001234, instructionAddress: 0x08001232, thumb: true };
-    bus.runWithWriteSource({ kind: 'dma', channel: 3, origin }, () => {
-      bus.write16(0x02000000, 0xabcd);
-    });
-    // ...and a plain CPU write outside the wrapper.
+    bus.setDmaSource(3, origin);
+    bus.write16(0x02000000, 0xabcd);
+    bus.clearDmaSource();
+    // ...and a plain CPU write afterwards.
     bus.write16(0x02000000, 0x0001);
 
-    expect(hits).toEqual([{ kind: 'dma', channel: 3, origin }, { kind: 'cpu' }]);
+    expect(hits).toEqual([
+      { dmaChannel: 3, dmaOrigin: origin },
+      { dmaChannel: -1, dmaOrigin: null },
+    ]);
   });
 
   it('end-to-end: a real immediate DMA write is attributed to the channel + start instruction', () => {
@@ -149,12 +151,9 @@ describe('GbaSystemBus write watchpoints', () => {
 
     expect(bus.read16(0x02000100)).toBe(0xbeef); // copy happened
     expect(hits).toHaveLength(1);
-    expect(hits[0]!.source).toEqual({
-      kind: 'dma',
-      channel: 3,
-      // The store to DMA3CNT_H was at pc-2 (Thumb).
-      origin: { pc: 0x08001236, instructionAddress: 0x08001234, thumb: true },
-    });
+    expect(hits[0]!.dmaChannel).toBe(3);
+    // The store to DMA3CNT_H was at pc-2 (Thumb).
+    expect(hits[0]!.dmaOrigin).toEqual({ pc: 0x08001236, instructionAddress: 0x08001234, thumb: true });
     expect(hits[0]!.value).toBe(0xbeef);
   });
 

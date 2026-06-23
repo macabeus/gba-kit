@@ -99,9 +99,8 @@ export class Gba {
       // For data watchpoints: attribute DMA writes to the channel + the instruction
       // that started it (armCpu is created just below; only invoked later, during DMA).
       getOrigin: () => captureOrigin(this.armCpu.registers[15]!, this.armCpu.cpsr),
-      // Only wrap a transfer's writes when a watchpoint actually exists.
-      hasWatchpoints: () => this.bus.hasWatchpoints(),
-      withSource: (source, fn) => this.bus.runWithWriteSource(source, fn),
+      setDmaSource: (channel, origin) => this.bus.setDmaSource(channel, origin),
+      clearDmaSource: () => this.bus.clearDmaSource(),
     });
 
     // Create CPU with GBA BIOS SWI handler

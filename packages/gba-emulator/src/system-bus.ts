@@ -24,7 +24,7 @@ import type { InterruptController } from './interrupts.js';
 import type { EepromSnapshot, SystemBusSnapshot } from './savestate.js';
 import type { TimerController } from './timers.js';
 import { MMIO } from './types.js';
-import { CPU_WRITE_SOURCE, type WriteSource } from './write-source.js';
+import type { WriteOrigin } from './write-source.js';
 
 /** A committed write reported to a data watchpoint. */
 export interface WatchpointWrite {
@@ -34,8 +34,10 @@ export interface WatchpointWrite {
   value: number;
   /** Access size in bytes (1, 2 or 4). */
   size: number;
-  /** What performed the write (CPU instruction, a DMA channel, or HLE BIOS). */
-  source: WriteSource;
+  /** Active DMA channel (0-3) if a DMA performed the write, else -1 (a CPU/BIOS store). */
+  dmaChannel: number;
+  /** The DMA's start instruction when `dmaChannel >= 0`, else null. */
+  dmaOrigin: WriteOrigin | null;
 }
 
 export class GbaSystemBus implements MemoryBus {
@@ -103,21 +105,20 @@ export class GbaSystemBus implements MemoryBus {
     onWrite: (info: WatchpointWrite) => void;
   }> = [];
 
-  /** Attribution for the write currently in flight (CPU unless a DMA/BIOS sets it). */
-  #writeSource: WriteSource = CPU_WRITE_SOURCE;
+  /** DMA channel (0-3) currently transferring, or -1 for CPU writes; attributes hits. */
+  #dmaChannel = -1;
+  #dmaOrigin: WriteOrigin | null = null;
 
-  /**
-   * Run `fn` with every committed write attributed to `source` (for watchpoints).
-   * Restores the previous source afterwards, so nested/immediate DMA is safe.
-   */
-  runWithWriteSource<T>(source: WriteSource, fn: () => T): T {
-    const prev = this.#writeSource;
-    this.#writeSource = source;
-    try {
-      return fn();
-    } finally {
-      this.#writeSource = prev;
-    }
+  /** Attribute subsequent committed writes to a DMA channel (called by the DMA controller). */
+  setDmaSource(channel: number, origin: WriteOrigin): void {
+    this.#dmaChannel = channel;
+    this.#dmaOrigin = origin;
+  }
+
+  /** Return write attribution to the CPU. */
+  clearDmaSource(): void {
+    this.#dmaChannel = -1;
+    this.#dmaOrigin = null;
   }
 
   /**
@@ -156,18 +157,18 @@ export class GbaSystemBus implements MemoryBus {
    */
   #notifyWrite(base: number, value: number, size: number): void {
     const wps = this.#watchpoints;
-    if (wps.length === 0) {
-      return;
-    }
     const lo = base >>> 0;
     const hi = (lo + size) >>> 0;
-    const source = this.#writeSource;
+    const dmaChannel = this.#dmaChannel;
+    const dmaOrigin = this.#dmaOrigin;
+    // Snapshot only when several watchpoints exist, so a callback may dispose/clear
+    // mid-notify without corrupting iteration (the single-watchpoint case is alloc-free).
     const list = wps.length === 1 ? wps : wps.slice();
     for (const wp of list) {
       if (lo < wp.end && hi > wp.start) {
         // Report the specific watched byte within the access, not the access base.
         const address = (lo > wp.start ? lo : wp.start) >>> 0;
-        wp.onWrite({ address, value, size, source });
+        wp.onWrite({ address, value, size, dmaChannel, dmaOrigin });
       }
     }
   }
@@ -413,7 +414,7 @@ export class GbaSystemBus implements MemoryBus {
         committed = false;
         break;
     }
-    if (committed) {
+    if (committed && this.#watchpoints.length > 0) {
       this.#notifyWrite(this.#canonicalWriteAddress(address), value & 0xff, 1);
     }
   }
@@ -461,7 +462,7 @@ export class GbaSystemBus implements MemoryBus {
         committed = false;
         break;
     }
-    if (committed) {
+    if (committed && this.#watchpoints.length > 0) {
       this.#notifyWrite(this.#canonicalWriteAddress(addr), value & 0xffff, 2);
     }
   }
@@ -508,7 +509,7 @@ export class GbaSystemBus implements MemoryBus {
         committed = false;
         break;
     }
-    if (committed) {
+    if (committed && this.#watchpoints.length > 0) {
       this.#notifyWrite(this.#canonicalWriteAddress(addr), value >>> 0, 4);
     }
   }

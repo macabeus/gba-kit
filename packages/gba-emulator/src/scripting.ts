@@ -447,16 +447,14 @@ export class ScriptingEngine {
     const filter = options.filter;
     const maxHits = options.maxHits;
     const hits: WatchHit[] = [];
-    const busDispose = this.#gba.bus.addWriteWatchpoint(options.address, length, ({ address, value, size, source }) => {
+    const busDispose = this.#gba.bus.addWriteWatchpoint(options.address, length, ({ address, value, size, dmaChannel, dmaOrigin }) => {
       if (maxHits !== undefined && hits.length >= maxHits) {
         return;
       }
       // For DMA, use the captured trigger instruction. For CPU (and HLE-BIOS,
       // which runs inside a SWI), read the live PC + CPSR straight from the CPU,
       // so attribution is correct even if the cpuCpsr callback wasn't wired.
-      const origin =
-        source.kind === 'dma' ? source.origin : captureOrigin(this.#gba.armCpu.registers[15]!, this.#gba.armCpu.cpsr);
-      const sourceLabel: WatchHit['source'] = source.kind === 'dma' ? (`dma${source.channel}` as WatchHit['source']) : 'cpu';
+      const origin = dmaOrigin ?? captureOrigin(this.#gba.armCpu.registers[15]!, this.#gba.armCpu.cpsr);
       const hit: WatchHit = {
         pc: origin.pc,
         instructionAddress: origin.instructionAddress,
@@ -464,7 +462,7 @@ export class ScriptingEngine {
         value: value >>> 0,
         size,
         thumb: origin.thumb,
-        source: sourceLabel,
+        source: dmaChannel >= 0 ? (`dma${dmaChannel}` as WatchHit['source']) : 'cpu',
       };
       if (filter) {
         let keep = false;
