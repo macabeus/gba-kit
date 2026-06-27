@@ -1,6 +1,6 @@
 {
   "name": "@gba-kit/debug-info",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Parse ELF symbols and DWARF debug info (line tables) for GBA decomp debugging",
   "author": "macabeus",
   "type": "module",
