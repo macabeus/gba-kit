@@ -1,48 +1,36 @@
 import fs from 'fs/promises';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { cors } from 'hono/cors';
 import path from 'path';
 
 export interface ServerConfig {
   romPath?: string;
-  mizuchiDbPath?: string;
+  /** Sidecar `-g` ELF (DWARF + symbols) served to auto-populate the Source panel. */
+  elfPath?: string;
 }
 
 export function createServer(config: ServerConfig) {
-  const { romPath, mizuchiDbPath } = config;
+  const { romPath, elfPath } = config;
+
+  const serveFile = async (c: Context, filePath: string | undefined, label: string) => {
+    if (!filePath) {
+      return c.json({ error: `No ${label} path configured` }, 404);
+    }
+    try {
+      const buffer = await fs.readFile(filePath);
+      return c.body(buffer, 200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="${path.basename(filePath)}"`,
+      });
+    } catch {
+      return c.json({ error: `${label} file not found: ${filePath}` }, 404);
+    }
+  };
 
   const app = new Hono()
     .use('/api/*', cors())
-    .get('/api/loadRom', async (c) => {
-      if (!romPath) {
-        return c.json({ error: 'No ROM path configured' }, 404);
-      }
-
-      try {
-        const romBuffer = await fs.readFile(romPath);
-        return c.body(romBuffer, 200, {
-          'Content-Type': 'application/octet-stream',
-          'Content-Disposition': `attachment; filename="${path.basename(romPath)}"`,
-        });
-      } catch {
-        return c.json({ error: `ROM file not found: ${romPath}` }, 404);
-      }
-    })
-    .get('/api/mizuchiDb', async (c) => {
-      if (!mizuchiDbPath) {
-        return c.json({ error: 'No mizuchi-db path configured' }, 404);
-      }
-
-      try {
-        const raw = await fs.readFile(mizuchiDbPath, 'utf-8');
-        const parsed = JSON.parse(raw);
-        // Strip large fields not needed by the webapp (embeddings + index metadata)
-        const { vectors: _vectors, indexMetadata: _meta, ...rest } = parsed;
-        return c.json(rest);
-      } catch {
-        return c.json({ error: `Mizuchi DB file not found: ${mizuchiDbPath}` }, 404);
-      }
-    });
+    .get('/api/loadRom', (c) => serveFile(c, romPath, 'ROM'))
+    .get('/api/loadElf', (c) => serveFile(c, elfPath, 'ELF'));
 
   return app;
 }

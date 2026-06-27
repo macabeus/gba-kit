@@ -1,0 +1,50 @@
+{
+  "symbols": {
+    ".gcc2_compiled.": 134217736,
+    "__gccmain": 134217734,
+    "_start": 134217728,
+    "add": 134217736,
+    "bump": 134217748,
+    "g_counter": 50331648,
+    "main": 134217764,
+    "square": 134217740,
+    "triple": 134217800
+  },
+  "lines": {
+    "0x8000048": {
+      "func": "triple",
+      "file": "util.c",
+      "line": 3
+    },
+    "0x8000008": {
+      "func": "add",
+      "file": "main.c",
+      "line": 15
+    },
+    "0x8000006": {
+      "func": "__gccmain",
+      "file": "??",
+      "line": null
+    },
+    "0x8000000": {
+      "func": "_start",
+      "file": "??",
+      "line": null
+    },
+    "0x8000014": {
+      "func": "bump",
+      "file": "main.c",
+      "line": 23
+    },
+    "0x8000024": {
+      "func": "main",
+      "file": "main.c",
+      "line": 26
+    },
+    "0x800000c": {
+      "func": "square",
+      "file": "main.c",
+      "line": 19
+    }
+  }
+}

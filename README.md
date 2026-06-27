@@ -41,6 +41,7 @@
 | [`@gba-kit/gba-node`](packages/gba-node)         | Headless Node.js runtime for scripted GBA emulation                                         |
 | [`@gba-kit/gba-browser`](packages/gba-browser)   | Browser runtime for GBA emulation (Canvas rendering, keyboard input, IndexedDB save states) |
 | [`@gba-kit/gba-react`](packages/gba-react)       | React hooks for GBA emulation (`useEmulator`, `useEmulatorCanvas`, `useEmulatorKeyboard`)   |
+| [`@gba-kit/debug-info`](packages/debug-info)     | Parse ELF symbols + DWARF line tables (PC→source) for source-level debugging                |
 
 ## Apps
 
@@ -58,6 +59,15 @@ gba-kit supports headless scripted emulation via `@gba-kit/gba-node`. See the **
 
 - Node.js >= 22
 - pnpm
+
+A plain `git clone` is enough to build, run, and test everything. The repo has one
+git submodule (the agbcc compiler under `packages/debug-info/test-projects/agbcc-min/agbcc`),
+but it's only needed to **rebuild** the `@gba-kit/debug-info` test fixtures — not to
+run the tests. Fetch it only if you intend to change those fixtures:
+
+```bash
+git submodule update --init --recursive
+```
 
 ### Install and Build
 
@@ -106,6 +116,7 @@ gba-kit/
     gba-node/         # Node.js runtime (depends on both)
     gba-browser/      # Browser runtime (Canvas, keyboard, IndexedDB)
     gba-react/        # React hooks (wraps gba-browser)
+    debug-info/       # ELF/DWARF parser (PC→source)
   apps/
     webapp/           # Browser debugger UI + dev server
 ```

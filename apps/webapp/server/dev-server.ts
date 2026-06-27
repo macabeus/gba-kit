@@ -1,7 +1,7 @@
 /**
  * Development server for the webapp with hot reload.
  *
- * Usage: npx tsx apps/webapp/server/dev-server.ts --rom ./game.gba
+ * Usage: npx tsx apps/webapp/server/dev-server.ts --rom ./game.gba [--elf ./game.elf]
  */
 import { serve } from '@hono/node-server';
 import path from 'path';
@@ -16,23 +16,23 @@ async function main() {
   // Parse CLI args
   const args = process.argv.slice(2);
   let romPath: string | undefined;
-  let mizuchiDbPath: string | undefined;
+  let elfPath: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--rom' && args[i + 1]) {
       romPath = path.resolve(args[i + 1]!);
       i++;
-    } else if (args[i] === '--mizuchi-db' && args[i + 1]) {
-      mizuchiDbPath = path.resolve(args[i + 1]!);
+    } else if (args[i] === '--elf' && args[i + 1]) {
+      elfPath = path.resolve(args[i + 1]!);
       i++;
     }
   }
 
   const hasRom = !!romPath;
-  const hasMizuchiDb = !!mizuchiDbPath;
+  const hasElf = !!elfPath;
 
   // Start the API backend on port 3001
-  const apiApp = createServer({ romPath, mizuchiDbPath });
+  const apiApp = createServer({ romPath, elfPath });
   const apiPort = 3001;
 
   await new Promise<void>((resolve) => {
@@ -48,7 +48,7 @@ async function main() {
         const config = JSON.stringify({
           serverBaseUrl: '',
           hasRom,
-          hasMizuchiDb,
+          hasElf,
         });
         const script = `<script>window.__GBAKIT_CONFIG__ = ${config};</script>`;
         return html.replace('</head>', `${script}\n</head>`);
@@ -72,8 +72,8 @@ async function main() {
   if (romPath) {
     console.log(`  ROM:      ${romPath}`);
   }
-  if (mizuchiDbPath) {
-    console.log(`  Mizuchi:  ${mizuchiDbPath}`);
+  if (elfPath) {
+    console.log(`  ELF:      ${elfPath}`);
   }
 }
 

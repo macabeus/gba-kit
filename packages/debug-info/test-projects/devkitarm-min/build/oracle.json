@@ -1,0 +1,51 @@
+{
+  "symbols": {
+    "add": 134217756,
+    "__bss_end__": 134221892,
+    "_bss_end__": 134221892,
+    "__bss_start": 134221888,
+    "__bss_start__": 134221888,
+    "bump": 134217768,
+    "__data_start": 134221888,
+    "_edata": 134221888,
+    "__end__": 134221892,
+    "_end": 134221892,
+    "g_counter": 134221888,
+    "main": 134217728,
+    "square": 134217760,
+    "_stack": 524288,
+    "triple": 134217784
+  },
+  "lines": {
+    "0x800001c": {
+      "func": "add",
+      "file": "main.c",
+      "line": 16
+    },
+    "0x8000028": {
+      "func": "bump",
+      "file": "main.c",
+      "line": 24
+    },
+    "0x8001040": {
+      "func": "__bss_start__",
+      "file": "main.c",
+      "line": 11
+    },
+    "0x8000000": {
+      "func": "main",
+      "file": "main.c",
+      "line": 27
+    },
+    "0x8000020": {
+      "func": "square",
+      "file": "main.c",
+      "line": 20
+    },
+    "0x8000038": {
+      "func": "triple",
+      "file": "util.c",
+      "line": 6
+    }
+  }
+}

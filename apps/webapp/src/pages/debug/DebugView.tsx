@@ -3,12 +3,12 @@ import clsx from 'clsx';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { BreakpointPanel } from './BreakpointPanel';
-import { CodeAtlasView } from './CodeAtlasView';
 import { DisassemblyView } from './DisassemblyView';
 import { IoRegisterView } from './IoRegisterView';
 import { MemoryViewer } from './MemoryViewer';
 import { RegisterView } from './RegisterView';
 import { ScreenView } from './ScreenView';
+import { SourceView } from './SourceView';
 
 interface DebugViewProps {
   emulator: EmulatorBridge;
@@ -19,7 +19,7 @@ interface DebugViewProps {
   onStepOver: () => void;
 }
 
-type CenterPanel = 'disassembly' | 'code-atlas';
+type CenterPanel = 'disassembly' | 'source';
 type BottomRightPanel = 'breakpoints' | 'io-registers';
 
 export function DebugView({ emulator, emuState, onRun, onPause, onStep, onStepOver }: DebugViewProps) {
@@ -121,7 +121,7 @@ export function DebugView({ emulator, emuState, onRun, onPause, onStep, onStepOv
           <ScreenView canvasRef={canvasRef} />
         </div>
 
-        {/* Top-center: Disassembly / Code Atlas */}
+        {/* Top-center: Disassembly / Source */}
         <div className="row-span-2 min-h-0 flex flex-col">
           <div className="flex gap-1 mb-1">
             <PanelTab
@@ -129,11 +129,7 @@ export function DebugView({ emulator, emuState, onRun, onPause, onStep, onStepOv
               active={centerPanel === 'disassembly'}
               onClick={() => setCenterPanel('disassembly')}
             />
-            <PanelTab
-              label="Code Atlas"
-              active={centerPanel === 'code-atlas'}
-              onClick={() => setCenterPanel('code-atlas')}
-            />
+            <PanelTab label="Source" active={centerPanel === 'source'} onClick={() => setCenterPanel('source')} />
           </div>
           <div className="flex-1 min-h-0">
             {centerPanel === 'disassembly' ? (
@@ -144,7 +140,7 @@ export function DebugView({ emulator, emuState, onRun, onPause, onStep, onStepOv
                 onBreakpointChange={bumpBreakpoints}
               />
             ) : (
-              <CodeAtlasView pc={pc} hasMizuchiDb={window.__GBAKIT_CONFIG__?.hasMizuchiDb ?? false} />
+              <SourceView emulator={emulator} pc={pc} />
             )}
           </div>
         </div>

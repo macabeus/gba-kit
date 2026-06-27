@@ -16,6 +16,11 @@ export interface HeadlessRuntimeOptions {
   loadSavePath?: string;
   outputDir: string;
   logFn: (message: string) => void;
+  /**
+   * Optional path to a (`-g`-built) sidecar ELF. Enables source-level scripting
+   * (pcToSource, symbolToAddress, watchSymbol, and source-annotated watch hits).
+   */
+  elfPath?: string;
 }
 
 export class HeadlessRuntime {
@@ -81,7 +86,15 @@ export class HeadlessRuntime {
       gba.deserialize(snapshot);
     }
 
-    return new HeadlessRuntime(gba, host, options.outputDir);
+    const runtime = new HeadlessRuntime(gba, host, options.outputDir);
+
+    // Load debug info (ELF symbols + DWARF) if provided.
+    if (options.elfPath) {
+      const elfData = await fs.readFile(options.elfPath);
+      runtime.engine.loadDebugInfo(new Uint8Array(elfData));
+    }
+
+    return runtime;
   }
 
   /** Execute a script string against the emulator */
@@ -125,7 +138,16 @@ export class HeadlessRuntime {
       filterMemory: (addresses: number[], options: Parameters<ScriptingEngine['filterMemory']>[1]) =>
         engine.filterMemory(addresses, options),
       watchMemory: (options: Parameters<ScriptingEngine['watchMemory']>[0]) => engine.watchMemory(options),
+      watchSymbol: (name: string, options?: Parameters<ScriptingEngine['watchSymbol']>[1]) =>
+        engine.watchSymbol(name, options),
       clearWatchpoints: () => engine.clearWatchpoints(),
+
+      // Debug info (ELF symbols + DWARF) — available when created with `elfPath`.
+      hasDebugInfo: () => engine.hasDebugInfo,
+      pcToSource: (pc: number) => engine.pcToSource(pc),
+      pcToFunction: (pc: number) => engine.pcToFunction(pc),
+      addressToSymbol: (addr: number) => engine.addressToSymbol(addr),
+      symbolToAddress: (name: string) => engine.symbolToAddress(name),
 
       // Save states
       saveState: (options: Parameters<ScriptingEngine['saveState']>[0]) => engine.saveState(options),

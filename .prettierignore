@@ -3,3 +3,6 @@ dist/
 *.tsbuildinfo
 CHANGELOG.md
 pnpm-lock.yaml
+
+# Vendored
+packages/debug-info/test-projects/agbcc-min/agbcc/
