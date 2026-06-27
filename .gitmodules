@@ -1,0 +1,3 @@
+[submodule "packages/debug-info/test-projects/agbcc-min/agbcc"]
+	path = packages/debug-info/test-projects/agbcc-min/agbcc
+	url = https://github.com/Dream-Atelier/agbcc.git

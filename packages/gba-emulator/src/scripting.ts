@@ -6,6 +6,7 @@
  * Both web and Node.js consumers provide their own ScriptingHost implementation.
  */
 import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassembler';
+import { DebugInfo, type SourceLocation } from '@gba-kit/debug-info';
 
 import { Gba } from './gba.js';
 import type { CpuSnapshot, GbaSnapshot } from './savestate.js';
@@ -143,6 +144,13 @@ export interface WatchHit {
   size: number;
   thumb: boolean;
   source: 'cpu' | 'dma0' | 'dma1' | 'dma2' | 'dma3';
+  /**
+   * The C `file:line` (+ function) of the writing instruction, when debug info
+   * is loaded (see `loadDebugInfo`). This is the "a memory write names its own
+   * source line" payoff. Undefined when no debug info, or for code with none
+   * (e.g. INCLUDE_ASM stubs, library code).
+   */
+  location?: SourceLocation;
 }
 
 // ─── Scripting Engine ────────────────────────────────────────────────
@@ -163,9 +171,59 @@ export class ScriptingEngine {
   cpuSerialize: (() => CpuSnapshot) | undefined;
   cpuDeserialize: ((snapshot: CpuSnapshot) => void) | undefined;
 
+  /** Optional ELF symbol/DWARF info enabling source-level queries. */
+  #debugInfo: DebugInfo | null = null;
+
   constructor(gba: Gba, host: ScriptingHost) {
     this.#gba = gba;
     this.#host = host;
+  }
+
+  // ─── Debug info (ELF symbols + DWARF) ────────────────────────────
+
+  /**
+   * Load symbol/DWARF info from a (`-g`-built) ELF image. Enables
+   * `pcToSource`/`symbolToAddress`/etc. and annotates watchpoint hits with the
+   * writing instruction's source line. The `.gba` ROM has no debug info — pass
+   * the sidecar ELF's bytes (its loadable bytes match the ROM, so addresses
+   * line up).
+   */
+  loadDebugInfo(elfBytes: Uint8Array): void {
+    this.#debugInfo = DebugInfo.fromElf(elfBytes);
+  }
+
+  /** Provide an already-parsed DebugInfo (e.g. shared with a UI). */
+  setDebugInfo(debugInfo: DebugInfo | null): void {
+    this.#debugInfo = debugInfo;
+  }
+
+  get debugInfo(): DebugInfo | null {
+    return this.#debugInfo;
+  }
+
+  get hasDebugInfo(): boolean {
+    return this.#debugInfo !== null;
+  }
+
+  /** Map a PC to `{ file, line, func }`, or null (no debug info / not in C). */
+  pcToSource(pc: number): SourceLocation | null {
+    return this.#debugInfo?.pcToSource(pc) ?? null;
+  }
+
+  /** The function containing `pc`, as `{ name, address }`, or null. */
+  pcToFunction(pc: number): { name: string; address: number } | null {
+    const fn = this.#debugInfo?.pcToFunction(pc);
+    return fn ? { name: fn.name, address: fn.address } : null;
+  }
+
+  /** Nearest preceding symbol to `addr` as `{ name, offset }`, or null. */
+  addressToSymbol(addr: number): { name: string; offset: number } | null {
+    return this.#debugInfo?.addressToSymbol(addr) ?? null;
+  }
+
+  /** Address of a named symbol (function or global), or null. */
+  symbolToAddress(name: string): number | null {
+    return this.#debugInfo?.symbolToAddress(name) ?? null;
   }
 
   get actionsExecuted(): number {
@@ -449,6 +507,11 @@ export class ScriptingEngine {
           thumb: origin.thumb,
           source: dmaChannel >= 0 ? (`dma${dmaChannel}` as WatchHit['source']) : 'cpu',
         };
+        // Annotate with the writer's C source line, when debug info is loaded.
+        const loc = this.#debugInfo?.pcToSource(hit.instructionAddress);
+        if (loc) {
+          hit.location = loc;
+        }
         if (filter) {
           let keep = false;
           try {
@@ -470,6 +533,31 @@ export class ScriptingEngine {
     };
     this.#watchDisposers.add(busDispose);
     return { hits, stop };
+  }
+
+  /**
+   * Watch a named global by symbol (requires debug info). Resolves the symbol to
+   * its address, then behaves like `watchMemory`. The watch length defaults to the
+   * symbol's own size (st_size) so a multi-byte global is watched in full; pass
+   * `length` to override. Throws if no debug info is loaded or the symbol is unknown.
+   *
+   * @example
+   *   const w = watchSymbol('gPlayerState'); // covers the whole global
+   *   await press('a'); for (const h of w.hits) console.log(h.location, h.value);
+   */
+  watchSymbol(
+    name: string,
+    options?: { length?: number; filter?: (hit: WatchHit) => boolean; maxHits?: number },
+  ): { hits: WatchHit[]; stop: () => void } {
+    if (!this.#debugInfo) {
+      throw new Error('watchSymbol requires debug info; call loadDebugInfo(elfBytes) first');
+    }
+    const address = this.#debugInfo.symbolToAddress(name);
+    if (address === null) {
+      throw new Error(`watchSymbol: unknown symbol "${name}"`);
+    }
+    const length = options?.length ?? this.#debugInfo.symbolSize(name) ?? 1;
+    return this.watchMemory({ address, length, filter: options?.filter, maxHits: options?.maxHits });
   }
 
   /** Remove the data watchpoints created via this engine's `watchMemory`. */

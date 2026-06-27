@@ -5,6 +5,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # GBA cross toolchain for the @gba-kit/debug-info test ELFs
+      - name: Install arm-none-eabi GCC 14
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '14.2.Rel1'
+
+      # Build the agbcc (GCC 2.95) compiler from the submodule once
+      - name: Resolve agbcc commit
+        id: agbcc-rev
+        run: echo "sha=$(git rev-parse HEAD:packages/debug-info/test-projects/agbcc-min/agbcc)" >> "$GITHUB_OUTPUT"
+      - name: Cache agbcc compiler
+        id: agbcc-cache
+        uses: actions/cache@v4
+        with:
+          path: packages/debug-info/test-projects/agbcc-min/agbcc/agbcc
+          key: agbcc-${{ runner.os }}-${{ steps.agbcc-rev.outputs.sha }}
+      - name: Build agbcc compiler
+        if: steps.agbcc-cache.outputs.cache-hit != 'true'
+        run: ./build.sh
+        working-directory: packages/debug-info/test-projects/agbcc-min/agbcc
+
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:

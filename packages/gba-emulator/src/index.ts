@@ -19,7 +19,7 @@ export { Apu } from './apu/apu.js';
 
 // Scripting
 export { ScriptingEngine } from './scripting.js';
-export type { ScriptingHost } from './scripting.js';
+export type { ScriptingHost, WatchHit } from './scripting.js';
 
 // Types and constants
 export {

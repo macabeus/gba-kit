@@ -8,7 +8,8 @@ declare module '*.css' {}
 interface GbaKitConfig {
   serverBaseUrl: string;
   hasRom: boolean;
-  hasMizuchiDb: boolean;
+  /** A sidecar `-g` ELF is configured and served at /api/loadElf for auto-load. */
+  hasElf?: boolean;
 }
 
 interface Window {
