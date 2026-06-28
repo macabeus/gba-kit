@@ -196,13 +196,9 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
     });
   });
 
-  it('resolves a bitfield via structMember, decoding a synthesized value', () => {
-    const f = di.structMember('Bits', 'cross');
-    expect(f).toEqual({ offset: 0, size: 2, bitOffset: 5, bitWidth: 7 });
-    // The returned shape decodes a packed unit exactly: e.g. cross = 100.
-    const unit = 100 << f!.bitOffset!; // place value 100 at bits 5..11
-    const decoded = (unit >>> f!.bitOffset!) & (2 ** f!.bitWidth! - 1);
-    expect(decoded).toBe(100);
+  it('resolves a bitfield member via structMember', () => {
+    // (The runtime decode of this shape is covered end-to-end by scripting's readVariable.)
+    expect(di.structMember('Bits', 'cross')).toEqual({ offset: 0, size: 2, bitOffset: 5, bitWidth: 7 });
   });
 
   // Variable-rooted resolution: the global's type comes from its own DWARF DIE, so
