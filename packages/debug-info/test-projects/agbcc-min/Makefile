@@ -1,6 +1,6 @@
 # Minimal agbcc (GCC 2.95) GBA build — produces build/min.elf with DWARF-2 (-g).
-# Inspired by Klonoa: Empire of Dreams' toolchain (agbcc compiles C -> Thumb asm,
-# then arm-none-eabi binutils assemble + link), trimmed to one translation unit.
+# Mirrors a classic GBA decomp toolchain (agbcc compiles C -> Thumb asm, then
+# arm-none-eabi binutils assemble + link), trimmed to one translation unit.
 #
 # agbcc is a git submodule (./agbcc). Build it once with ./setup.sh, then `make`.
 # Override AGBCC=/path/to/agbcc to use a prebuilt compiler.

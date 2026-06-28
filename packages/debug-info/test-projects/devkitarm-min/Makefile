@@ -1,5 +1,5 @@
 # Minimal modern-GCC GBA build — produces build/min.elf with DWARF (-g).
-# Inspired by Balatro-GBA's toolchain (devkitARM / modern arm-none-eabi-gcc),
+# Mirrors a modern homebrew toolchain (devkitARM / modern arm-none-eabi-gcc),
 # trimmed to two tiny translation units with no external libraries.
 #
 # This ELF is only parsed for symbols + DWARF, never run on hardware, so it links
@@ -22,7 +22,9 @@ CC := $(PREFIX)gcc
 # parser is exercised on non-trivial line programs. Freestanding + place .text at
 # the GBA ROM base so symbols carry GBA-like VMAs; entry is main (no crt0 linked).
 CFLAGS  := -g -O2 -mthumb -mthumb-interwork -ffreestanding -Wall
-LDFLAGS := -nostdlib -Wl,-Ttext=0x08000000 -Wl,-e,main
+# --defsym adds a linker-defined absolute global (STT_NOTYPE/STB_GLOBAL/SHN_ABS),
+# mirroring how GBA decomps place a struct at a fixed RAM address via the ldscript.
+LDFLAGS := -nostdlib -Wl,-Ttext=0x08000000 -Wl,-e,main -Wl,--defsym,gAbsGlobal=0x03001234
 
 GEN_ORACLE := ../tools/gen-oracle.mjs
 

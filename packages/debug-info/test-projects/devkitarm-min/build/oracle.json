@@ -1,33 +1,40 @@
 {
   "symbols": {
     "add": 134217756,
-    "__bss_end__": 134221892,
-    "_bss_end__": 134221892,
-    "__bss_start": 134221888,
-    "__bss_start__": 134221888,
+    "__bss_end__": 134222008,
+    "_bss_end__": 134222008,
+    "__bss_start": 134221948,
+    "__bss_start__": 134221948,
     "bump": 134217768,
-    "__data_start": 134221888,
-    "_edata": 134221888,
-    "__end__": 134221892,
-    "_end": 134221892,
-    "g_counter": 134221888,
+    "__data_start": 134221948,
+    "_edata": 134221948,
+    "__end__": 134222008,
+    "_end": 134222008,
+    "gAbsGlobal": 50336308,
+    "g_bits": 134221996,
+    "g_color": 134221992,
+    "g_counter": 134221948,
+    "g_mode": 134221993,
+    "g_pair": 134221984,
+    "g_probe": 134221952,
+    "g_util_pair": 134222004,
     "main": 134217728,
     "square": 134217760,
     "_stack": 524288,
-    "triple": 134217784
+    "triple": 134217836
   },
   "lines": {
     "0x800001c": {
       "func": "add",
       "file": "main.c",
-      "line": 16
+      "line": 81
     },
     "0x8000028": {
       "func": "bump",
       "file": "main.c",
-      "line": 24
+      "line": 89
     },
-    "0x8001040": {
+    "0x800107c": {
       "func": "__bss_start__",
       "file": "main.c",
       "line": 11
@@ -35,17 +42,17 @@
     "0x8000000": {
       "func": "main",
       "file": "main.c",
-      "line": 27
+      "line": 98
     },
     "0x8000020": {
       "func": "square",
       "file": "main.c",
-      "line": 20
+      "line": 85
     },
-    "0x8000038": {
+    "0x800006c": {
       "func": "triple",
       "file": "util.c",
-      "line": 6
+      "line": 17
     }
   }
 }

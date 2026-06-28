@@ -89,8 +89,118 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
     expect(di.symbolToAddress('g_counter')).toBe(oracle.symbols.g_counter);
   });
 
+  it('resolves a linker-defined absolute global (STT_NOTYPE ldscript symbol)', () => {
+    // gAbsGlobal = 0x03001234 — an ldscript/--defsym symbol, the way GBA decomps
+    // place a struct at a fixed RAM address. It's STT_NOTYPE, so it only resolves
+    // because the symbol index keeps NOTYPE/GLOBAL symbols.
+    expect(di.symbolToAddress('gAbsGlobal')).toBe(0x03001234);
+  });
+
   it('returns null for a PC outside any function/sequence', () => {
     expect(di.pcToSource(0x09000000)).toBeNull();
     expect(di.pcToFunction(0x09000000)).toBeNull();
+  });
+
+  // Struct/union layout from DWARF `.debug_info`. The shared `Probe`/`Pair`
+  // types (see each project's main.c) have an ABI-stable layout that is identical
+  // under agbcc (DWARF-2) and modern GCC (DWARF-5), so the same numbers hold here.
+  it('exposes DWARF type info', () => {
+    expect(di.hasTypeInfo).toBe(true);
+  });
+
+  it('resolves a named struct layout (offsets + sizes) — DebugInfo.struct', () => {
+    expect(di.struct('Probe')).toEqual({
+      name: 'Probe',
+      size: 32,
+      members: [
+        { name: 'tag', offset: 0, size: 1 },
+        { name: 'count', offset: 4, size: 4 },
+        { name: 'flags', offset: 8, size: 2 },
+        { name: 'name', offset: 10, size: 6 }, // char[6] → element size × length
+        { name: 'ptr', offset: 16, size: 4 }, // pointer → 4 bytes
+        { name: 'inner', offset: 20, size: 8 }, // nested struct
+        { name: 'tail', offset: 28, size: 4 },
+      ],
+    });
+  });
+
+  it('resolves a typedef of an anonymous struct by its alias name', () => {
+    // `typedef struct {…} Pair;` — no struct tag, only the typedef.
+    // struct('Pair') must follow the typedef to the unnamed struct.
+    expect(di.struct('Pair')).toEqual({
+      name: 'Pair',
+      size: 8,
+      members: [
+        { name: 'a', offset: 0, size: 4 },
+        { name: 'b', offset: 4, size: 4 },
+      ],
+    });
+  });
+
+  it('resolves nested member paths — DebugInfo.structMember', () => {
+    expect(di.structMember('Probe', 'count')).toEqual({ offset: 4, size: 4 });
+    expect(di.structMember('Probe', 'inner.x')).toEqual({ offset: 20, size: 4 });
+    expect(di.structMember('Probe', 'inner.y')).toEqual({ offset: 24, size: 2 });
+    expect(di.structMember('Probe', ['inner', 'x'])).toEqual({ offset: 20, size: 4 }); // array form
+  });
+
+  it('returns null for unknown types and missing members', () => {
+    expect(di.struct('NoSuchType')).toBeNull();
+    expect(di.structMember('Probe', 'nope')).toBeNull();
+    expect(di.structMember('Probe', 'inner.nope')).toBeNull();
+    expect(di.structMember('Probe', 'count.x')).toBeNull(); // can't descend into a scalar
+  });
+
+  it('reads enum constants, including explicit + continued values — DebugInfo.enumValues', () => {
+    // enum Color { COLOR_RED, COLOR_GREEN = 5, COLOR_BLUE };
+    expect(di.enumValues('Color')).toEqual({ COLOR_RED: 0, COLOR_GREEN: 5, COLOR_BLUE: 6 });
+  });
+
+  it('reads a typedef of an anonymous enum by its alias name', () => {
+    // typedef enum { MODE_OFF, MODE_ON } Mode;
+    expect(di.enumValues('Mode')).toEqual({ MODE_OFF: 0, MODE_ON: 1 });
+  });
+
+  it('returns null for an unknown enum', () => {
+    expect(di.enumValues('NoSuchEnum')).toBeNull();
+  });
+
+  // Bitfields: hearts:2, stars:3, cross:7, wide:4 packed LSB-first into one unit,
+  // then a plain int. Normalized identically from DWARF-2 (bit_offset from MSB)
+  // and DWARF-5 (data_bit_offset).
+  it('resolves bitfield members to offset + shift + width — DebugInfo.struct', () => {
+    expect(di.struct('Bits')).toEqual({
+      name: 'Bits',
+      size: 8,
+      members: [
+        { name: 'hearts', offset: 0, size: 1, bitOffset: 0, bitWidth: 2 },
+        { name: 'stars', offset: 0, size: 1, bitOffset: 2, bitWidth: 3 },
+        { name: 'cross', offset: 0, size: 2, bitOffset: 5, bitWidth: 7 }, // crosses byte boundary → 2-byte read
+        { name: 'wide', offset: 1, size: 1, bitOffset: 4, bitWidth: 4 },
+        { name: 'after', offset: 4, size: 4 }, // plain member: no bitOffset/bitWidth
+      ],
+    });
+  });
+
+  it('resolves a struct from a second compilation unit (multi-abbrev-table)', () => {
+    // UtilPair lives in util.c — a separate CU whose abbrev table abuts main.c's.
+    // agbcc emits no 0-code terminator between tables, so this guards table bounding.
+    expect(di.struct('UtilPair')).toEqual({
+      name: 'UtilPair',
+      size: 4,
+      members: [
+        { name: 'lo', offset: 0, size: 2 },
+        { name: 'hi', offset: 2, size: 2 },
+      ],
+    });
+  });
+
+  it('resolves a bitfield via structMember, decoding a synthesized value', () => {
+    const f = di.structMember('Bits', 'cross');
+    expect(f).toEqual({ offset: 0, size: 2, bitOffset: 5, bitWidth: 7 });
+    // The returned shape decodes a packed unit exactly: e.g. cross = 100.
+    const unit = 100 << f!.bitOffset!; // place value 100 at bits 5..11
+    const decoded = (unit >> f!.bitOffset!) & ((1 << f!.bitWidth!) - 1);
+    expect(decoded).toBe(100);
   });
 });

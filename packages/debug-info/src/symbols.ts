@@ -7,8 +7,13 @@
 import { ElfFile } from './elf.js';
 import { Cursor, cstrAt } from './reader.js';
 
+export const STT_NOTYPE = 0;
 export const STT_OBJECT = 1;
 export const STT_FUNC = 2;
+
+const STB_GLOBAL = 1; // st_info >> 4
+const SHN_UNDEF = 0; // an undefined (imported) symbol — no real address
+const SHN_COMMON = 0xfff2; // tentative definition — st_value is alignment, not an address
 
 export interface ElfSymbol {
   name: string;
@@ -78,7 +83,15 @@ export class SymbolIndex {
       const stSize = c.u32At(off + 8);
       const stInfo = c.u8At(off + 12);
       const type = stInfo & 0xf;
-      if (type !== STT_FUNC && type !== STT_OBJECT) {
+      const bind = stInfo >> 4;
+      const shndx = c.u16At(off + 14);
+      // Keep functions, data objects, and linker-defined globals. The latter —
+      // ldscript symbols like `gFoo = 0x03000000;` that place a struct at a fixed
+      // RAM address, the norm in GBA decomp — are STT_NOTYPE/STB_GLOBAL (usually
+      // SHN_ABS), so symbolToAddress can resolve them. Skip undefined/common, which
+      // carry no real address.
+      const isLinkerGlobal = type === STT_NOTYPE && bind === STB_GLOBAL && shndx !== SHN_UNDEF && shndx !== SHN_COMMON;
+      if (type !== STT_FUNC && type !== STT_OBJECT && !isLinkerGlobal) {
         continue;
       }
       const name = cstrAt(strtab, stName);
