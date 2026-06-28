@@ -75,6 +75,31 @@ struct Bits {
 
 struct Bits g_bits;
 
+// An anonymous union member — its fields are accessed transparently as
+// g_shape.circle / g_shape.pair, so the parser must descend into the unnamed
+// union to resolve them. Layout: kind @0 (4), union @4 (4), size 8.
+struct Shape {
+    int kind;
+    union {
+        int circle;
+        short pair;
+    };
+};
+
+struct Shape g_shape;
+
+// An 8-byte global — wider than 32 bits, so readVariable must refuse to read it.
+long long g_wide;
+
+// A flexible array member — its byte size can't be determined, so structMember
+// must report size: null (not 0). `len` before it stays a normal 4-byte field.
+struct Blob {
+    int len;
+    char data[];
+};
+
+struct Blob g_blob;
+
 // noinline keeps these as real, separately-addressed functions under -O2 so the
 // tests can resolve each symbol and its PC -> source line.
 __attribute__((noinline)) int add(int a, int b) {
@@ -93,6 +118,9 @@ __attribute__((noinline)) void bump(void) {
     g_mode = MODE_ON;                            // keep enum Mode live
     g_bits.cross = g_counter;                    // keep struct Bits + its type live
     g_bits.after = g_counter;
+    g_shape.circle = g_counter;                  // keep struct Shape + its anon union live
+    g_wide = g_counter;                          // keep g_wide live
+    g_blob.len = g_counter;                      // keep struct Blob + its flexible array live
 }
 
 int main(void) {

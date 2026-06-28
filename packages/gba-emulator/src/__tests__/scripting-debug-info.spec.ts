@@ -26,6 +26,7 @@ const stubHost: ScriptingHost = {
 const here = dirname(fileURLToPath(import.meta.url));
 // packages/gba-emulator/src/__tests__ -> packages/debug-info/test-projects/...
 const AGBCC_ELF = join(here, '..', '..', '..', 'debug-info', 'test-projects', 'agbcc-min', 'build', 'min.elf');
+const DEVKITARM_ELF = join(here, '..', '..', '..', 'debug-info', 'test-projects', 'devkitarm-min', 'build', 'min.elf');
 
 function engineWithDebugInfo(): ScriptingEngine {
   const engine = new ScriptingEngine(new Gba(), stubHost);
@@ -121,6 +122,58 @@ describe('ScriptingEngine debug info', () => {
     gba.bus.write32(0x03000000, 42);
     expect(engine.readVariable('g_counter')).toBe(42);
 
+    // A 4-byte field with bit 31 set reads back unsigned, not as a negative int32.
+    gba.bus.write32(0x03000000, 0x80000001);
+    expect(engine.readVariable('g_counter')).toBe(0x80000001);
+
     expect(() => engine.readVariable('nope')).toThrow(/cannot resolve/);
+  });
+
+  it('readVariable refuses values it cannot size', () => {
+    const engine = new ScriptingEngine(new Gba(), stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(DEVKITARM_ELF)));
+
+    // g_wide is a `long long` (8 bytes) — it can't be returned as a JS number.
+    expect(() => engine.readVariable('g_wide')).toThrow(/wider than 32 bits/);
+
+    // g_blob.data is a flexible array member — its size is unknown, so it can't be read.
+    expect(() => engine.readVariable('g_blob.data')).toThrow(/cannot resolve/);
+  });
+
+  it('wait({ memory }) accepts a symbol path and validates it before running frames', async () => {
+    const engine = new ScriptingEngine(new Gba(), stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(DEVKITARM_ELF)));
+
+    // A path is validated up front (no frames run), so these reject synchronously.
+    await expect(engine.wait({ memory: { address: 'nope', equals: 1 }, timeout: 1 })).rejects.toThrow(/cannot resolve/);
+    await expect(engine.wait({ memory: { address: 'g_wide', equals: 1 }, timeout: 1 })).rejects.toThrow(
+      /can't be compared/,
+    );
+
+    // A name can't be resolved without debug info loaded.
+    const noInfo = new ScriptingEngine(new Gba(), stubHost);
+    await expect(noInfo.wait({ memory: { address: 'g_counter', equals: 1 }, timeout: 1 })).rejects.toThrow(
+      /requires debug info/,
+    );
+  });
+
+  it('assert({ memory }) accepts a symbol path, read at the field width', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+
+    gba.bus.write32(0x03000000, 7); // g_counter (a 4-byte int)
+    expect(() => engine.assert({ memory: { address: 'g_counter', equals: 7 } })).not.toThrow();
+    expect(() => engine.assert({ memory: { address: 'g_counter', equals: 8 } })).toThrow(
+      /Assertion failed: memory\["g_counter"/,
+    );
+
+    // A raw numeric address still works (single-byte read).
+    expect(() => engine.assert({ memory: { address: 0x03000000, equals: 7 } })).not.toThrow();
+
+    // Same validation as wait: unknown path / no debug info fail clearly.
+    expect(() => engine.assert({ memory: { address: 'nope', equals: 0 } })).toThrow(/cannot resolve/);
+    const noInfo = new ScriptingEngine(new Gba(), stubHost);
+    expect(() => noInfo.assert({ memory: { address: 'g_counter', equals: 0 } })).toThrow(/requires debug info/);
   });
 });

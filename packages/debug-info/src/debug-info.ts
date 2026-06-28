@@ -5,7 +5,7 @@
 import { LineTable, parseDebugLine } from './debug-line.js';
 import { ElfFile } from './elf.js';
 import { type FunctionEntry, SymbolIndex } from './symbols.js';
-import { type StructType, TypeIndex } from './types.js';
+import { type MemberLocation, type StructType, TypeIndex } from './types.js';
 
 export interface SourceLocation {
   file: string;
@@ -85,10 +85,7 @@ export class DebugInfo {
    * form and `>>>` stay correct for a full-width 32-bit field, where `1 << 32` wraps.
    * The path may be dotted (`'a.b'`) or an array (`['a', 'b']`).
    */
-  structMember(
-    structName: string,
-    path: string | string[],
-  ): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } | null {
+  structMember(structName: string, path: string | string[]): MemberLocation | null {
     return this.types.member(structName, path);
   }
 
@@ -97,18 +94,16 @@ export class DebugInfo {
    * a type name — the variable's type is read from its DWARF DIE. The returned
    * `offset` is relative to the variable's address.
    */
-  variableMember(
-    varName: string,
-    path: string | string[],
-  ): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } | null {
+  variableMember(varName: string, path: string | string[]): MemberLocation | null {
     return this.types.variableMember(varName, path);
   }
 
   /**
    * Resolve a `symbol` or `symbol.field.subfield` path to an absolute address and
    * byte size — the symbol address comes from `.symtab`, the field layout from the
-   * variable's DWARF type, so no type name is needed. For a bare scalar symbol the
-   * size is its `st_size`; for a bitfield, `bitOffset`/`bitWidth` are also returned.
+   * variable's DWARF type, so no type name is needed. For a bare symbol the size is
+   * its `st_size`, else its DWARF type size, else a 32-bit word (linker-defined
+   * globals carry neither). For a bitfield, `bitOffset`/`bitWidth` are also returned.
    * Returns null if the symbol or any field segment can't be resolved.
    */
   resolveVariable(path: string): { address: number; size: number; bitOffset?: number; bitWidth?: number } | null {
@@ -119,8 +114,7 @@ export class DebugInfo {
       return null;
     }
     if (dot === -1) {
-      const size = this.symbolSize(symbol);
-      return size === null ? null : { address, size };
+      return { address, size: this.symbolSize(symbol) ?? this.types.variableSize(symbol) ?? 4 };
     }
     const member = this.types.variableMember(symbol, path.slice(dot + 1));
     if (!member || member.size === null) {

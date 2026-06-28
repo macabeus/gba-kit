@@ -91,9 +91,11 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
 
   it('resolves a linker-defined absolute global (STT_NOTYPE ldscript symbol)', () => {
     // gAbsGlobal = 0x03001234 — an ldscript/--defsym symbol, the way GBA decomps
-    // place a struct at a fixed RAM address. It's STT_NOTYPE, so it only resolves
-    // because the symbol index keeps NOTYPE/GLOBAL symbols.
+    // place a struct at a fixed RAM address. It's STT_NOTYPE/SHN_ABS, so it only
+    // resolves because the symbol index keeps absolute NOTYPE/GLOBAL symbols.
     expect(di.symbolToAddress('gAbsGlobal')).toBe(0x03001234);
+    // It carries no size, so resolveVariable falls back to a 32-bit word read.
+    expect(di.resolveVariable('gAbsGlobal')).toEqual({ address: 0x03001234, size: 4 });
   });
 
   it('returns null for a PC outside any function/sequence', () => {
@@ -228,5 +230,32 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
     expect(di.resolveVariable('g_counter')).toEqual({ address: di.symbolToAddress('g_counter'), size: 4 });
     expect(di.resolveVariable('noSuchGlobal')).toBeNull();
     expect(di.resolveVariable('g_probe.nope')).toBeNull();
+  });
+});
+
+// Shapes only the modern toolchain emits — agbcc (GCC 2.95) rejects anonymous
+// unions — so these run against devkitarm-min alone.
+describe('DebugInfo on modern-GCC-only shapes (devkitarm-min)', () => {
+  const di = DebugInfo.fromElf(new Uint8Array(readFileSync(join(projectsDir, 'devkitarm-min', 'build', 'min.elf'))));
+
+  it('descends into an anonymous union to resolve its fields', () => {
+    // struct Shape { int kind; union { int circle; short pair; }; };
+    expect(di.structMember('Shape', 'circle')).toEqual({ offset: 4, size: 4 });
+    expect(di.structMember('Shape', 'pair')).toEqual({ offset: 4, size: 2 });
+    const shape = di.symbolToAddress('g_shape')!;
+    expect(di.variableMember('g_shape', 'circle')).toEqual({ offset: 4, size: 4 });
+    expect(di.resolveVariable('g_shape.pair')).toEqual({ address: shape + 4, size: 2 });
+  });
+
+  it('reports the byte size of an 8-byte global (long long)', () => {
+    expect(di.resolveVariable('g_wide')).toEqual({ address: di.symbolToAddress('g_wide'), size: 8 });
+  });
+
+  it('reports null size for a flexible array member (no fixed read size)', () => {
+    // struct Blob { int len; char data[]; };
+    expect(di.structMember('Blob', 'len')).toEqual({ offset: 0, size: 4 });
+    expect(di.structMember('Blob', 'data')).toEqual({ offset: 4, size: null });
+    // The null size propagates, so resolveVariable refuses to size the read.
+    expect(di.resolveVariable('g_blob.data')).toBeNull();
   });
 });

@@ -119,6 +119,9 @@ export interface StructType {
   members: StructMember[];
 }
 
+/** A member's read location: its byte offset + size, plus bitfield shift/width. */
+export type MemberLocation = Omit<StructMember, 'name'>;
+
 /** A parsed DIE: its tag plus the attributes we kept, and its child DIEs. */
 interface Die {
   tag: number;
@@ -136,6 +139,16 @@ interface Die {
  *  - `boolean` for flags.
  */
 type AttrValue = number | string | Uint8Array | boolean;
+
+/** The DWARF string sections an attribute form may resolve a name against. */
+interface DebugStrings {
+  /** `.debug_str` — DW_FORM_strp and the targets of DW_FORM_strx. */
+  str: Uint8Array;
+  /** `.debug_line_str` — DW_FORM_line_strp. */
+  lineStr: Uint8Array;
+  /** `.debug_str_offsets` — the DW_FORM_strx index table. */
+  strOffsets: Uint8Array;
+}
 
 /** One abbreviation declaration: a tag plus its ordered attribute specs. */
 interface Abbrev {
@@ -249,10 +262,7 @@ export class TypeIndex {
    * (plus `bitOffset`/`bitWidth` when it's a bitfield), or null if any segment
    * can't be resolved. Only the final segment may be a bitfield.
    */
-  member(
-    structName: string,
-    path: string | string[],
-  ): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } | null {
+  member(structName: string, path: string | string[]): MemberLocation | null {
     return this.#memberPath(this.#resolveStructByName(structName), path);
   }
 
@@ -263,10 +273,7 @@ export class TypeIndex {
    * returned `offset` is relative to the variable's address; pair it with
    * `symbolToAddress(varName)` (see {@link DebugInfo.resolveVariable}).
    */
-  variableMember(
-    varName: string,
-    path: string | string[],
-  ): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } | null {
+  variableMember(varName: string, path: string | string[]): MemberLocation | null {
     const variable = this.#variableByName.get(varName);
     if (!variable) {
       return null;
@@ -274,32 +281,63 @@ export class TypeIndex {
     return this.#memberPath(this.#resolveStructType(variable.attrs.get(DW_AT_type)), path);
   }
 
+  /** Byte size of a global/static variable's type, or null if unknown. */
+  variableSize(varName: string): number | null {
+    const variable = this.#variableByName.get(varName);
+    return variable ? this.#typeRefSize(variable.attrs.get(DW_AT_type)) : null;
+  }
+
   /** Walk `path` from a struct/union DIE, accumulating member byte offsets. */
-  #memberPath(
-    structDie: Die | null,
-    path: string | string[],
-  ): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } | null {
+  #memberPath(structDie: Die | null, path: string | string[]): MemberLocation | null {
     const segments = Array.isArray(path) ? path : path.split('.');
     if (segments.length === 0) {
       return null;
     }
-    let die = structDie;
+    let die: Die | null = structDie;
     let baseOffset = 0;
     for (let i = 0; i < segments.length; i++) {
       if (!die) {
         return null;
       }
-      const member = die.children.find((c) => c.tag === DW_TAG_member && c.attrs.get(DW_AT_name) === segments[i]);
-      if (!member) {
+      const found = this.#findMember(die, segments[i]);
+      if (!found) {
         return null;
       }
       if (i + 1 === segments.length) {
-        const layout = this.#memberLayout(member);
-        return { ...layout, offset: baseOffset + layout.offset };
+        const layout = this.#memberLayout(found.member);
+        return { ...layout, offset: baseOffset + found.baseOffset + layout.offset };
       }
-      // Intermediate segments are plain struct members — accumulate their byte offset.
-      baseOffset += memberOffset(member);
-      die = this.#resolveStructType(member.attrs.get(DW_AT_type));
+      // Intermediate segment: descend into its (possibly anonymous-wrapped) type.
+      baseOffset += found.baseOffset + memberOffset(found.member);
+      die = this.#resolveStructType(found.member.attrs.get(DW_AT_type));
+    }
+    return null;
+  }
+
+  /**
+   * Find a named member within a struct/union, transparently descending into
+   * anonymous union/struct members (whose fields are accessed as if they belonged
+   * to the parent). Returns the member DIE plus the byte offset of the anonymous
+   * wrappers enclosing it (0 for a direct member); the member's own offset is added
+   * by the caller via {@link memberOffset} / {@link #memberLayout}.
+   */
+  #findMember(structDie: Die, name: string): { member: Die; baseOffset: number } | null {
+    for (const child of structDie.children) {
+      if (child.tag !== DW_TAG_member) {
+        continue;
+      }
+      const childName = child.attrs.get(DW_AT_name);
+      if (childName === name) {
+        return { member: child, baseOffset: 0 };
+      }
+      if (typeof childName !== 'string' || childName === '') {
+        // Anonymous union/struct member: descend, as its fields are accessed directly.
+        const inner = this.#resolveStructType(child.attrs.get(DW_AT_type));
+        const found = inner && this.#findMember(inner, name);
+        if (found) {
+          return { member: found.member, baseOffset: memberOffset(child) + found.baseOffset };
+        }
+      }
     }
     return null;
   }
@@ -336,10 +374,13 @@ export class TypeIndex {
     if (!info || !abbrev) {
       return new TypeIndex([]);
     }
-    const debugStr = elf.sectionData('.debug_str') ?? new Uint8Array(0);
-    const debugStrOffsets = elf.sectionData('.debug_str_offsets') ?? new Uint8Array(0);
+    const strings: DebugStrings = {
+      str: elf.sectionData('.debug_str') ?? new Uint8Array(0),
+      lineStr: elf.sectionData('.debug_line_str') ?? new Uint8Array(0),
+      strOffsets: elf.sectionData('.debug_str_offsets') ?? new Uint8Array(0),
+    };
     try {
-      return new TypeIndex(parseDebugInfo(info, abbrev, debugStr, debugStrOffsets));
+      return new TypeIndex(parseDebugInfo(info, abbrev, strings));
     } catch {
       // Type parsing is best-effort: a malformed .debug_info must never take down
       // the rest of DebugInfo (symbols, line table). Fall back to "no types".
@@ -367,20 +408,8 @@ export class TypeIndex {
     if (!typedef) {
       return null;
     }
-    let die = this.#deref(typedef.attrs.get(DW_AT_type));
-    const seen = new Set<number>();
-    while (die && !seen.has(die.offset)) {
-      seen.add(die.offset);
-      if (die.tag === DW_TAG_enumeration_type) {
-        return die;
-      }
-      if (isQualifierOrTypedef(die.tag)) {
-        die = this.#deref(die.attrs.get(DW_AT_type));
-        continue;
-      }
-      return null;
-    }
-    return null;
+    const die = this.#stripTypedefs(typedef.attrs.get(DW_AT_type));
+    return die && die.tag === DW_TAG_enumeration_type ? die : null;
   }
 
   /**
@@ -390,7 +419,7 @@ export class TypeIndex {
    * `(read(offset, size) >>> bitOffset) & (2 ** bitWidth - 1)` is the field value
    * (the `2 **` form stays correct for a full-width 32-bit field, where `1 << 32` wraps).
    */
-  #memberLayout(member: Die): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } {
+  #memberLayout(member: Die): MemberLocation {
     const bitWidth = numberAttr(member, DW_AT_bit_size);
     const typeSize = this.#typeRefSize(member.attrs.get(DW_AT_type));
     if (bitWidth === null) {
@@ -406,55 +435,49 @@ export class TypeIndex {
 
   /** Follow a type reference through typedef/qualifier chains to a struct/union. */
   #resolveStructType(ref: AttrValue | undefined): Die | null {
-    let die = this.#deref(ref);
-    const seen = new Set<number>();
-    while (die && !seen.has(die.offset)) {
-      seen.add(die.offset);
-      if (die.tag === DW_TAG_structure_type || die.tag === DW_TAG_union_type) {
-        // A forward-declared struct points at the real definition by name.
-        return isDeclaration(die) ? this.#resolveStructByName(asString(die.attrs.get(DW_AT_name))) : die;
-      }
-      if (isQualifierOrTypedef(die.tag)) {
-        die = this.#deref(die.attrs.get(DW_AT_type));
-        continue;
-      }
-      return null;
+    const die = this.#stripTypedefs(ref);
+    if (die && (die.tag === DW_TAG_structure_type || die.tag === DW_TAG_union_type)) {
+      // A forward-declared struct points at the real definition by name.
+      return isDeclaration(die) ? this.#resolveStructByName(asString(die.attrs.get(DW_AT_name))) : die;
     }
     return null;
   }
 
   /** Size in bytes of a type reference, following typedef/qualifier/array chains. */
   #typeRefSize(ref: AttrValue | undefined): number | null {
+    const die = this.#stripTypedefs(ref);
+    if (!die) {
+      return null;
+    }
+    switch (die.tag) {
+      case DW_TAG_base_type:
+      case DW_TAG_enumeration_type:
+      case DW_TAG_structure_type:
+      case DW_TAG_union_type:
+      case DW_TAG_pointer_type:
+        return numberAttr(die, DW_AT_byte_size) ?? (die.tag === DW_TAG_pointer_type ? 4 : null);
+      case DW_TAG_array_type: {
+        const elem = this.#typeRefSize(die.attrs.get(DW_AT_type));
+        const len = arrayLength(die);
+        if (elem === null || len === null) {
+          return null;
+        }
+        return elem * len;
+      }
+      default:
+        return numberAttr(die, DW_AT_byte_size);
+    }
+  }
+
+  /** Follow typedef / cv-qualifier links to the underlying type DIE (cycle-guarded). */
+  #stripTypedefs(ref: AttrValue | undefined): Die | null {
     let die = this.#deref(ref);
     const seen = new Set<number>();
-    while (die && !seen.has(die.offset)) {
+    while (die && isQualifierOrTypedef(die.tag) && !seen.has(die.offset)) {
       seen.add(die.offset);
-      switch (die.tag) {
-        case DW_TAG_base_type:
-        case DW_TAG_enumeration_type:
-        case DW_TAG_structure_type:
-        case DW_TAG_union_type:
-        case DW_TAG_pointer_type:
-          return numberAttr(die, DW_AT_byte_size) ?? (die.tag === DW_TAG_pointer_type ? 4 : null);
-        case DW_TAG_typedef:
-        case DW_TAG_const_type:
-        case DW_TAG_volatile_type:
-        case DW_TAG_restrict_type:
-        case DW_TAG_atomic_type:
-          die = this.#deref(die.attrs.get(DW_AT_type));
-          continue;
-        case DW_TAG_array_type: {
-          const elem = this.#typeRefSize(die.attrs.get(DW_AT_type));
-          if (elem === null) {
-            return null;
-          }
-          return elem * arrayLength(die);
-        }
-        default:
-          return numberAttr(die, DW_AT_byte_size);
-      }
+      die = this.#deref(die.attrs.get(DW_AT_type));
     }
-    return null;
+    return die;
   }
 
   #deref(ref: AttrValue | undefined): Die | null {
@@ -513,8 +536,12 @@ function bitfieldAbsBitOffset(member: Die, typeSize: number | null): number {
   return memberOffset(member) * 8 + lsbWithinUnit;
 }
 
-/** Element count of an array DIE (product of its DW_TAG_subrange_type dimensions). */
-function arrayLength(arrayDie: Die): number {
+/**
+ * Element count of an array DIE (product of its DW_TAG_subrange_type dimensions),
+ * or null if any dimension is flexible (no bound) or zero-length — those have no
+ * fixed read size, so the member's size should surface as null, not 0.
+ */
+function arrayLength(arrayDie: Die): number | null {
   let count = 1;
   let sawDimension = false;
   for (const child of arrayDie.children) {
@@ -523,14 +550,14 @@ function arrayLength(arrayDie: Die): number {
     }
     sawDimension = true;
     const explicit = numberAttr(child, DW_AT_count);
-    if (explicit !== null) {
-      count *= explicit;
-      continue;
-    }
     const upper = numberAttr(child, DW_AT_upper_bound);
-    count *= upper === null ? 0 : upper + 1; // flexible/unknown bound → 0
+    const dim = explicit !== null ? explicit : upper !== null ? upper + 1 : null;
+    if (dim === null || dim <= 0) {
+      return null;
+    }
+    count *= dim;
   }
-  return sawDimension ? count : 0;
+  return sawDimension ? count : null;
 }
 
 function numberAttr(die: Die, attr: number): number | null {
@@ -600,12 +627,7 @@ function collectCuHeaders(info: Uint8Array): CuHeader[] {
 }
 
 /** Parse every compilation unit in `.debug_info` into DIE trees. */
-function parseDebugInfo(
-  info: Uint8Array,
-  abbrev: Uint8Array,
-  debugStr: Uint8Array,
-  debugStrOffsets: Uint8Array,
-): Die[] {
+function parseDebugInfo(info: Uint8Array, abbrev: Uint8Array, strings: DebugStrings): Die[] {
   const roots: Die[] = [];
   const abbrevTables = new Map<number, Map<number, Abbrev>>();
   const headers = collectCuHeaders(info);
@@ -643,7 +665,7 @@ function parseDebugInfo(
     // that unit, keep the rest. (Errors deeper in the tree are salvaged in parseDie.)
     c.seek(h.dieStart);
     try {
-      const cu = parseDie(c, table, ctx, h.unitEnd, debugStr, debugStrOffsets);
+      const cu = parseDie(c, table, ctx, h.unitEnd, strings);
       if (cu) {
         roots.push(cu);
       }
@@ -713,8 +735,7 @@ function parseDie(
   table: Map<number, Abbrev>,
   ctx: UnitContext,
   unitEnd: number,
-  debugStr: Uint8Array,
-  debugStrOffsets: Uint8Array,
+  strings: DebugStrings,
 ): Die | null {
   const offset = c.offset;
   const code = c.uleb();
@@ -730,7 +751,7 @@ function parseDie(
 
   const attrs = new Map<number, AttrValue>();
   for (const spec of abbrev.specs) {
-    const value = readForm(c, spec.form, ctx, spec.implicitConst, debugStr, debugStrOffsets);
+    const value = readForm(c, spec.form, ctx, spec.implicitConst, strings);
     // Capture the str_offsets base from the CU DIE before any DW_FORM_strx is read.
     if (spec.attr === DW_AT_str_offsets_base && typeof value === 'number') {
       ctx.strOffsetsBase = value;
@@ -747,7 +768,7 @@ function parseDie(
       }
       let child: Die | null;
       try {
-        child = parseDie(c, table, ctx, unitEnd, debugStr, debugStrOffsets);
+        child = parseDie(c, table, ctx, unitEnd, strings);
       } catch {
         // An unsupported form or OOB read leaves the cursor desynced, so we can't
         // safely parse on. Mark the CU aborted (every enclosing loop bails too) but
@@ -771,8 +792,7 @@ function readForm(
   form: number,
   ctx: UnitContext,
   implicitConst: number | undefined,
-  debugStr: Uint8Array,
-  debugStrOffsets: Uint8Array,
+  strings: DebugStrings,
 ): AttrValue {
   switch (form) {
     case DW_FORM_addr:
@@ -795,19 +815,20 @@ function readForm(
     case DW_FORM_string:
       return c.cstr();
     case DW_FORM_strp:
-    case DW_FORM_line_strp: // resolves against .debug_line_str; names here use strp
     case DW_FORM_strp_sup:
-      return cstrAt(debugStr, c.u32());
+      return cstrAt(strings.str, c.u32());
+    case DW_FORM_line_strp:
+      return cstrAt(strings.lineStr, c.u32());
     case DW_FORM_strx:
-      return resolveStrx(c.uleb(), ctx, debugStr, debugStrOffsets);
+      return resolveStrx(c.uleb(), ctx, strings);
     case DW_FORM_strx1:
-      return resolveStrx(c.u8(), ctx, debugStr, debugStrOffsets);
+      return resolveStrx(c.u8(), ctx, strings);
     case DW_FORM_strx2:
-      return resolveStrx(c.u16(), ctx, debugStr, debugStrOffsets);
+      return resolveStrx(c.u16(), ctx, strings);
     case DW_FORM_strx3:
-      return resolveStrx(readBytes(c, 3), ctx, debugStr, debugStrOffsets);
+      return resolveStrx(readBytes(c, 3), ctx, strings);
     case DW_FORM_strx4:
-      return resolveStrx(c.u32(), ctx, debugStr, debugStrOffsets);
+      return resolveStrx(c.u32(), ctx, strings);
     case DW_FORM_ref1:
       return ctx.cuStart + c.u8();
     case DW_FORM_ref2:
@@ -852,7 +873,7 @@ function readForm(
     case DW_FORM_exprloc:
       return readBlock(c, c.uleb());
     case DW_FORM_indirect:
-      return readForm(c, c.uleb(), ctx, implicitConst, debugStr, debugStrOffsets);
+      return readForm(c, c.uleb(), ctx, implicitConst, strings);
     default:
       // Unknown form: we can't size it. Surface as empty so the caller bails the unit.
       throw new Error(`Unsupported DWARF form 0x${form.toString(16)}`);
@@ -883,11 +904,11 @@ function readBlock(c: Cursor, len: number): Uint8Array {
 }
 
 /** Resolve a DW_FORM_strx index via .debug_str_offsets → .debug_str. */
-function resolveStrx(index: number, ctx: UnitContext, debugStr: Uint8Array, debugStrOffsets: Uint8Array): string {
+function resolveStrx(index: number, ctx: UnitContext, strings: DebugStrings): string {
   const at = ctx.strOffsetsBase + index * 4;
-  if (at + 4 > debugStrOffsets.length) {
+  if (at + 4 > strings.strOffsets.length) {
     return '';
   }
-  const c = new Cursor(debugStrOffsets);
-  return cstrAt(debugStr, c.u32At(at));
+  const c = new Cursor(strings.strOffsets);
+  return cstrAt(strings.str, c.u32At(at));
 }
