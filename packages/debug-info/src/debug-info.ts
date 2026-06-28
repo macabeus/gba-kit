@@ -14,6 +14,14 @@ export interface SourceLocation {
   func?: string;
 }
 
+/** An absolute, readable location: address + byte size, plus bitfield shift/width. */
+export interface ResolvedLocation {
+  address: number;
+  size: number;
+  bitOffset?: number;
+  bitWidth?: number;
+}
+
 export class DebugInfo {
   readonly elf: ElfFile;
   readonly symbols: SymbolIndex;
@@ -80,10 +88,8 @@ export class DebugInfo {
    * Add `offset` to the address of a global of that struct type and read `size` bytes.
    * `size` is null when the member's byte size can't be determined (e.g. an incomplete
    * type or flexible array) — callers must handle that before issuing a read.
-   * For a bitfield, `bitOffset`/`bitWidth` are also returned, so the field value is
-   * `(read(addr + offset, size) >>> bitOffset) & (2 ** bitWidth - 1)` — the `2 **`
-   * form and `>>>` stay correct for a full-width 32-bit field, where `1 << 32` wraps.
-   * The path may be dotted (`'a.b'`) or an array (`['a', 'b']`).
+   * For a bitfield, `bitOffset`/`bitWidth` are also returned (see {@link TypeIndex}
+   * for the decode formula). The path may be dotted (`'a.b'`) or an array.
    */
   structMember(structName: string, path: string | string[]): MemberLocation | null {
     return this.types.member(structName, path);
@@ -106,7 +112,7 @@ export class DebugInfo {
    * globals carry neither). For a bitfield, `bitOffset`/`bitWidth` are also returned.
    * Returns null if the symbol or any field segment can't be resolved.
    */
-  resolveVariable(path: string): { address: number; size: number; bitOffset?: number; bitWidth?: number } | null {
+  resolveVariable(path: string): ResolvedLocation | null {
     const dot = path.indexOf('.');
     const symbol = dot === -1 ? path : path.slice(0, dot);
     const address = this.symbolToAddress(symbol);
@@ -116,14 +122,11 @@ export class DebugInfo {
     if (dot === -1) {
       return { address, size: this.symbolSize(symbol) ?? this.types.variableSize(symbol) ?? 4 };
     }
-    const member = this.types.variableMember(symbol, path.slice(dot + 1));
+    const member = this.variableMember(symbol, path.slice(dot + 1));
     if (!member || member.size === null) {
       return null;
     }
-    const resolved: { address: number; size: number; bitOffset?: number; bitWidth?: number } = {
-      address: address + member.offset,
-      size: member.size,
-    };
+    const resolved: ResolvedLocation = { address: address + member.offset, size: member.size };
     if (member.bitOffset !== undefined) {
       resolved.bitOffset = member.bitOffset;
       resolved.bitWidth = member.bitWidth;

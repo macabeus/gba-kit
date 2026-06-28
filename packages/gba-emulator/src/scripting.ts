@@ -6,7 +6,7 @@
  * Both web and Node.js consumers provide their own ScriptingHost implementation.
  */
 import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassembler';
-import { DebugInfo, type SourceLocation } from '@gba-kit/debug-info';
+import { DebugInfo, type ResolvedLocation, type SourceLocation } from '@gba-kit/debug-info';
 
 import { Gba } from './gba.js';
 import type { CpuSnapshot, GbaSnapshot } from './savestate.js';
@@ -600,56 +600,40 @@ export class ScriptingEngine {
    *   readVariable('gPlayerFlags.invincible'); // a bitfield, decoded
    */
   readVariable(path: string): number {
+    return this.#readResolved(this.#resolveForRead(path));
+  }
+
+  /** Resolve a path to a readable (≤ 4-byte) location, or throw with the reason. */
+  #resolveForRead(path: string): ResolvedLocation {
     if (!this.#debugInfo) {
-      throw new Error('readVariable requires debug info; call loadDebugInfo(elfBytes) first');
+      throw new Error(`resolving "${path}" requires debug info; call loadDebugInfo(elfBytes) first`);
     }
     const loc = this.#debugInfo.resolveVariable(path);
     if (loc === null) {
-      throw new Error(`readVariable: cannot resolve "${path}"`);
+      throw new Error(`cannot resolve "${path}"`);
     }
     if (loc.size > 4) {
-      throw new Error(
-        `readVariable: "${path}" is ${loc.size} bytes; values wider than 32 bits can't be read as a number`,
-      );
+      throw new Error(`"${path}" is ${loc.size} bytes; values wider than 32 bits can't be read`);
     }
-    return this.#readResolved(loc);
+    return loc;
   }
 
-  /** Read + bitfield-decode the value at an already-resolved location (size ≤ 4). */
-  #readResolved(loc: { address: number; size: number; bitOffset?: number; bitWidth?: number }): number {
+  /** Read + bitfield-decode the value at a resolved location; result is unsigned. */
+  #readResolved(loc: ResolvedLocation): number {
     const raw = this.#readSized(loc.address, loc.size);
-    if (loc.bitOffset === undefined) {
-      return raw;
-    }
-    // `>>> 0` keeps the result unsigned, including a full 32-bit field whose mask
-    // `2 ** 32 - 1` is coerced to -1 by `&`.
-    return ((raw >>> loc.bitOffset) & (2 ** loc.bitWidth! - 1)) >>> 0;
+    return loc.bitOffset === undefined ? raw : ((raw >>> loc.bitOffset) & (2 ** loc.bitWidth! - 1)) >>> 0;
   }
 
   /**
-   * Build a value reader + a human label for a `wait`/`assert` memory address, which
-   * may be a raw number (reads a single byte at that address — no type info) or a
-   * `symbol`/`symbol.field` path (resolved through the DWARF, reads the field's full
-   * width and decodes bitfields). The path is resolved once, up front.
+   * Build a value reader + a human label for a `wait`/`assert` memory address: a raw
+   * number reads a single byte; a `symbol`/`symbol.field` path resolves through the
+   * DWARF (once, up front) and reads the field's full width, decoding bitfields.
    */
   #memoryProbe(address: number | string): { read: () => number; label: string } {
     if (typeof address === 'number') {
       return { read: () => this.#gba.bus.read8(address), label: `0x${address.toString(16)}` };
     }
-    if (!this.#debugInfo) {
-      throw new Error(
-        `a memory condition by name ("${address}") requires debug info; call loadDebugInfo(elfBytes) first`,
-      );
-    }
-    const loc = this.#debugInfo.resolveVariable(address);
-    if (loc === null) {
-      throw new Error(`memory condition: cannot resolve "${address}"`);
-    }
-    if (loc.size > 4) {
-      throw new Error(
-        `memory condition: "${address}" is ${loc.size} bytes; values wider than 32 bits can't be compared`,
-      );
-    }
+    const loc = this.#resolveForRead(address);
     return { read: () => this.#readResolved(loc), label: `"${address}" (0x${loc.address.toString(16)})` };
   }
 

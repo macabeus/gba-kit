@@ -147,7 +147,7 @@ describe('ScriptingEngine debug info', () => {
     // A path is validated up front (no frames run), so these reject synchronously.
     await expect(engine.wait({ memory: { address: 'nope', equals: 1 }, timeout: 1 })).rejects.toThrow(/cannot resolve/);
     await expect(engine.wait({ memory: { address: 'g_wide', equals: 1 }, timeout: 1 })).rejects.toThrow(
-      /can't be compared/,
+      /wider than 32 bits/,
     );
 
     // A name can't be resolved without debug info loaded.

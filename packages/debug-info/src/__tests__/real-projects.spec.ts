@@ -103,9 +103,8 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
     expect(di.pcToFunction(0x09000000)).toBeNull();
   });
 
-  // Struct/union layout from DWARF `.debug_info`. The shared `Probe`/`Pair`
-  // types (see each project's main.c) have an ABI-stable layout that is identical
-  // under agbcc (DWARF-2) and modern GCC (DWARF-5), so the same numbers hold here.
+  // Struct/union layout from DWARF. The shared types have an ABI-stable layout, so
+  // the same numbers hold under both agbcc (DWARF-2) and modern GCC (DWARF-5).
   it('exposes DWARF type info', () => {
     expect(di.hasTypeInfo).toBe(true);
   });
