@@ -596,7 +596,7 @@ export class ScriptingEngine {
    * loaded or the path can't be resolved.
    *
    * @example
-   *   readVariable('g_game_vars.score');      // a nested struct field
+   *   readVariable('g_game_vars.score');       // a nested struct field
    *   readVariable('gPlayerFlags.invincible'); // a bitfield, decoded
    */
   readVariable(path: string): number {

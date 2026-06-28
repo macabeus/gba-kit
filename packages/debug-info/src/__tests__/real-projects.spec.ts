@@ -232,9 +232,10 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
   });
 });
 
-// Shapes only the modern toolchain emits — agbcc (GCC 2.95) rejects anonymous
-// unions — so these run against devkitarm-min alone.
-describe('DebugInfo on modern-GCC-only shapes (devkitarm-min)', () => {
+// Shapes/symbols present only in devkitarm-min — agbcc (GCC 2.95) rejects anonymous
+// unions, and agbcc-min's custom linker script emits no boundary markers — so these
+// run against devkitarm-min alone.
+describe('DebugInfo on devkitarm-min-only shapes', () => {
   const di = DebugInfo.fromElf(new Uint8Array(readFileSync(join(projectsDir, 'devkitarm-min', 'build', 'min.elf'))));
 
   it('descends into an anonymous union to resolve its fields', () => {
@@ -256,5 +257,15 @@ describe('DebugInfo on modern-GCC-only shapes (devkitarm-min)', () => {
     expect(di.structMember('Blob', 'data')).toEqual({ offset: 4, size: null });
     // The null size propagates, so resolveVariable refuses to size the read.
     expect(di.resolveVariable('g_blob.data')).toBeNull();
+  });
+
+  it('keeps absolute ldscript globals but excludes section-relative linker markers', () => {
+    // `gAbsGlobal` is STT_NOTYPE with SHN_ABS — an ldscript-placed data global we want.
+    expect(di.symbolToAddress('gAbsGlobal')).toBe(0x03001234);
+    // `_end` / `__bss_start` are also STT_NOTYPE/STB_GLOBAL and present in the symtab,
+    // but section-relative (not SHN_ABS): boundary markers, not data globals. The
+    // SHN_ABS filter must exclude them, so symbolToAddress returns null.
+    expect(di.symbolToAddress('_end')).toBeNull();
+    expect(di.symbolToAddress('__bss_start')).toBeNull();
   });
 });
