@@ -203,4 +203,30 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
     const decoded = (unit >> f!.bitOffset!) & ((1 << f!.bitWidth!) - 1);
     expect(decoded).toBe(100);
   });
+
+  // Variable-rooted resolution: the global's type comes from its own DWARF DIE, so
+  // no type name is supplied. g_probe/g_bits/g_counter are real globals in main.c.
+  it('resolves a field path from a variable symbol — DebugInfo.variableMember', () => {
+    expect(di.variableMember('g_probe', 'count')).toEqual({ offset: 4, size: 4 });
+    expect(di.variableMember('g_probe', 'inner.y')).toEqual({ offset: 24, size: 2 });
+    expect(di.variableMember('g_bits', 'cross')).toEqual({ offset: 0, size: 2, bitOffset: 5, bitWidth: 7 });
+    expect(di.variableMember('g_probe', 'nope')).toBeNull();
+    expect(di.variableMember('noSuchGlobal', 'count')).toBeNull();
+  });
+
+  it('resolves a variable path to an absolute address + size — DebugInfo.resolveVariable', () => {
+    const probe = di.symbolToAddress('g_probe')!;
+    expect(di.resolveVariable('g_probe.inner.y')).toEqual({ address: probe + 24, size: 2 });
+    // A bitfield carries its shift/width through.
+    expect(di.resolveVariable('g_bits.cross')).toEqual({
+      address: di.symbolToAddress('g_bits'),
+      size: 2,
+      bitOffset: 5,
+      bitWidth: 7,
+    });
+    // A bare scalar global: size comes from the symbol table.
+    expect(di.resolveVariable('g_counter')).toEqual({ address: di.symbolToAddress('g_counter'), size: 4 });
+    expect(di.resolveVariable('noSuchGlobal')).toBeNull();
+    expect(di.resolveVariable('g_probe.nope')).toBeNull();
+  });
 });

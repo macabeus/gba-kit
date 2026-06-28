@@ -90,6 +90,51 @@ export class DebugInfo {
   }
 
   /**
+   * Like {@link structMember}, but rooted at a global/static *variable* rather than
+   * a type name — the variable's type is read from its DWARF DIE. The returned
+   * `offset` is relative to the variable's address.
+   */
+  variableMember(
+    varName: string,
+    path: string | string[],
+  ): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } | null {
+    return this.types.variableMember(varName, path);
+  }
+
+  /**
+   * Resolve a `symbol` or `symbol.field.subfield` path to an absolute address and
+   * byte size — the symbol address comes from `.symtab`, the field layout from the
+   * variable's DWARF type, so no type name is needed. For a bare scalar symbol the
+   * size is its `st_size`; for a bitfield, `bitOffset`/`bitWidth` are also returned.
+   * Returns null if the symbol or any field segment can't be resolved.
+   */
+  resolveVariable(path: string): { address: number; size: number; bitOffset?: number; bitWidth?: number } | null {
+    const dot = path.indexOf('.');
+    const symbol = dot === -1 ? path : path.slice(0, dot);
+    const address = this.symbolToAddress(symbol);
+    if (address === null) {
+      return null;
+    }
+    if (dot === -1) {
+      const size = this.symbolSize(symbol);
+      return size === null ? null : { address, size };
+    }
+    const member = this.types.variableMember(symbol, path.slice(dot + 1));
+    if (!member || member.size === null) {
+      return null;
+    }
+    const resolved: { address: number; size: number; bitOffset?: number; bitWidth?: number } = {
+      address: address + member.offset,
+      size: member.size,
+    };
+    if (member.bitOffset !== undefined) {
+      resolved.bitOffset = member.bitOffset;
+      resolved.bitWidth = member.bitWidth;
+    }
+    return resolved;
+  }
+
+  /**
    * The constants of an enum by name, as `{ enumeratorName: value }` (C names
    * verbatim). Accepts the enum tag or a typedef alias of an anonymous enum.
    * Returns null if the enum isn't in the DWARF.

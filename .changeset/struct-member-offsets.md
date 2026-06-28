@@ -9,6 +9,8 @@ Parse struct/union layouts, bitfields, and enum constants from DWARF `.debug_inf
 - `struct(name)` — members with byte offsets and sizes.
 - `structMember(name, path)` — resolve a dotted/array nested field path to its offset + size.
 - `enumValues(name)` — `{ enumeratorName: value }`, including explicit/continued values.
+- `variableMember(varName, path)` — like `structMember`, but rooted at a global/static variable; its type is read from the variable's own DWARF DIE, so no type name is needed.
+- `resolveVariable("symbol.field.subfield")` — resolve a path to an absolute `{ address, size, bitOffset?, bitWidth? }` in one call: address from `.symtab`, layout from the variable's DWARF type.
 - `hasTypeInfo`, plus the new exported `TypeIndex`.
 
 Bitfield members also report `bitOffset`/`bitWidth`, normalized across the DWARF 2/3 (`DW_AT_bit_offset` from the storage-unit MSB) and DWARF 4+ (`DW_AT_data_bit_offset`) encodings, so a packed field decodes as `(read(addr + offset, size) >> bitOffset) & ((1 << bitWidth) - 1)`.

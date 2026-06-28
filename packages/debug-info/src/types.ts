@@ -26,6 +26,7 @@ const DW_TAG_typedef = 0x16;
 const DW_TAG_union_type = 0x17;
 const DW_TAG_base_type = 0x24;
 const DW_TAG_const_type = 0x26;
+const DW_TAG_variable = 0x34;
 const DW_TAG_volatile_type = 0x35;
 const DW_TAG_restrict_type = 0x37;
 const DW_TAG_atomic_type = 0x47;
@@ -165,6 +166,8 @@ export class TypeIndex {
   readonly #enumByName = new Map<string, Die>();
   /** typedef name → DIE it aliases (its DW_AT_type target). */
   readonly #typedefByName = new Map<string, Die>();
+  /** global/static variable name → its DIE (carries DW_AT_type). */
+  readonly #variableByName = new Map<string, Die>();
 
   /** Use {@link TypeIndex.fromElf}; this constructor is an internal detail. */
   constructor(roots: Die[]) {
@@ -197,6 +200,13 @@ export class TypeIndex {
         }
       } else if (die.tag === DW_TAG_typedef && !this.#typedefByName.has(name)) {
         this.#typedefByName.set(name, die);
+      } else if (die.tag === DW_TAG_variable && die.attrs.has(DW_AT_type)) {
+        const existing = this.#variableByName.get(name);
+        // The same global appears once per CU that includes its header; most are
+        // forward declarations. Prefer a real definition so its type ref resolves.
+        if (!existing || (isDeclaration(existing) && !isDeclaration(die))) {
+          this.#variableByName.set(name, die);
+        }
       }
     }
   }
@@ -241,11 +251,37 @@ export class TypeIndex {
     structName: string,
     path: string | string[],
   ): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } | null {
+    return this.#memberPath(this.#resolveStructByName(structName), path);
+  }
+
+  /**
+   * Resolve a (possibly nested) member path rooted at a global/static *variable*
+   * rather than a type name, e.g. `variableMember('g_game_vars', 'rng_info.seed')`.
+   * The variable's type comes from its DWARF DIE, so callers needn't name it. The
+   * returned `offset` is relative to the variable's address; pair it with
+   * `symbolToAddress(varName)` (see {@link DebugInfo.resolveVariable}).
+   */
+  variableMember(
+    varName: string,
+    path: string | string[],
+  ): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } | null {
+    const variable = this.#variableByName.get(varName);
+    if (!variable) {
+      return null;
+    }
+    return this.#memberPath(this.#resolveStructType(variable.attrs.get(DW_AT_type)), path);
+  }
+
+  /** Walk `path` from a struct/union DIE, accumulating member byte offsets. */
+  #memberPath(
+    structDie: Die | null,
+    path: string | string[],
+  ): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } | null {
     const segments = Array.isArray(path) ? path : path.split('.');
     if (segments.length === 0) {
       return null;
     }
-    let die = this.#resolveStructByName(structName);
+    let die = structDie;
     let baseOffset = 0;
     for (let i = 0; i < segments.length; i++) {
       if (!die) {
