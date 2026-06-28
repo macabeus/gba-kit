@@ -576,6 +576,52 @@ export class ScriptingEngine {
     return this.#gba.bus.read32(address);
   }
 
+  /**
+   * Read a global/static variable's current value by a `symbol` or
+   * `symbol.field.subfield` path — the read counterpart to {@link watchSymbol}. The
+   * address comes from the symbol table and the byte size (and any bitfield
+   * shift/width) from the variable's DWARF type, so the right number of bytes is read
+   * and a packed bitfield is decoded to its plain value. Throws if no debug info is
+   * loaded or the path can't be resolved.
+   *
+   * @example
+   *   readVariable('g_game_vars.score');      // a nested struct field
+   *   readVariable('gPlayerFlags.invincible'); // a bitfield, decoded
+   */
+  readVariable(path: string): number {
+    if (!this.#debugInfo) {
+      throw new Error('readVariable requires debug info; call loadDebugInfo(elfBytes) first');
+    }
+    const loc = this.#debugInfo.resolveVariable(path);
+    if (loc === null) {
+      throw new Error(`readVariable: cannot resolve "${path}"`);
+    }
+    const raw = this.#readSized(loc.address, loc.size);
+    if (loc.bitOffset === undefined) {
+      return raw;
+    }
+    return (raw >>> loc.bitOffset) & (2 ** loc.bitWidth! - 1);
+  }
+
+  /** Read an unsigned little-endian integer of `size` bytes (low 32 bits). */
+  #readSized(address: number, size: number): number {
+    const bus = this.#gba.bus;
+    if (size === 1) {
+      return bus.read8(address);
+    }
+    if (size === 2) {
+      return bus.read16(address);
+    }
+    if (size === 4) {
+      return bus.read32(address);
+    }
+    let value = 0;
+    for (let i = 0; i < size && i < 4; i++) {
+      value |= bus.read8(address + i) << (8 * i);
+    }
+    return value >>> 0;
+  }
+
   disassemble(
     address: number,
     count?: number,

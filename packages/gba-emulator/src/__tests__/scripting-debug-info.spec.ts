@@ -97,4 +97,30 @@ describe('ScriptingEngine debug info', () => {
 
     expect(() => engine.watchSymbol('does_not_exist')).toThrow(/unknown symbol/);
   });
+
+  it('readVariable reads a field sized from DWARF, decoding bitfields', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+
+    // g_probe.count is a 4-byte int at g_probe+4 — all 4 bytes are read.
+    const probe = engine.symbolToAddress('g_probe')!;
+    gba.bus.write32(probe + 4, 0x12345678);
+    expect(engine.readVariable('g_probe.count')).toBe(0x12345678);
+
+    // g_probe.flags is a 2-byte short at g_probe+8 — only 2 bytes are read.
+    gba.bus.write32(probe + 8, 0xffffabcd);
+    expect(engine.readVariable('g_probe.flags')).toBe(0xabcd);
+
+    // g_bits.cross is a 7-bit bitfield at bits 5..11 (a 2-byte span), decoded to its value.
+    const bits = engine.symbolToAddress('g_bits')!;
+    gba.bus.write16(bits, 100 << 5);
+    expect(engine.readVariable('g_bits.cross')).toBe(100);
+
+    // A bare scalar global.
+    gba.bus.write32(0x03000000, 42);
+    expect(engine.readVariable('g_counter')).toBe(42);
+
+    expect(() => engine.readVariable('nope')).toThrow(/cannot resolve/);
+  });
 });

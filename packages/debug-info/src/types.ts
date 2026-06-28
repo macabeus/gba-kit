@@ -154,6 +154,8 @@ interface UnitContext {
   refAddrSize: number;
   /** DW_AT_str_offsets_base for DW_FORM_strx, once seen on the CU DIE. */
   strOffsetsBase: number;
+  /** Set when an unrecoverable form/OOB error aborts this CU; unwinds the DIE walk. */
+  aborted?: boolean;
 }
 
 /** Struct/union member offsets and sizes, parsed from a `-g`-built ELF's DWARF. */
@@ -336,8 +338,13 @@ export class TypeIndex {
     }
     const debugStr = elf.sectionData('.debug_str') ?? new Uint8Array(0);
     const debugStrOffsets = elf.sectionData('.debug_str_offsets') ?? new Uint8Array(0);
-    const roots = parseDebugInfo(info, abbrev, debugStr, debugStrOffsets);
-    return new TypeIndex(roots);
+    try {
+      return new TypeIndex(parseDebugInfo(info, abbrev, debugStr, debugStrOffsets));
+    } catch {
+      // Type parsing is best-effort: a malformed .debug_info must never take down
+      // the rest of DebugInfo (symbols, line table). Fall back to "no types".
+      return new TypeIndex([]);
+    }
   }
 
   /** Name → struct/union DIE, transparently unwrapping a typedef alias. */
@@ -380,7 +387,8 @@ export class TypeIndex {
    * Compute a member's read location. Plain members report `{ offset, size }`
    * (byte offset + type size). Bitfields additionally report `{ bitOffset, bitWidth }`
    * and a minimal byte `offset`/`size` such that
-   * `(read(offset, size) >> bitOffset) & ((1 << bitWidth) - 1)` is the field value.
+   * `(read(offset, size) >>> bitOffset) & (2 ** bitWidth - 1)` is the field value
+   * (the `2 **` form stays correct for a full-width 32-bit field, where `1 << 32` wraps).
    */
   #memberLayout(member: Die): { offset: number; size: number | null; bitOffset?: number; bitWidth?: number } {
     const bitWidth = numberAttr(member, DW_AT_bit_size);
@@ -534,6 +542,63 @@ function asString(value: AttrValue | undefined): string {
   return typeof value === 'string' ? value : '';
 }
 
+/** The decoded fixed header of one compilation unit in `.debug_info`. */
+interface CuHeader {
+  cuStart: number;
+  /** Exclusive end of the unit, clamped to the section. */
+  unitEnd: number;
+  /** Offset of the first DIE, just past the fixed header. */
+  dieStart: number;
+  version: number;
+  addressSize: number;
+  abbrevOffset: number;
+  /** DWARF 5 DW_UT_*; 0 for DWARF ≤ 4 (always a full compile unit). */
+  unitType: number;
+}
+
+/**
+ * Decode the fixed header of every compilation unit. The DWARF 2/3/4 and 5 header
+ * layouts differ (5 inserts unit_type + address_size before debug_abbrev_offset).
+ * Stops at end-of-section, a 0/0xffffffff unit_length (padding / unsupported 64-bit
+ * DWARF), or the first truncated/inconsistent header — returning the units decoded
+ * so far rather than throwing, so a malformed tail unit can't lose the whole section.
+ */
+function collectCuHeaders(info: Uint8Array): CuHeader[] {
+  const headers: CuHeader[] = [];
+  const c = new Cursor(info);
+  while (c.remaining >= 4) {
+    const cuStart = c.offset;
+    const unitLength = c.u32();
+    if (unitLength === 0 || unitLength === 0xffffffff) {
+      break;
+    }
+    const rawEnd = c.offset + unitLength;
+    const unitEnd = Math.min(rawEnd, info.length);
+    try {
+      const version = c.u16();
+      let abbrevOffset: number;
+      let addressSize: number;
+      let unitType = 0;
+      if (version >= 5) {
+        unitType = c.u8();
+        addressSize = c.u8();
+        abbrevOffset = c.u32();
+      } else {
+        abbrevOffset = c.u32();
+        addressSize = c.u8();
+      }
+      headers.push({ cuStart, unitEnd, dieStart: c.offset, version, addressSize, abbrevOffset, unitType });
+    } catch {
+      break; // truncated header — keep the units decoded so far
+    }
+    if (rawEnd > info.length || unitEnd <= c.offset) {
+      break; // unit runs past the section (or is degenerate) — don't trust what follows
+    }
+    c.seek(unitEnd);
+  }
+  return headers;
+}
+
 /** Parse every compilation unit in `.debug_info` into DIE trees. */
 function parseDebugInfo(
   info: Uint8Array,
@@ -543,93 +608,59 @@ function parseDebugInfo(
 ): Die[] {
   const roots: Die[] = [];
   const abbrevTables = new Map<number, Map<number, Abbrev>>();
+  const headers = collectCuHeaders(info);
   // agbcc (DWARF-2) does not emit a trailing 0-code terminator on each abbrev
   // table — tables abut and are delimited only by the CUs' debug_abbrev_offset.
-  // Pre-scan every CU's offset so each table parse can stop at the next table's
-  // start (in addition to the standard 0-code terminator).
-  const boundaries = abbrevTableBoundaries(info, abbrev.length);
+  // Bound each table to the next one's start (in addition to the 0-code terminator).
+  const boundaries = abbrevTableBoundaries(headers, abbrev.length);
   const c = new Cursor(info);
 
-  while (c.remaining >= 4) {
-    const cuStart = c.offset;
-    const unitLength = c.u32();
-    if (unitLength === 0 || unitLength === 0xffffffff) {
-      // 0 = padding; 0xffffffff = 64-bit DWARF (unsupported). Stop entirely.
-      break;
-    }
-    const unitEnd = c.offset + unitLength;
-    const version = c.u16();
-
-    let abbrevOffset: number;
-    let addressSize: number;
-    if (version >= 5) {
-      const unitType = c.u8();
-      addressSize = c.u8();
-      abbrevOffset = c.u32();
-      // Skeleton/split units carry a dwo_id we don't handle — skip the unit.
-      if (unitType !== 0x01 /* DW_UT_compile */ && unitType !== 0x03 /* DW_UT_partial */) {
-        c.seek(unitEnd);
-        continue;
-      }
-    } else {
-      abbrevOffset = c.u32();
-      addressSize = c.u8();
+  for (const h of headers) {
+    // Skeleton/split units carry a dwo_id we don't handle — skip the unit.
+    if (h.version >= 5 && h.unitType !== 0x01 /* DW_UT_compile */ && h.unitType !== 0x03 /* DW_UT_partial */) {
+      continue;
     }
 
-    let table = abbrevTables.get(abbrevOffset);
+    let table = abbrevTables.get(h.abbrevOffset);
     if (!table) {
-      table = parseAbbrevTable(abbrev, abbrevOffset, nextAbbrevBoundary(boundaries, abbrevOffset));
-      abbrevTables.set(abbrevOffset, table);
+      try {
+        table = parseAbbrevTable(abbrev, h.abbrevOffset, nextAbbrevBoundary(boundaries, h.abbrevOffset));
+      } catch {
+        continue; // unparseable abbrev table — skip this unit, keep the rest
+      }
+      abbrevTables.set(h.abbrevOffset, table);
     }
 
     const ctx: UnitContext = {
-      cuStart,
-      version,
-      addressSize,
-      refAddrSize: version === 2 ? addressSize : 4,
+      cuStart: h.cuStart,
+      version: h.version,
+      addressSize: h.addressSize,
+      refAddrSize: h.version === 2 ? h.addressSize : 4,
       strOffsetsBase: 0,
     };
 
-    // Parse the CU DIE and its descendants. The top-level DIE is the compile unit.
-    // An exotic/unsupported form throws; skip just that unit, keep the rest.
+    // Parse the CU DIE and its descendants. A malformed CU DIE throws; skip just
+    // that unit, keep the rest. (Errors deeper in the tree are salvaged in parseDie.)
+    c.seek(h.dieStart);
     try {
-      const cu = parseDie(c, table, ctx, unitEnd, debugStr, debugStrOffsets);
+      const cu = parseDie(c, table, ctx, h.unitEnd, debugStr, debugStrOffsets);
       if (cu) {
         roots.push(cu);
       }
     } catch {
-      // fall through to seek past this unit
+      // skip this unit
     }
-    c.seek(unitEnd);
   }
 
   return roots;
 }
 
 /**
- * Collect every CU's `debug_abbrev_offset` (sorted, plus the section length as a
- * final bound), so each abbrev table can be bounded to where the next one starts.
+ * Every CU's `debug_abbrev_offset` (sorted, plus the section length as a final
+ * bound), so each abbrev table can be bounded to where the next one starts.
  */
-function abbrevTableBoundaries(info: Uint8Array, abbrevLength: number): number[] {
-  const offsets = new Set<number>();
-  const c = new Cursor(info);
-  while (c.remaining >= 4) {
-    const unitLength = c.u32();
-    if (unitLength === 0 || unitLength === 0xffffffff) {
-      break;
-    }
-    const unitEnd = c.offset + unitLength;
-    const version = c.u16();
-    if (version >= 5) {
-      c.u8(); // unit_type
-      c.u8(); // address_size
-      offsets.add(c.u32()); // debug_abbrev_offset
-    } else {
-      offsets.add(c.u32()); // debug_abbrev_offset
-      c.u8(); // address_size
-    }
-    c.seek(unitEnd);
-  }
+function abbrevTableBoundaries(headers: CuHeader[], abbrevLength: number): number[] {
+  const offsets = new Set<number>(headers.map((h) => h.abbrevOffset));
   return [...offsets, abbrevLength].sort((a, b) => a - b);
 }
 
@@ -711,10 +742,19 @@ function parseDie(
 
   if (abbrev.hasChildren) {
     for (;;) {
-      if (c.offset >= unitEnd) {
+      if (ctx.aborted || c.offset >= unitEnd) {
         break;
       }
-      const child = parseDie(c, table, ctx, unitEnd, debugStr, debugStrOffsets);
+      let child: Die | null;
+      try {
+        child = parseDie(c, table, ctx, unitEnd, debugStr, debugStrOffsets);
+      } catch {
+        // An unsupported form or OOB read leaves the cursor desynced, so we can't
+        // safely parse on. Mark the CU aborted (every enclosing loop bails too) but
+        // keep the DIEs already parsed — one bad DIE no longer drops the whole unit.
+        ctx.aborted = true;
+        break;
+      }
       if (!child) {
         break; // hit the null terminator
       }
@@ -819,11 +859,19 @@ function readForm(
   }
 }
 
-/** Read `n` little-endian bytes (n ≤ 4 for meaningful numbers; 8 returns low 32). */
+/**
+ * Read `n` little-endian bytes, returning the low 32 bits. Bytes at index ≥ 4 are
+ * consumed (to advance the cursor) but don't contribute — JS bitwise ops are 32-bit,
+ * so OR-ing them in would wrap the shift mod 32 and corrupt the low word. Meaningful
+ * values therefore require n ≤ 4; for n = 8 (data8/ref8) the high word is dropped.
+ */
 function readBytes(c: Cursor, n: number): number {
   let value = 0;
   for (let i = 0; i < n; i++) {
-    value |= c.u8() << (8 * i);
+    const byte = c.u8();
+    if (i < 4) {
+      value |= byte << (8 * i);
+    }
   }
   return value >>> 0;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { STT_FUNC, STT_OBJECT, SymbolIndex } from '../symbols.js';
+import { STT_FUNC, STT_NOTYPE, STT_OBJECT, SymbolIndex } from '../symbols.js';
 
 /**
  * Pure SymbolIndex logic, built from typed symbols directly (no ELF byte
@@ -68,5 +68,25 @@ describe('SymbolIndex', () => {
       { name: 'FUN_08014624', address: 0x08014624, size: 0x80, type: STT_FUNC },
     ]);
     expect(b.pcToFunction(0x0801466a)?.name).toBe('PlayerRespawnOrDeath');
+  });
+
+  it('symbolToAddress prefers a real symbol over a same-named NOTYPE linker alias, in either order', () => {
+    // A NOTYPE boundary/ldscript symbol must never shadow a real FUNC/OBJECT of the
+    // same name, regardless of which comes first in .symtab.
+    const notypeFirst = new SymbolIndex([
+      { name: 'gThing', address: 0x02000000, size: 0, type: STT_NOTYPE },
+      { name: 'gThing', address: 0x03001234, size: 0x40, type: STT_OBJECT },
+    ]);
+    expect(notypeFirst.symbolToAddress('gThing')).toBe(0x03001234);
+
+    const notypeSecond = new SymbolIndex([
+      { name: 'gThing', address: 0x03001234, size: 0x40, type: STT_OBJECT },
+      { name: 'gThing', address: 0x02000000, size: 0, type: STT_NOTYPE },
+    ]);
+    expect(notypeSecond.symbolToAddress('gThing')).toBe(0x03001234);
+
+    // A NOTYPE symbol with no typed namesake still resolves (the ldscript-global case).
+    const lone = new SymbolIndex([{ name: 'gAbs', address: 0x03001234, size: 0, type: STT_NOTYPE }]);
+    expect(lone.symbolToAddress('gAbs')).toBe(0x03001234);
   });
 });

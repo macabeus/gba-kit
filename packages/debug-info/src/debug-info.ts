@@ -78,8 +78,11 @@ export class DebugInfo {
   /**
    * The location of a struct field, e.g. `structMember('GameVariables', 'rng_info.seed')`.
    * Add `offset` to the address of a global of that struct type and read `size` bytes.
+   * `size` is null when the member's byte size can't be determined (e.g. an incomplete
+   * type or flexible array) — callers must handle that before issuing a read.
    * For a bitfield, `bitOffset`/`bitWidth` are also returned, so the field value is
-   * `(read(addr + offset, size) >> bitOffset) & ((1 << bitWidth) - 1)`.
+   * `(read(addr + offset, size) >>> bitOffset) & (2 ** bitWidth - 1)` — the `2 **`
+   * form and `>>>` stay correct for a full-width 32-bit field, where `1 << 32` wraps.
    * The path may be dotted (`'a.b'`) or an array (`['a', 'b']`).
    */
   structMember(

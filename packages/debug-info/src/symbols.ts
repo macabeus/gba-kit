@@ -47,7 +47,12 @@ export class SymbolIndex {
   constructor(symbols: ElfSymbol[], sections: SectionRange[] = []) {
     this.symbols = symbols;
     for (const s of symbols) {
-      if (!this.#byName.has(s.name)) {
+      const existing = this.#byName.get(s.name);
+      // First definition wins, EXCEPT a typed symbol (FUNC/OBJECT) always beats a
+      // NOTYPE linker alias of the same name — otherwise an ldscript/boundary symbol
+      // (e.g. `_end`) that happens to appear first would shadow the real function or
+      // object's address.
+      if (!existing || (existing.type === STT_NOTYPE && s.type !== STT_NOTYPE)) {
         this.#byName.set(s.name, s);
       }
     }

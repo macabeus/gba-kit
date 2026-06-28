@@ -200,7 +200,7 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
     expect(f).toEqual({ offset: 0, size: 2, bitOffset: 5, bitWidth: 7 });
     // The returned shape decodes a packed unit exactly: e.g. cross = 100.
     const unit = 100 << f!.bitOffset!; // place value 100 at bits 5..11
-    const decoded = (unit >> f!.bitOffset!) & ((1 << f!.bitWidth!) - 1);
+    const decoded = (unit >>> f!.bitOffset!) & (2 ** f!.bitWidth! - 1);
     expect(decoded).toBe(100);
   });
 

@@ -120,6 +120,7 @@ export class HeadlessRuntime {
       getMemory: (address: number, length: number) => engine.getMemory(address, length),
       read16: (address: number) => engine.read16(address),
       read32: (address: number) => engine.read32(address),
+      readVariable: (path: string) => engine.readVariable(path),
       disassemble: (address: number, count?: number, mode?: 'thumb' | 'arm') =>
         engine.disassemble(address, count, mode),
       disassembleFunction: (address: number, mode?: 'thumb' | 'arm') => engine.disassembleFunction(address, mode),
