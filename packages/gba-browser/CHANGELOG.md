@@ -1,5 +1,13 @@
 # @gba-kit/gba-browser
 
+## 0.3.0
+
+### Patch Changes
+
+- Updated dependencies [bf00bbd]
+  - @gba-kit/gba-emulator@0.3.0
+  - @gba-kit/arm-emulator@0.3.0
+
 ## 0.2.0
 
 ### Patch Changes

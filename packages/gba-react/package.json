@@ -1,6 +1,6 @@
 {
   "name": "@gba-kit/gba-react",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "React hooks for GBA emulation",
   "author": "macabeus",
   "type": "module",
