@@ -70,6 +70,15 @@ await wait({ memory: { address: 0x03000010, greaterThan: 100 } });
 await wait({ memory: { address: 0x03000010, bitSet: 0x80 } }); // Check if bit 7 is set
 ```
 
+A numeric `address` is read as a **single byte**. When the runtime is created with an `elfPath`, `address` may instead be a **`symbol` or `symbol.field` path**, resolved through the DWARF and read at the field's full width, with bitfields decoded:
+
+```javascript
+await wait({ memory: { address: 'game_sm.state', equals: 5 }, timeout: 300 });
+await wait({ memory: { address: 'g_game_vars.rng_info.seed', greaterThan: 0 } }); // nested fields too
+```
+
+A path throws (before running any frames) if debug info isn't loaded, the path can't be resolved, or the field is wider than 4 bytes.
+
 **Wait for a screen pixel to match a color:**
 
 ```javascript
@@ -447,6 +456,12 @@ Throws an error if the condition is not met.
 assert({
   memory: { address: 0x03000010, equals: 42 },
 });
+```
+
+As with `wait({ memory })`, `address` may be a numeric address (single byte) or a `symbol`/`symbol.field` path (full width, bitfields decoded):
+
+```javascript
+assert({ memory: { address: 'g_game_vars.score', equals: 1000 } });
 ```
 
 **Assert a register value:**

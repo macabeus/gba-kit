@@ -1,0 +1,20 @@
+---
+'@gba-kit/debug-info': minor
+---
+
+Parse struct/union layouts, bitfields, and enum constants from DWARF `.debug_info`.
+
+`DebugInfo` gains:
+
+- `struct(name)` — members with byte offsets and sizes.
+- `structMember(name, path)` — resolve a dotted/array nested field path to its offset + size, descending through anonymous unions/structs.
+- `enumValues(name)` — `{ enumeratorName: value }`, including explicit/continued values.
+- `variableMember(varName, path)` — like `structMember`, but rooted at a global/static variable; its type is read from the variable's own DWARF DIE, so no type name is needed.
+- `resolveVariable("symbol.field.subfield")` — resolve a path to an absolute `ResolvedLocation` in one call: address from `.symtab`, layout from the variable's DWARF type.
+- `hasTypeInfo`, plus the new exported `TypeIndex`.
+
+Bitfield members also report `bitOffset`/`bitWidth`, normalized across the DWARF 2/3 and 4+ encodings. Members whose byte size can't be determined (incomplete type, flexible array) report `size: null`.
+
+Handles DWARF 2–5 from agbcc and modern GCC, including typedef/qualifier chains and multi-CU abbrev tables.
+
+`symbolToAddress` now also resolves linker-defined absolute (`SHN_ABS`) globals — the `gFoo = 0x...;` ldscript symbols that place data at fixed RAM addresses — while keeping section-relative markers like `_end`/`__bss_start` excluded.

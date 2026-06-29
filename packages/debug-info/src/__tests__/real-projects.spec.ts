@@ -89,8 +89,179 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
     expect(di.symbolToAddress('g_counter')).toBe(oracle.symbols.g_counter);
   });
 
+  it('resolves a linker-defined absolute global (STT_NOTYPE ldscript symbol)', () => {
+    // gAbsGlobal = 0x03001234 — an ldscript/--defsym symbol, the way GBA decomps
+    // place a struct at a fixed RAM address. It's STT_NOTYPE/SHN_ABS, so it only
+    // resolves because the symbol index keeps absolute NOTYPE/GLOBAL symbols.
+    expect(di.symbolToAddress('gAbsGlobal')).toBe(0x03001234);
+    // It carries no size, so resolveVariable falls back to a 32-bit word read.
+    expect(di.resolveVariable('gAbsGlobal')).toEqual({ address: 0x03001234, size: 4 });
+  });
+
   it('returns null for a PC outside any function/sequence', () => {
     expect(di.pcToSource(0x09000000)).toBeNull();
     expect(di.pcToFunction(0x09000000)).toBeNull();
+  });
+
+  // Struct/union layout from DWARF. The shared types have an ABI-stable layout, so
+  // the same numbers hold under both agbcc (DWARF-2) and modern GCC (DWARF-5).
+  it('exposes DWARF type info', () => {
+    expect(di.hasTypeInfo).toBe(true);
+  });
+
+  it('resolves a named struct layout (offsets + sizes) — DebugInfo.struct', () => {
+    expect(di.struct('Probe')).toEqual({
+      name: 'Probe',
+      size: 32,
+      members: [
+        { name: 'tag', offset: 0, size: 1 },
+        { name: 'count', offset: 4, size: 4 },
+        { name: 'flags', offset: 8, size: 2 },
+        { name: 'name', offset: 10, size: 6 }, // char[6] → element size × length
+        { name: 'ptr', offset: 16, size: 4 }, // pointer → 4 bytes
+        { name: 'inner', offset: 20, size: 8 }, // nested struct
+        { name: 'tail', offset: 28, size: 4 },
+      ],
+    });
+  });
+
+  it('resolves a typedef of an anonymous struct by its alias name', () => {
+    // `typedef struct {…} Pair;` — no struct tag, only the typedef.
+    // struct('Pair') must follow the typedef to the unnamed struct.
+    expect(di.struct('Pair')).toEqual({
+      name: 'Pair',
+      size: 8,
+      members: [
+        { name: 'a', offset: 0, size: 4 },
+        { name: 'b', offset: 4, size: 4 },
+      ],
+    });
+  });
+
+  it('resolves nested member paths — DebugInfo.structMember', () => {
+    expect(di.structMember('Probe', 'count')).toEqual({ offset: 4, size: 4 });
+    expect(di.structMember('Probe', 'inner.x')).toEqual({ offset: 20, size: 4 });
+    expect(di.structMember('Probe', 'inner.y')).toEqual({ offset: 24, size: 2 });
+    expect(di.structMember('Probe', ['inner', 'x'])).toEqual({ offset: 20, size: 4 }); // array form
+  });
+
+  it('returns null for unknown types and missing members', () => {
+    expect(di.struct('NoSuchType')).toBeNull();
+    expect(di.structMember('Probe', 'nope')).toBeNull();
+    expect(di.structMember('Probe', 'inner.nope')).toBeNull();
+    expect(di.structMember('Probe', 'count.x')).toBeNull(); // can't descend into a scalar
+  });
+
+  it('reads enum constants, including explicit + continued values — DebugInfo.enumValues', () => {
+    // enum Color { COLOR_RED, COLOR_GREEN = 5, COLOR_BLUE };
+    expect(di.enumValues('Color')).toEqual({ COLOR_RED: 0, COLOR_GREEN: 5, COLOR_BLUE: 6 });
+  });
+
+  it('reads a typedef of an anonymous enum by its alias name', () => {
+    // typedef enum { MODE_OFF, MODE_ON } Mode;
+    expect(di.enumValues('Mode')).toEqual({ MODE_OFF: 0, MODE_ON: 1 });
+  });
+
+  it('returns null for an unknown enum', () => {
+    expect(di.enumValues('NoSuchEnum')).toBeNull();
+  });
+
+  // Bitfields: hearts:2, stars:3, cross:7, wide:4 packed LSB-first into one unit,
+  // then a plain int. Normalized identically from DWARF-2 (bit_offset from MSB)
+  // and DWARF-5 (data_bit_offset).
+  it('resolves bitfield members to offset + shift + width — DebugInfo.struct', () => {
+    expect(di.struct('Bits')).toEqual({
+      name: 'Bits',
+      size: 8,
+      members: [
+        { name: 'hearts', offset: 0, size: 1, bitOffset: 0, bitWidth: 2 },
+        { name: 'stars', offset: 0, size: 1, bitOffset: 2, bitWidth: 3 },
+        { name: 'cross', offset: 0, size: 2, bitOffset: 5, bitWidth: 7 }, // crosses byte boundary → 2-byte read
+        { name: 'wide', offset: 1, size: 1, bitOffset: 4, bitWidth: 4 },
+        { name: 'after', offset: 4, size: 4 }, // plain member: no bitOffset/bitWidth
+      ],
+    });
+  });
+
+  it('resolves a struct from a second compilation unit (multi-abbrev-table)', () => {
+    // UtilPair lives in util.c — a separate CU whose abbrev table abuts main.c's.
+    // agbcc emits no 0-code terminator between tables, so this guards table bounding.
+    expect(di.struct('UtilPair')).toEqual({
+      name: 'UtilPair',
+      size: 4,
+      members: [
+        { name: 'lo', offset: 0, size: 2 },
+        { name: 'hi', offset: 2, size: 2 },
+      ],
+    });
+  });
+
+  it('resolves a bitfield member via structMember', () => {
+    // (The runtime decode of this shape is covered end-to-end by scripting's readVariable.)
+    expect(di.structMember('Bits', 'cross')).toEqual({ offset: 0, size: 2, bitOffset: 5, bitWidth: 7 });
+  });
+
+  // Variable-rooted resolution: the global's type comes from its own DWARF DIE, so
+  // no type name is supplied. g_probe/g_bits/g_counter are real globals in main.c.
+  it('resolves a field path from a variable symbol — DebugInfo.variableMember', () => {
+    expect(di.variableMember('g_probe', 'count')).toEqual({ offset: 4, size: 4 });
+    expect(di.variableMember('g_probe', 'inner.y')).toEqual({ offset: 24, size: 2 });
+    expect(di.variableMember('g_bits', 'cross')).toEqual({ offset: 0, size: 2, bitOffset: 5, bitWidth: 7 });
+    expect(di.variableMember('g_probe', 'nope')).toBeNull();
+    expect(di.variableMember('noSuchGlobal', 'count')).toBeNull();
+  });
+
+  it('resolves a variable path to an absolute address + size — DebugInfo.resolveVariable', () => {
+    const probe = di.symbolToAddress('g_probe')!;
+    expect(di.resolveVariable('g_probe.inner.y')).toEqual({ address: probe + 24, size: 2 });
+    // A bitfield carries its shift/width through.
+    expect(di.resolveVariable('g_bits.cross')).toEqual({
+      address: di.symbolToAddress('g_bits'),
+      size: 2,
+      bitOffset: 5,
+      bitWidth: 7,
+    });
+    // A bare scalar global: size comes from the symbol table.
+    expect(di.resolveVariable('g_counter')).toEqual({ address: di.symbolToAddress('g_counter'), size: 4 });
+    expect(di.resolveVariable('noSuchGlobal')).toBeNull();
+    expect(di.resolveVariable('g_probe.nope')).toBeNull();
+  });
+});
+
+// Shapes/symbols present only in devkitarm-min — agbcc (GCC 2.95) rejects anonymous
+// unions, and agbcc-min's custom linker script emits no boundary markers — so these
+// run against devkitarm-min alone.
+describe('DebugInfo on devkitarm-min-only shapes', () => {
+  const di = DebugInfo.fromElf(new Uint8Array(readFileSync(join(projectsDir, 'devkitarm-min', 'build', 'min.elf'))));
+
+  it('descends into an anonymous union to resolve its fields', () => {
+    // struct Shape { int kind; union { int circle; short pair; }; };
+    expect(di.structMember('Shape', 'circle')).toEqual({ offset: 4, size: 4 });
+    expect(di.structMember('Shape', 'pair')).toEqual({ offset: 4, size: 2 });
+    const shape = di.symbolToAddress('g_shape')!;
+    expect(di.variableMember('g_shape', 'circle')).toEqual({ offset: 4, size: 4 });
+    expect(di.resolveVariable('g_shape.pair')).toEqual({ address: shape + 4, size: 2 });
+  });
+
+  it('reports the byte size of an 8-byte global (long long)', () => {
+    expect(di.resolveVariable('g_wide')).toEqual({ address: di.symbolToAddress('g_wide'), size: 8 });
+  });
+
+  it('reports null size for a flexible array member (no fixed read size)', () => {
+    // struct Blob { int len; char data[]; };
+    expect(di.structMember('Blob', 'len')).toEqual({ offset: 0, size: 4 });
+    expect(di.structMember('Blob', 'data')).toEqual({ offset: 4, size: null });
+    // The null size propagates, so resolveVariable refuses to size the read.
+    expect(di.resolveVariable('g_blob.data')).toBeNull();
+  });
+
+  it('keeps absolute ldscript globals but excludes section-relative linker markers', () => {
+    // `gAbsGlobal` is STT_NOTYPE with SHN_ABS — an ldscript-placed data global we want.
+    expect(di.symbolToAddress('gAbsGlobal')).toBe(0x03001234);
+    // `_end` / `__bss_start` are also STT_NOTYPE/STB_GLOBAL and present in the symtab,
+    // but section-relative (not SHN_ABS): boundary markers, not data globals. The
+    // SHN_ABS filter must exclude them, so symbolToAddress returns null.
+    expect(di.symbolToAddress('_end')).toBeNull();
+    expect(di.symbolToAddress('__bss_start')).toBeNull();
   });
 });

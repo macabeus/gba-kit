@@ -9,9 +9,13 @@ across the two ecosystems GBA developers use:
 | `agbcc-min`     | agbcc (GCC 2.95), as a git submodule                               | v2           |
 | `devkitarm-min` | modern `arm-none-eabi-gcc`, GCC 14 (devkitARM / ARM GNU Toolchain) | v3+          |
 
-Both compile the same shape — `add` / `square` (adjacent, exercises the
+Both compile the same core shape — `add` / `square` (adjacent, exercises the
 sequence-boundary case), `bump`, `triple` (in a second `util.c` → multi-CU),
 `main`, and a global `g_counter` — with `-g -O2`.
+
+`devkitarm-min` additionally carries a few shapes agbcc (GCC 2.95) can't compile:
+an anonymous union (`struct Shape`), an 8-byte `long long` global (`g_wide`),
+and a flexible array member (`struct Blob`). It's covered by a devkitarm-only test block.
 
 ## What's committed, and what runs the tests
 

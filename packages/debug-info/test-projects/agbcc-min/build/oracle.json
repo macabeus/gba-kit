@@ -5,21 +5,28 @@
     "_start": 134217728,
     "add": 134217736,
     "bump": 134217748,
+    "gAbsGlobal": 50336308,
+    "g_bits": 50331712,
+    "g_color": 50331696,
     "g_counter": 50331648,
-    "main": 134217764,
+    "g_mode": 50331652,
+    "g_pair": 50331704,
+    "g_probe": 50331664,
+    "g_util_pair": 50331720,
+    "main": 134217844,
     "square": 134217740,
-    "triple": 134217800
+    "triple": 134217880
   },
   "lines": {
-    "0x8000048": {
+    "0x8000098": {
       "func": "triple",
       "file": "util.c",
-      "line": 3
+      "line": 16
     },
     "0x8000008": {
       "func": "add",
       "file": "main.c",
-      "line": 15
+      "line": 80
     },
     "0x8000006": {
       "func": "__gccmain",
@@ -34,17 +41,17 @@
     "0x8000014": {
       "func": "bump",
       "file": "main.c",
-      "line": 23
+      "line": 87
     },
-    "0x8000024": {
+    "0x8000074": {
       "func": "main",
       "file": "main.c",
-      "line": 26
+      "line": 97
     },
     "0x800000c": {
       "func": "square",
       "file": "main.c",
-      "line": 19
+      "line": 84
     }
   }
 }

@@ -7,8 +7,12 @@
 import { ElfFile } from './elf.js';
 import { Cursor, cstrAt } from './reader.js';
 
+export const STT_NOTYPE = 0;
 export const STT_OBJECT = 1;
 export const STT_FUNC = 2;
+
+const STB_GLOBAL = 1; // st_info >> 4
+const SHN_ABS = 0xfff1; // an absolute value, e.g. an ldscript `gFoo = 0x...;` global
 
 export interface ElfSymbol {
   name: string;
@@ -42,7 +46,12 @@ export class SymbolIndex {
   constructor(symbols: ElfSymbol[], sections: SectionRange[] = []) {
     this.symbols = symbols;
     for (const s of symbols) {
-      if (!this.#byName.has(s.name)) {
+      const existing = this.#byName.get(s.name);
+      // First definition wins, EXCEPT a typed symbol (FUNC/OBJECT) always beats a
+      // NOTYPE linker alias of the same name — otherwise an ldscript/boundary symbol
+      // (e.g. `_end`) that happens to appear first would shadow the real function or
+      // object's address.
+      if (!existing || (existing.type === STT_NOTYPE && s.type !== STT_NOTYPE)) {
         this.#byName.set(s.name, s);
       }
     }
@@ -78,7 +87,15 @@ export class SymbolIndex {
       const stSize = c.u32At(off + 8);
       const stInfo = c.u8At(off + 12);
       const type = stInfo & 0xf;
-      if (type !== STT_FUNC && type !== STT_OBJECT) {
+      const bind = stInfo >> 4;
+      const shndx = c.u16At(off + 14);
+      // Keep functions, data objects, and linker-defined absolute globals. The latter
+      // — ldscript symbols like `gFoo = 0x03000000;` that place a struct at a fixed RAM
+      // address, the norm in GBA decomp — are STT_NOTYPE/STB_GLOBAL with SHN_ABS, so
+      // symbolToAddress can resolve them. Restricting to SHN_ABS excludes section-
+      // relative NOTYPE markers (`_end`, `__bss_start`, `_edata`), which aren't globals.
+      const isLinkerGlobal = type === STT_NOTYPE && bind === STB_GLOBAL && shndx === SHN_ABS;
+      if (type !== STT_FUNC && type !== STT_OBJECT && !isLinkerGlobal) {
         continue;
       }
       const name = cstrAt(strtab, stName);

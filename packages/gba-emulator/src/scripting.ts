@@ -6,7 +6,7 @@
  * Both web and Node.js consumers provide their own ScriptingHost implementation.
  */
 import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassembler';
-import { DebugInfo, type SourceLocation } from '@gba-kit/debug-info';
+import { DebugInfo, type ResolvedLocation, type SourceLocation } from '@gba-kit/debug-info';
 
 import { Gba } from './gba.js';
 import type { CpuSnapshot, GbaSnapshot } from './savestate.js';
@@ -57,7 +57,12 @@ interface WaitFrames {
 
 interface WaitMemory {
   memory: {
-    address: number;
+    /**
+     * A raw address (read as a single byte), or — when debug info is loaded — a
+     * `symbol`/`symbol.field` path, resolved through the DWARF and read at the
+     * field's full width (bitfields decoded).
+     */
+    address: number | string;
     equals?: number;
     lessThan?: number;
     greaterThan?: number;
@@ -103,7 +108,12 @@ type MemorySnapshotOptions = MemorySnapshotRegion | MemorySnapshotRange;
 
 interface AssertMemory {
   memory: {
-    address: number;
+    /**
+     * A raw address (read as a single byte), or — when debug info is loaded — a
+     * `symbol`/`symbol.field` path, resolved through the DWARF and read at the
+     * field's full width (bitfields decoded).
+     */
+    address: number | string;
     equals: number;
   };
 }
@@ -261,9 +271,10 @@ export class ScriptingEngine {
 
     if ('memory' in condition) {
       const { address, equals, lessThan, greaterThan, bitSet } = condition.memory;
+      const probe = this.#memoryProbe(address);
       for (let i = 0; i < timeout; i++) {
         this.#runFrame();
-        const value = this.#gba.bus.read8(address);
+        const value = probe.read();
         if (equals !== undefined && value === equals) {
           return;
         }
@@ -277,7 +288,7 @@ export class ScriptingEngine {
           return;
         }
       }
-      throw new Error(`wait({ memory }) timed out after ${timeout} frames at address 0x${address.toString(16)}`);
+      throw new Error(`wait({ memory }) timed out after ${timeout} frames at ${probe.label}`);
     }
 
     if ('pc' in condition) {
@@ -574,6 +585,70 @@ export class ScriptingEngine {
 
   read32(address: number): number {
     return this.#gba.bus.read32(address);
+  }
+
+  /**
+   * Read a global/static variable's current value by a `symbol` or
+   * `symbol.field.subfield` path — the read counterpart to {@link watchSymbol}. The
+   * address comes from the symbol table and the byte size (and any bitfield
+   * shift/width) from the variable's DWARF type, so the right number of bytes is read
+   * and a packed bitfield is decoded to its plain value. Throws if no debug info is
+   * loaded or the path can't be resolved.
+   *
+   * @example
+   *   readVariable('g_game_vars.score');       // a nested struct field
+   *   readVariable('gPlayerFlags.invincible'); // a bitfield, decoded
+   */
+  readVariable(path: string): number {
+    return this.#readResolved(this.#resolveForRead(path));
+  }
+
+  /** Resolve a path to a readable (≤ 4-byte) location, or throw with the reason. */
+  #resolveForRead(path: string): ResolvedLocation {
+    if (!this.#debugInfo) {
+      throw new Error(`resolving "${path}" requires debug info; call loadDebugInfo(elfBytes) first`);
+    }
+    const loc = this.#debugInfo.resolveVariable(path);
+    if (loc === null) {
+      throw new Error(`cannot resolve "${path}"`);
+    }
+    if (loc.size > 4) {
+      throw new Error(`"${path}" is ${loc.size} bytes; values wider than 32 bits can't be read`);
+    }
+    return loc;
+  }
+
+  /** Read + bitfield-decode the value at a resolved location; result is unsigned. */
+  #readResolved(loc: ResolvedLocation): number {
+    const raw = this.#readSized(loc.address, loc.size);
+    return loc.bitOffset === undefined ? raw : ((raw >>> loc.bitOffset) & (2 ** loc.bitWidth! - 1)) >>> 0;
+  }
+
+  /**
+   * Build a value reader + a human label for a `wait`/`assert` memory address: a raw
+   * number reads a single byte; a `symbol`/`symbol.field` path resolves through the
+   * DWARF (once, up front) and reads the field's full width, decoding bitfields.
+   */
+  #memoryProbe(address: number | string): { read: () => number; label: string } {
+    if (typeof address === 'number') {
+      return { read: () => this.#gba.bus.read8(address), label: `0x${address.toString(16)}` };
+    }
+    const loc = this.#resolveForRead(address);
+    return { read: () => this.#readResolved(loc), label: `"${address}" (0x${loc.address.toString(16)})` };
+  }
+
+  /**
+   * Read an unsigned little-endian integer of `size` (1–4) bytes by assembling
+   * individual bytes, so it is correct at any alignment (the bus's read16/read32
+   * force alignment) and the result is unsigned.
+   */
+  #readSized(address: number, size: number): number {
+    const bus = this.#gba.bus;
+    let value = 0;
+    for (let i = 0; i < size; i++) {
+      value |= bus.read8(address + i) << (8 * i);
+    }
+    return value >>> 0;
   }
 
   disassemble(
@@ -1026,10 +1101,11 @@ export class ScriptingEngine {
   assert(condition: AssertCondition): void {
     if ('memory' in condition) {
       const { address, equals } = condition.memory;
-      const actual = this.#gba.bus.read8(address);
+      const probe = this.#memoryProbe(address);
+      const actual = probe.read();
       if (actual !== equals) {
         throw new Error(
-          `Assertion failed: memory[0x${address.toString(16)}] expected ${equals} (0x${equals.toString(16)}), got ${actual} (0x${actual.toString(16)})`,
+          `Assertion failed: memory[${probe.label}] expected ${equals} (0x${equals.toString(16)}), got ${actual} (0x${actual.toString(16)})`,
         );
       }
       return;
