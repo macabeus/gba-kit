@@ -145,6 +145,17 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
     expect(di.structMember('Probe', ['inner', 'x'])).toEqual({ offset: 20, size: 4 }); // array form
   });
 
+  it('classifies a variable declaration shape — TypeIndex.variableShape', () => {
+    // scalar int: signed, 4 bytes
+    expect(di.types.variableShape('g_counter')).toEqual({ kind: 'scalar', size: 4, signed: true });
+    // struct global, by tag name
+    expect(di.types.variableShape('g_probe')).toEqual({ kind: 'struct', structName: 'Probe', size: 32 });
+    // typedef'd anonymous struct: shape resolves through the typedef (the tag is unnamed)
+    expect(di.types.variableShape('g_pair')).toMatchObject({ kind: 'struct', size: 8 });
+    // no DIE ⇒ null — the "is this name declared?" probe
+    expect(di.types.variableShape('g_no_such')).toBeNull();
+  });
+
   it('returns null for unknown types and missing members', () => {
     expect(di.struct('NoSuchType')).toBeNull();
     expect(di.structMember('Probe', 'nope')).toBeNull();

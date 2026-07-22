@@ -42,6 +42,7 @@ const DW_AT_data_bit_offset = 0x6b; // DWARF 4+ bitfield: absolute bit offset fr
 const DW_AT_count = 0x37;
 const DW_AT_data_member_location = 0x38;
 const DW_AT_declaration = 0x3c;
+const DW_AT_encoding = 0x3e;
 const DW_AT_type = 0x49;
 const DW_AT_str_offsets_base = 0x72;
 
@@ -118,6 +119,18 @@ export interface StructType {
   size: number | null;
   members: StructMember[];
 }
+
+/**
+ * The declaration SHAPE of a global variable — what kind of thing its C type is, resolved
+ * through typedefs and cv-qualifiers. A small closed set, for a consumer that needs to know how
+ * a name is declared (`extern u16 tbl[]` vs a scalar vs a struct) without a full DIE→C-type
+ * renderer.
+ */
+export type VariableShape =
+  | { kind: 'scalar'; size: number | null; signed: boolean | null }
+  | { kind: 'pointer' }
+  | { kind: 'array'; elemSize: number | null; elemSigned: boolean | null; length: number | null }
+  | { kind: 'struct'; structName: string | null; size: number | null };
 
 /** A member's read location: its byte offset + size, plus bitfield shift/width. */
 export type MemberLocation = Omit<StructMember, 'name'>;
@@ -285,6 +298,51 @@ export class TypeIndex {
   variableSize(varName: string): number | null {
     const variable = this.#variableByName.get(varName);
     return variable ? this.#typeRefSize(variable.attrs.get(DW_AT_type)) : null;
+  }
+
+  /**
+   * Classify a global/static variable's declaration shape (scalar | pointer | array | struct),
+   * resolved through typedefs/cv-qualifiers. `null` when the variable has no DWARF DIE — which
+   * also makes this the "is this name declared in the project headers?" probe. An unsized
+   * extern array (`extern u16 tbl[]`) classifies as `array` with `length: null`.
+   */
+  variableShape(varName: string): VariableShape | null {
+    const variable = this.#variableByName.get(varName);
+    if (!variable) {
+      return null;
+    }
+    const die = this.#stripTypedefs(variable.attrs.get(DW_AT_type));
+    if (!die) {
+      return null;
+    }
+    switch (die.tag) {
+      case DW_TAG_pointer_type:
+        return { kind: 'pointer' };
+      case DW_TAG_array_type: {
+        const elem = this.#stripTypedefs(die.attrs.get(DW_AT_type));
+        return {
+          kind: 'array',
+          elemSize: this.#typeRefSize(die.attrs.get(DW_AT_type)),
+          elemSigned: elem ? baseTypeSignedness(elem) : null,
+          length: arrayLength(die),
+        };
+      }
+      case DW_TAG_structure_type:
+      case DW_TAG_union_type: {
+        const structName = die.attrs.get(DW_AT_name);
+        return {
+          kind: 'struct',
+          structName: typeof structName === 'string' ? structName : null,
+          size: numberAttr(die, DW_AT_byte_size),
+        };
+      }
+      default:
+        return {
+          kind: 'scalar',
+          size: this.#typeRefSize(variable.attrs.get(DW_AT_type)),
+          signed: baseTypeSignedness(die),
+        };
+    }
   }
 
   /** Walk `path` from a struct/union DIE, accumulating member byte offsets. */
@@ -558,6 +616,16 @@ function arrayLength(arrayDie: Die): number | null {
     count *= dim;
   }
   return sawDimension ? count : null;
+}
+
+/** Signedness of a base type from DW_AT_encoding (DW_ATE_signed/signed_char = signed;
+ *  unsigned/unsigned_char/boolean = unsigned). Non-base types (enums, etc.) → null. */
+function baseTypeSignedness(die: Die): boolean | null {
+  if (die.tag !== DW_TAG_base_type) {
+    return null;
+  }
+  const enc = numberAttr(die, DW_AT_encoding);
+  return enc === null ? null : enc === 0x05 || enc === 0x06;
 }
 
 function numberAttr(die: Die, attr: number): number | null {
