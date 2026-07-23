@@ -155,6 +155,8 @@ type AttrValue = number | string | Uint8Array | boolean;
 
 /** The DWARF string sections an attribute form may resolve a name against. */
 interface DebugStrings {
+  /** byte order of the DWARF payload (matches the ELF container) */
+  littleEndian: boolean;
   /** `.debug_str` — DW_FORM_strp and the targets of DW_FORM_strx. */
   str: Uint8Array;
   /** `.debug_line_str` — DW_FORM_line_strp. */
@@ -433,6 +435,7 @@ export class TypeIndex {
       return new TypeIndex([]);
     }
     const strings: DebugStrings = {
+      littleEndian: elf.littleEndian,
       str: elf.sectionData('.debug_str') ?? new Uint8Array(0),
       lineStr: elf.sectionData('.debug_line_str') ?? new Uint8Array(0),
       strOffsets: elf.sectionData('.debug_str_offsets') ?? new Uint8Array(0),
@@ -658,9 +661,9 @@ interface CuHeader {
  * DWARF), or the first truncated/inconsistent header — returning the units decoded
  * so far rather than throwing, so a malformed tail unit can't lose the whole section.
  */
-function collectCuHeaders(info: Uint8Array): CuHeader[] {
+function collectCuHeaders(info: Uint8Array, littleEndian: boolean): CuHeader[] {
   const headers: CuHeader[] = [];
-  const c = new Cursor(info);
+  const c = new Cursor(info, 0, littleEndian);
   while (c.remaining >= 4) {
     const cuStart = c.offset;
     const unitLength = c.u32();
@@ -698,12 +701,12 @@ function collectCuHeaders(info: Uint8Array): CuHeader[] {
 function parseDebugInfo(info: Uint8Array, abbrev: Uint8Array, strings: DebugStrings): Die[] {
   const roots: Die[] = [];
   const abbrevTables = new Map<number, Map<number, Abbrev>>();
-  const headers = collectCuHeaders(info);
+  const headers = collectCuHeaders(info, strings.littleEndian);
   // agbcc (DWARF-2) does not emit a trailing 0-code terminator on each abbrev
   // table — tables abut and are delimited only by the CUs' debug_abbrev_offset.
   // Bound each table to the next one's start (in addition to the 0-code terminator).
   const boundaries = abbrevTableBoundaries(headers, abbrev.length);
-  const c = new Cursor(info);
+  const c = new Cursor(info, 0, strings.littleEndian);
 
   for (const h of headers) {
     // Skeleton/split units carry a dwo_id we don't handle — skip the unit.
@@ -977,6 +980,6 @@ function resolveStrx(index: number, ctx: UnitContext, strings: DebugStrings): st
   if (at + 4 > strings.strOffsets.length) {
     return '';
   }
-  const c = new Cursor(strings.strOffsets);
+  const c = new Cursor(strings.strOffsets, 0, strings.littleEndian);
   return cstrAt(strings.str, c.u32At(at));
 }

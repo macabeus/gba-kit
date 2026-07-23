@@ -41,7 +41,7 @@ export class DebugInfo {
     const elf = ElfFile.parse(bytes);
     const symbols = SymbolIndex.fromElf(elf);
     const debugLine = elf.sectionData('.debug_line');
-    const lines = debugLine ? parseDebugLine(debugLine) : new LineTable([]);
+    const lines = debugLine ? parseDebugLine(debugLine, elf.littleEndian) : new LineTable([]);
     const types = TypeIndex.fromElf(elf);
     return new DebugInfo(elf, symbols, lines, types);
   }

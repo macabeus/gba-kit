@@ -35,9 +35,9 @@ const DW_LNE_set_address = 2;
 const DW_LNE_define_file = 3;
 
 /** Parse all compilation units in a `.debug_line` section into a sorted table. */
-export function parseDebugLine(section: Uint8Array): LineTable {
+export function parseDebugLine(section: Uint8Array, littleEndian = true): LineTable {
   const rows: LineRow[] = [];
-  const c = new Cursor(section);
+  const c = new Cursor(section, 0, littleEndian);
 
   while (c.remaining >= 4) {
     parseUnit(c, rows);

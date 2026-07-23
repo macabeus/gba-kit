@@ -18,6 +18,19 @@ describe('Cursor', () => {
     expect(new Cursor(bytes(0x00, 0x00, 0x00, 0x80)).u32()).toBe(0x80000000);
   });
 
+  it('reads BIG-endian integers when constructed with littleEndian=false', () => {
+    const c = new Cursor(bytes(0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07), 0, false);
+    expect(c.u8()).toBe(0x01);
+    expect(c.u16()).toBe(0x0203);
+    expect(c.u32()).toBe(0x04050607);
+    expect(c.u16At(1)).toBe(0x0203);
+    expect(c.u32At(3)).toBe(0x04050607);
+  });
+
+  it('BE u32 stays unsigned', () => {
+    expect(new Cursor(bytes(0x80, 0x00, 0x00, 0x00), 0, false).u32()).toBe(0x80000000);
+  });
+
   it('decodes ULEB128 (verified encodings)', () => {
     expect(new Cursor(bytes(0x00)).uleb()).toBe(0);
     expect(new Cursor(bytes(0x7f)).uleb()).toBe(127);
