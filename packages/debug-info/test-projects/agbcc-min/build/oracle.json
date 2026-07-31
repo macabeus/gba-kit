@@ -6,19 +6,22 @@
     "add": 134217736,
     "bump": 134217748,
     "gAbsGlobal": 50336308,
-    "g_bits": 50331712,
+    "g_bits": 50331720,
     "g_color": 50331696,
     "g_counter": 50331648,
+    "g_cv": 50331712,
+    "g_mmio": 50331700,
     "g_mode": 50331652,
     "g_pair": 50331704,
     "g_probe": 50331664,
-    "g_util_pair": 50331720,
-    "main": 134217844,
+    "g_rom_table": 134217932,
+    "g_util_pair": 50331728,
+    "main": 134217880,
     "square": 134217740,
-    "triple": 134217880
+    "triple": 134217916
   },
   "lines": {
-    "0x8000098": {
+    "0x80000bc": {
       "func": "triple",
       "file": "util.c",
       "line": 16
@@ -26,7 +29,7 @@
     "0x8000008": {
       "func": "add",
       "file": "main.c",
-      "line": 80
+      "line": 94
     },
     "0x8000006": {
       "func": "__gccmain",
@@ -41,17 +44,17 @@
     "0x8000014": {
       "func": "bump",
       "file": "main.c",
-      "line": 87
+      "line": 101
     },
-    "0x8000074": {
+    "0x8000098": {
       "func": "main",
       "file": "main.c",
-      "line": 97
+      "line": 114
     },
     "0x800000c": {
       "func": "square",
       "file": "main.c",
-      "line": 84
+      "line": 98
     }
   }
 }

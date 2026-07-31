@@ -76,6 +76,20 @@ struct Bits {
 
 struct Bits g_bits;
 
+/* cv-qualified globals + a SIGNED narrow member — declaration facts that offsets
+ * and sizes alone cannot carry: the volatile/const qualifiers variableShape must
+ * resolve through, and each member's base-type signedness from struct() (the same
+ * byte reads as -1 or as 255 depending on it).
+ *   Cv: level @0 (1, signed)  gain @2 (2, unsigned)                 size 4 */
+struct Cv {
+    signed char level;
+    volatile unsigned short gain; /* member-level volatile (the vu16-field MMIO idiom) */
+};
+
+volatile struct Cv g_cv;                /* volatile struct (an MMIO-block idiom) */
+volatile unsigned short g_mmio;         /* volatile scalar (an MMIO register idiom) */
+const short g_rom_table[3] = {1, 2, 3}; /* const array (a ROM-table idiom) */
+
 int add(int a, int b) {
     return a + b;
 }
@@ -92,6 +106,9 @@ void bump(void) {
     g_mode = MODE_ON;                            /* keep enum Mode live */
     g_bits.cross = g_counter;                    /* keep struct Bits + its type live */
     g_bits.after = g_counter;
+    g_cv.level = (signed char) g_counter;        /* keep struct Cv + its quals live */
+    g_mmio = (unsigned short) g_counter;         /* keep the volatile scalar live */
+    g_probe.count = g_rom_table[g_counter & 1];  /* keep the const table live */
 }
 
 int main(void) {

@@ -52,7 +52,7 @@ describe('ScriptingEngine debug info', () => {
     const src = engine.pcToSource(0x08000008);
     expect(src?.func).toBe('add');
     expect(src?.file.replace(/^.*\//, '')).toBe('main.c');
-    expect(src?.line).toBe(80); // add()'s body line in debug-info's agbcc-min/main.c
+    expect(src?.line).toBe(94); // add()'s body line in debug-info's agbcc-min/main.c
   });
 
   it('annotates watch hits with the writer source line', () => {
@@ -71,7 +71,7 @@ describe('ScriptingEngine debug info', () => {
     expect(w.hits).toHaveLength(1);
     expect(w.hits[0]!.instructionAddress).toBe(0x08000008);
     expect(w.hits[0]!.location?.func).toBe('add');
-    expect(w.hits[0]!.location?.line).toBe(80); // add()'s body line in debug-info's agbcc-min/main.c
+    expect(w.hits[0]!.location?.line).toBe(94); // add()'s body line in debug-info's agbcc-min/main.c
   });
 
   it('watchSymbol resolves a named global and records writes', () => {

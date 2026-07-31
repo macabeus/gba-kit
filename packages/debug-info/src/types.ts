@@ -104,6 +104,26 @@ export interface StructMember {
    */
   size: number | null;
   /**
+   * Signedness of the member's type, resolved through typedefs/cv-qualifiers to a base
+   * type (`DW_AT_encoding`); null when the member's type is not a base type (arrays,
+   * pointers, nested structs, enums). Offset and size alone do not carry it: the same
+   * byte reads as -1 or as 255 depending only on this.
+   */
+  signed: boolean | null;
+  /**
+   * Present (true) when the member's resolved type is a pointer. Disambiguates the
+   * `signed: null` 4-byte cases (pointer vs enum vs nested struct), which offset and
+   * size cannot tell apart and which differ in how the value may be compared
+   * (pointers compare as unsigned).
+   */
+  pointer?: true;
+  /**
+   * Present (true) when the member's type chain crosses a volatile qualifier — the
+   * `vu16 field;` MMIO idiom. Part of the declaration rather than of the layout: it
+   * says repeated accesses to the field are observable and not interchangeable.
+   */
+  volatile?: true;
+  /**
    * Bitfield only: right-shift to apply to the `size`-byte little-endian value read
    * at `offset` to reach the field's least-significant bit. Absent for plain members.
    */
@@ -125,15 +145,29 @@ export interface StructType {
  * through typedefs and cv-qualifiers. A small closed set, for a consumer that needs to know how
  * a name is declared (`extern u16 tbl[]` vs a scalar vs a struct) without a full DIE→C-type
  * renderer.
+ *
+ * The cv-qualifiers crossed while resolving are part of the shape: `volatile` says accesses to
+ * the object are observable and may not be folded or reordered, `const` that it is read-only
+ * (the ROM-table spelling). For arrays the element chain's qualifiers count too — `const u16
+ * tbl[]` qualifies the element type in DWARF.
  */
 export type VariableShape =
-  | { kind: 'scalar'; size: number | null; signed: boolean | null }
-  | { kind: 'pointer' }
-  | { kind: 'array'; elemSize: number | null; elemSigned: boolean | null; length: number | null }
-  | { kind: 'struct'; structName: string | null; size: number | null };
+  | { kind: 'scalar'; size: number | null; signed: boolean | null; volatile: boolean; const: boolean }
+  | { kind: 'pointer'; volatile: boolean; const: boolean }
+  | {
+      kind: 'array';
+      elemSize: number | null;
+      elemSigned: boolean | null;
+      length: number | null;
+      volatile: boolean;
+      const: boolean;
+    }
+  | { kind: 'struct'; structName: string | null; size: number | null; volatile: boolean; const: boolean };
 
-/** A member's read location: its byte offset + size, plus bitfield shift/width. */
-export type MemberLocation = Omit<StructMember, 'name'>;
+/** A member's read location: its byte offset + size, plus bitfield shift/width. (Signedness,
+ *  pointer-ness and volatility are declaration facts, not locations — they stay on
+ *  {@link StructMember} / `struct()`.) */
+export type MemberLocation = Omit<StructMember, 'name' | 'signed' | 'pointer' | 'volatile'>;
 
 /** A parsed DIE: its tag plus the attributes we kept, and its child DIEs. */
 interface Die {
@@ -265,7 +299,7 @@ export class TypeIndex {
       if (typeof memberName !== 'string') {
         continue; // anonymous member (e.g. an unnamed union) — skip
       }
-      members.push({ name: memberName, ...this.#memberLayout(child) });
+      members.push({ name: memberName, ...this.#memberLayout(child), ...this.#memberFacts(child) });
     }
     return { name, size: numberAttr(die, DW_AT_byte_size), members };
   }
@@ -313,20 +347,24 @@ export class TypeIndex {
     if (!variable) {
       return null;
     }
-    const die = this.#stripTypedefs(variable.attrs.get(DW_AT_type));
+    const cv = { volatile: false, const: false };
+    const die = this.#stripTypedefs(variable.attrs.get(DW_AT_type), cv);
     if (!die) {
       return null;
     }
     switch (die.tag) {
       case DW_TAG_pointer_type:
-        return { kind: 'pointer' };
+        return { kind: 'pointer', ...cv };
       case DW_TAG_array_type: {
-        const elem = this.#stripTypedefs(die.attrs.get(DW_AT_type));
+        // The element chain's qualifiers count toward the variable's declaration
+        // (`const u16 tbl[]` qualifies the ELEMENT type in DWARF) — collect into the same cv.
+        const elem = this.#stripTypedefs(die.attrs.get(DW_AT_type), cv);
         return {
           kind: 'array',
           elemSize: this.#typeRefSize(die.attrs.get(DW_AT_type)),
           elemSigned: elem ? baseTypeSignedness(elem) : null,
           length: arrayLength(die),
+          ...cv,
         };
       }
       case DW_TAG_structure_type:
@@ -336,6 +374,7 @@ export class TypeIndex {
           kind: 'struct',
           structName: typeof structName === 'string' ? structName : null,
           size: numberAttr(die, DW_AT_byte_size),
+          ...cv,
         };
       }
       default:
@@ -343,6 +382,7 @@ export class TypeIndex {
           kind: 'scalar',
           size: this.#typeRefSize(variable.attrs.get(DW_AT_type)),
           signed: baseTypeSignedness(die),
+          ...cv,
         };
     }
   }
@@ -530,11 +570,32 @@ export class TypeIndex {
     }
   }
 
-  /** Follow typedef / cv-qualifier links to the underlying type DIE (cycle-guarded). */
-  #stripTypedefs(ref: AttrValue | undefined): Die | null {
+  /** A member's declaration facts: base-type signedness, pointer-ness, and volatility —
+   *  resolved through typedef/cv-qualifier chains (see the {@link StructMember} field docs). */
+  #memberFacts(member: Die): Pick<StructMember, 'signed' | 'pointer' | 'volatile'> {
+    const cv = { volatile: false, const: false };
+    const die = this.#stripTypedefs(member.attrs.get(DW_AT_type), cv);
+    return {
+      signed: die ? baseTypeSignedness(die) : null,
+      ...(die?.tag === DW_TAG_pointer_type ? { pointer: true as const } : {}),
+      ...(cv.volatile ? { volatile: true as const } : {}),
+    };
+  }
+
+  /** Follow typedef / cv-qualifier links to the underlying type DIE (cycle-guarded). With a
+   *  `cv` accumulator, the const/volatile qualifiers crossed on the way are recorded into it —
+   *  callers that report a declaration (variableShape, #memberFacts) need them; callers that
+   *  only want the underlying type omit it. */
+  #stripTypedefs(ref: AttrValue | undefined, cv?: { volatile: boolean; const: boolean }): Die | null {
     let die = this.#deref(ref);
     const seen = new Set<number>();
     while (die && isQualifierOrTypedef(die.tag) && !seen.has(die.offset)) {
+      if (cv && die.tag === DW_TAG_volatile_type) {
+        cv.volatile = true;
+      }
+      if (cv && die.tag === DW_TAG_const_type) {
+        cv.const = true;
+      }
       seen.add(die.offset);
       die = this.#deref(die.attrs.get(DW_AT_type));
     }

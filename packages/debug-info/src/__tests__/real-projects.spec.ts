@@ -114,13 +114,13 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
       name: 'Probe',
       size: 32,
       members: [
-        { name: 'tag', offset: 0, size: 1 },
-        { name: 'count', offset: 4, size: 4 },
-        { name: 'flags', offset: 8, size: 2 },
-        { name: 'name', offset: 10, size: 6 }, // char[6] → element size × length
-        { name: 'ptr', offset: 16, size: 4 }, // pointer → 4 bytes
-        { name: 'inner', offset: 20, size: 8 }, // nested struct
-        { name: 'tail', offset: 28, size: 4 },
+        { name: 'tag', offset: 0, size: 1, signed: false }, // plain char is unsigned on ARM
+        { name: 'count', offset: 4, size: 4, signed: true },
+        { name: 'flags', offset: 8, size: 2, signed: true },
+        { name: 'name', offset: 10, size: 6, signed: null }, // char[6] → element size × length; not a base type
+        { name: 'ptr', offset: 16, size: 4, signed: null, pointer: true }, // pointer → 4 bytes
+        { name: 'inner', offset: 20, size: 8, signed: null }, // nested struct
+        { name: 'tail', offset: 28, size: 4, signed: true },
       ],
     });
   });
@@ -132,8 +132,8 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
       name: 'Pair',
       size: 8,
       members: [
-        { name: 'a', offset: 0, size: 4 },
-        { name: 'b', offset: 4, size: 4 },
+        { name: 'a', offset: 0, size: 4, signed: true },
+        { name: 'b', offset: 4, size: 4, signed: true },
       ],
     });
   });
@@ -146,14 +146,66 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
   });
 
   it('classifies a variable declaration shape — TypeIndex.variableShape', () => {
-    // scalar int: signed, 4 bytes
-    expect(di.types.variableShape('g_counter')).toEqual({ kind: 'scalar', size: 4, signed: true });
+    // scalar int: signed, 4 bytes, unqualified
+    expect(di.types.variableShape('g_counter')).toEqual({
+      kind: 'scalar',
+      size: 4,
+      signed: true,
+      volatile: false,
+      const: false,
+    });
     // struct global, by tag name
-    expect(di.types.variableShape('g_probe')).toEqual({ kind: 'struct', structName: 'Probe', size: 32 });
+    expect(di.types.variableShape('g_probe')).toEqual({
+      kind: 'struct',
+      structName: 'Probe',
+      size: 32,
+      volatile: false,
+      const: false,
+    });
     // typedef'd anonymous struct: shape resolves through the typedef (the tag is unnamed)
     expect(di.types.variableShape('g_pair')).toMatchObject({ kind: 'struct', size: 8 });
     // no DIE ⇒ null — the "is this name declared?" probe
     expect(di.types.variableShape('g_no_such')).toBeNull();
+  });
+
+  it('reports the cv-qualifiers variableShape resolves through — volatile scalar, const array, volatile struct', () => {
+    // volatile unsigned short g_mmio — the MMIO idiom; the qualifier is part of the declaration
+    expect(di.types.variableShape('g_mmio')).toEqual({
+      kind: 'scalar',
+      size: 2,
+      signed: false,
+      volatile: true,
+      const: false,
+    });
+    // const short g_rom_table[3] — the ROM-table idiom; the const qualifies the ELEMENT in DWARF
+    expect(di.types.variableShape('g_rom_table')).toEqual({
+      kind: 'array',
+      elemSize: 2,
+      elemSigned: true,
+      length: 3,
+      volatile: false,
+      const: true,
+    });
+    // volatile struct Cv g_cv — the qualifier survives to the struct classification
+    expect(di.types.variableShape('g_cv')).toEqual({
+      kind: 'struct',
+      structName: 'Cv',
+      size: 4,
+      volatile: true,
+      const: false,
+    });
+  });
+
+  it('reports member base-type signedness — the s8-vs-u8 fact offsets cannot carry', () => {
+    // struct Cv { signed char level; unsigned short gain; }
+    expect(di.struct('Cv')).toEqual({
+      name: 'Cv',
+      size: 4,
+      members: [
+        { name: 'level', offset: 0, size: 1, signed: true },
+        { name: 'gain', offset: 2, size: 2, signed: false, volatile: true }, // vu16-field idiom
+      ],
+    });
   });
 
   it('returns null for unknown types and missing members', () => {
@@ -185,11 +237,11 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
       name: 'Bits',
       size: 8,
       members: [
-        { name: 'hearts', offset: 0, size: 1, bitOffset: 0, bitWidth: 2 },
-        { name: 'stars', offset: 0, size: 1, bitOffset: 2, bitWidth: 3 },
-        { name: 'cross', offset: 0, size: 2, bitOffset: 5, bitWidth: 7 }, // crosses byte boundary → 2-byte read
-        { name: 'wide', offset: 1, size: 1, bitOffset: 4, bitWidth: 4 },
-        { name: 'after', offset: 4, size: 4 }, // plain member: no bitOffset/bitWidth
+        { name: 'hearts', offset: 0, size: 1, bitOffset: 0, bitWidth: 2, signed: false },
+        { name: 'stars', offset: 0, size: 1, bitOffset: 2, bitWidth: 3, signed: false },
+        { name: 'cross', offset: 0, size: 2, bitOffset: 5, bitWidth: 7, signed: false }, // crosses byte boundary → 2-byte read
+        { name: 'wide', offset: 1, size: 1, bitOffset: 4, bitWidth: 4, signed: false },
+        { name: 'after', offset: 4, size: 4, signed: true }, // plain member: no bitOffset/bitWidth
       ],
     });
   });
@@ -201,8 +253,8 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
       name: 'UtilPair',
       size: 4,
       members: [
-        { name: 'lo', offset: 0, size: 2 },
-        { name: 'hi', offset: 2, size: 2 },
+        { name: 'lo', offset: 0, size: 2, signed: true },
+        { name: 'hi', offset: 2, size: 2, signed: true },
       ],
     });
   });
