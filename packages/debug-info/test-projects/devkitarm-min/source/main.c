@@ -89,11 +89,11 @@ const short g_rom_table[3] = {1, 2, 3}; // const array (a ROM-table idiom)
 volatile struct Cv *g_cv_ptr;           // the TARGET is volatile — the qualifier is left of the *
 struct Cv *volatile g_cv_vptr;          // the mirror: the POINTER is volatile, its target is not
 
-// An anonymous union member — its fields are accessed transparently as
-// g_shape.circle / g_shape.pair, so the parser must descend into the unnamed
-// union to resolve them. Layout: kind @0 (4), union @4 (4), size 8.
+// An anonymous union member — its fields are accessed transparently as g_shape.circle /
+// g_shape.pair, so the parser must descend into the unnamed union to resolve them. Its tag field
+// is const, the read-only-member idiom. Layout: kind @0 (4), union @4 (4), size 8.
 struct Shape {
-    int kind;
+    const int kind; /* const does not move a field, so it is only visible as a declaration fact */
     union {
         int circle;
         short pair;

@@ -137,7 +137,8 @@ describe.each(ARM_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) 
         // char[6] → `size` is the WHOLE member (element size × length); the element facts are
         // what an indexed read into it needs, and `signed` stays null (an array is not a base type)
         { name: 'name', offset: 10, size: 6, signed: null, elemSize: 1, elemSigned: false, length: 6 },
-        { name: 'ptr', offset: 16, size: 4, signed: null, pointer: true }, // pointer → 4 bytes
+        // pointer → 4 bytes, and the pointee facts pointer arithmetic scales by
+        { name: 'ptr', offset: 16, size: 4, signed: null, pointer: true, pointeeSize: 4, pointeeSigned: true },
         { name: 'inner', offset: 20, size: 8, signed: null }, // nested struct
         { name: 'tail', offset: 28, size: 4, signed: true },
       ],
@@ -357,6 +358,20 @@ describe('DebugInfo on devkitarm-min-only shapes', () => {
     expect(di.resolveVariable('g_shape.pair')).toEqual({ address: shape + 4, size: 2 });
   });
 
+  it('reports a const member, which nothing about its location says', () => {
+    // `struct Shape { const int kind; … };` — const moves no field, so a consumer re-spelling
+    // the declaration can only get it from here, and a write through the member is a constraint
+    // violation rather than another spelling of the same access.
+    const kind = di.struct('Shape')!.members.find((m) => m.name === 'kind')!;
+    expect(kind).toEqual({ name: 'kind', offset: 0, size: 4, signed: true, const: true });
+    // Unqualified members carry neither key — presence is the fact, as it is for volatile.
+    const level = di.struct('Cv')!.members.find((m) => m.name === 'level')!;
+    expect(level).not.toHaveProperty('const');
+    expect(level).not.toHaveProperty('volatile');
+    // The location is the same either way, so `const` is not part of one.
+    expect(di.structMember('Shape', 'kind')).toEqual({ offset: 0, size: 4 });
+  });
+
   it('reports the byte size of an 8-byte global (long long)', () => {
     expect(di.resolveVariable('g_wide')).toEqual({ address: di.symbolToAddress('g_wide'), size: 8 });
   });
@@ -503,7 +518,7 @@ describe.each(BE_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) =
         { name: 'count', offset: 4, size: 4, signed: true },
         { name: 'flags', offset: 8, size: 2, signed: true },
         { name: 'name', offset: 10, size: 6, signed: null, elemSize: 1, elemSigned: false, length: 6 },
-        { name: 'ptr', offset: 16, size: 4, signed: null, pointer: true },
+        { name: 'ptr', offset: 16, size: 4, signed: null, pointer: true, pointeeSize: 4, pointeeSigned: true },
         { name: 'inner', offset: 20, size: 8, signed: null }, // nested struct
         { name: 'tail', offset: 28, size: 4, signed: true },
       ],

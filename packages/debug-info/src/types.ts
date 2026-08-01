@@ -120,11 +120,30 @@ export interface StructMember {
    */
   pointer?: true;
   /**
+   * Pointer member only: the byte size of the type it points AT, when that type is a base
+   * type (`u16 *` → 2). Absent when the target is not a base type (`void *`, `struct S *`, a
+   * function pointer) or the DWARF does not size it.
+   *
+   * The member's own size is 4 whatever it addresses, so this describes the OTHER end — and it
+   * is not decoration: pointer arithmetic scales by it, so `p - 4` on a `u16 *` and on a
+   * `void *` address different bytes.
+   */
+  pointeeSize?: number;
+  /** Pointer member only: signedness of the pointed-at base type, on the same terms as
+   *  {@link pointeeSize} (`s8 *` → true). Absent whenever `pointeeSize` is. */
+  pointeeSigned?: boolean;
+  /**
    * Present (true) when the member's type chain crosses a volatile qualifier — the
    * `vu16 field;` MMIO idiom. Part of the declaration rather than of the layout: it
    * says repeated accesses to the field are observable and not interchangeable.
    */
   volatile?: true;
+  /**
+   * Present (true) when the member's type chain crosses a const qualifier — the read-only-field
+   * idiom. Part of the declaration rather than of the layout, and not interchangeable with an
+   * unqualified member: a write through it is a constraint violation, not another spelling.
+   */
+  const?: true;
   /**
    * Bitfield only: right-shift to apply to the `size`-byte value read at `offset`
    * — in the ELF's own byte order — to reach the field's least-significant bit.
@@ -219,11 +238,11 @@ export interface PointeeStruct {
 }
 
 /** A member's read location: its byte offset + size, plus bitfield shift/width. (Signedness,
- *  pointer-ness, volatility and the array element facts are declaration facts, not locations —
+ *  pointer-ness, cv-qualifiers and the array element facts are declaration facts, not locations —
  *  they stay on {@link StructMember} / `struct()`.) */
 export type MemberLocation = Omit<
   StructMember,
-  'name' | 'signed' | 'pointer' | 'volatile' | 'elemSize' | 'elemSigned' | 'length'
+  'name' | 'signed' | 'pointer' | 'volatile' | 'const' | 'elemSize' | 'elemSigned' | 'length'
 >;
 
 /** A parsed DIE: its tag plus the attributes we kept, and its child DIEs. */
@@ -664,19 +683,40 @@ export class TypeIndex {
     }
   }
 
-  /** A member's declaration facts: base-type signedness, pointer-ness, volatility, and — for an
-   *  array member — its element stride/signedness/count, all resolved through typedef/cv-qualifier
-   *  chains (see the {@link StructMember} field docs). */
+  /** A member's declaration facts: base-type signedness, pointer-ness, its cv-qualifiers, and —
+   *  for an array member — its element stride/signedness/count, all resolved through
+   *  typedef/cv-qualifier chains (see the {@link StructMember} field docs). */
   #memberFacts(
     member: Die,
-  ): Pick<StructMember, 'signed' | 'pointer' | 'volatile' | 'elemSize' | 'elemSigned' | 'length'> {
+  ): Pick<
+    StructMember,
+    'signed' | 'pointer' | 'pointeeSize' | 'pointeeSigned' | 'volatile' | 'const' | 'elemSize' | 'elemSigned' | 'length'
+  > {
     const cv = { volatile: false, const: false };
     const die = this.#stripTypedefs(member.attrs.get(DW_AT_type), cv);
     return {
       signed: die ? baseTypeSignedness(die) : null,
-      ...(die?.tag === DW_TAG_pointer_type ? { pointer: true as const } : {}),
+      ...(die?.tag === DW_TAG_pointer_type ? { pointer: true as const, ...this.#pointeeFacts(die) } : {}),
       ...(cv.volatile ? { volatile: true as const } : {}),
+      ...(cv.const ? { const: true as const } : {}),
       ...(die?.tag === DW_TAG_array_type ? this.#arrayFacts(die) : {}),
+    };
+  }
+
+  /** A pointer member's target facts, when the target resolves to a BASE type. Anything else —
+   *  `void *`, a struct/function pointer, an unsized target — reports nothing, so a present key
+   *  is always a fact rather than a default. */
+  #pointeeFacts(pointerDie: Die): Pick<StructMember, 'pointeeSize' | 'pointeeSigned'> {
+    const targetRef = pointerDie.attrs.get(DW_AT_type);
+    const target = this.#stripTypedefs(targetRef);
+    if (!target || target.tag !== DW_TAG_base_type) {
+      return {};
+    }
+    const pointeeSize = this.#typeRefSize(targetRef);
+    const pointeeSigned = baseTypeSignedness(target);
+    return {
+      ...(pointeeSize !== null ? { pointeeSize } : {}),
+      ...(pointeeSigned !== null ? { pointeeSigned } : {}),
     };
   }
 
