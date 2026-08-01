@@ -3,6 +3,7 @@
  * debugger / scripting engine needs — PC→function, name→address, PC→C source.
  */
 import { LineTable, parseDebugLine } from './debug-line.js';
+import { type MacroDefinition, parseDebugMacinfo } from './debug-macro.js';
 import { ElfFile } from './elf.js';
 import { type FunctionEntry, SymbolIndex } from './symbols.js';
 import { type MemberLocation, type StructType, TypeIndex } from './types.js';
@@ -27,13 +28,16 @@ export class DebugInfo {
   readonly symbols: SymbolIndex;
   readonly lines: LineTable;
   readonly types: TypeIndex;
+  /** Every `#define` the ELF recorded (`-g3`), in stream order; empty when it carried none. */
+  readonly macros: MacroDefinition[];
 
   /** Use {@link DebugInfo.fromElf}; this constructor is an internal detail. */
-  constructor(elf: ElfFile, symbols: SymbolIndex, lines: LineTable, types: TypeIndex) {
+  constructor(elf: ElfFile, symbols: SymbolIndex, lines: LineTable, types: TypeIndex, macros: MacroDefinition[] = []) {
     this.elf = elf;
     this.symbols = symbols;
     this.lines = lines;
     this.types = types;
+    this.macros = macros;
   }
 
   /** Parse a (`-g`-built) GBA ELF image into a queryable DebugInfo. */
@@ -43,12 +47,18 @@ export class DebugInfo {
     const debugLine = elf.sectionData('.debug_line');
     const lines = debugLine ? parseDebugLine(debugLine, elf.littleEndian) : new LineTable([]);
     const types = TypeIndex.fromElf(elf);
-    return new DebugInfo(elf, symbols, lines, types);
+    const macinfo = elf.sectionData('.debug_macinfo');
+    return new DebugInfo(elf, symbols, lines, types, macinfo ? parseDebugMacinfo(macinfo) : []);
   }
 
   /** True if the ELF actually carried a DWARF line table. */
   get hasLineInfo(): boolean {
     return this.lines.rows.length > 0;
+  }
+
+  /** True if the ELF recorded preprocessor macro definitions (built with `-g3`). */
+  get hasMacroInfo(): boolean {
+    return this.macros.length > 0;
   }
 
   /** True if the ELF carried DWARF struct/union type info. */
