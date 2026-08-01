@@ -1,13 +1,22 @@
 /**
- * Tests the parser against REAL ELFs produced by the two minimal GBA projects in
+ * Tests the parser against REAL ELFs produced by the minimal projects in
  * ../../test-projects. The ELFs are compiled fresh before the suite runs (see
  * ../../vitest.globalSetup.ts) from vendored toolchains:
  *
+ *   little-endian ARM (GBA):
  *   - agbcc-min     — agbcc (GCC 2.95), DWARF-2 line table
  *   - devkitarm-min — modern arm-none-eabi-gcc (GCC 14), DWARF-3+ line table
  *
- * Both compile the same shape, so one parametrized suite exercises the whole
- * surface across both DWARF dialects.
+ *   big-endian (MSB-first container AND DWARF payload):
+ *   - mips-min      — mips-linux-gnu-gcc, MIPS o32
+ *   - ppc-min       — powerpc-linux-gnu-gcc, PowerPC 32 (also vendors a .o, below)
+ *
+ * The two projects within each byte order compile the same shape, so one
+ * parametrized suite per byte order exercises the whole surface across both DWARF
+ * dialects. The layouts differ between the groups only where the ABI differs — the
+ * bitfield allocation end above all — so they are separate blocks, not one. A third
+ * block then compares the four ELFs against EACH OTHER, pinning what byte order may
+ * and may not change (see "cross-endian equivalence" below).
  *
  * Oracle: each project's Makefile generates build/oracle.json next to the ELF.
  * The test just reads that JSON and asserts DebugInfo agrees with it.
@@ -18,6 +27,9 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { DebugInfo } from '../debug-info.js';
+import { ElfFile } from '../elf.js';
+import { Cursor } from '../reader.js';
+import type { StructType, VariableShape } from '../types.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectsDir = join(here, '..', '..', 'test-projects');
@@ -34,16 +46,21 @@ interface Project {
   dir: string;
 }
 
-const PROJECTS: Project[] = [
+const ARM_PROJECTS: Project[] = [
   { label: 'agbcc-min (GCC 2.95, DWARF-2)', dir: join(projectsDir, 'agbcc-min') },
   { label: 'devkitarm-min (modern GCC, DWARF-3+)', dir: join(projectsDir, 'devkitarm-min') },
+];
+
+const BE_PROJECTS: Project[] = [
+  { label: 'mips-min (MIPS o32, big-endian)', dir: join(projectsDir, 'mips-min') },
+  { label: 'ppc-min (PowerPC 32, big-endian)', dir: join(projectsDir, 'ppc-min') },
 ];
 
 const FUNCS = ['add', 'square', 'bump', 'triple', 'main'] as const;
 
 const hex = (addr: number): string => '0x' + addr.toString(16);
 
-describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
+describe.each(ARM_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
   const elf = join(project.dir, 'build', 'min.elf');
   const oracle = JSON.parse(readFileSync(join(project.dir, 'build', 'oracle.json'), 'utf8')) as Oracle;
   const di = DebugInfo.fromElf(new Uint8Array(readFileSync(elf)));
@@ -231,7 +248,8 @@ describe.each(PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
 
   // Bitfields: hearts:2, stars:3, cross:7, wide:4 packed LSB-first into one unit,
   // then a plain int. Normalized identically from DWARF-2 (bit_offset from MSB)
-  // and DWARF-5 (data_bit_offset).
+  // and DWARF-5 (data_bit_offset). The big-endian block below asserts the mirror
+  // image of these numbers for the very same declaration.
   it('resolves bitfield members to offset + shift + width — DebugInfo.struct', () => {
     expect(di.struct('Bits')).toEqual({
       name: 'Bits',
@@ -326,5 +344,497 @@ describe('DebugInfo on devkitarm-min-only shapes', () => {
     // SHN_ABS filter must exclude them, so symbolToAddress returns null.
     expect(di.symbolToAddress('_end')).toBeNull();
     expect(di.symbolToAddress('__bss_start')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Big-endian. mips-min and ppc-min compile ONE shared source (their main.c/util.c
+// are byte-identical), so both linked ELFs must yield the same layout — and both
+// have the container AND the whole DWARF payload stored MSB-first.
+// ---------------------------------------------------------------------------
+describe.each(BE_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) => {
+  const elf = join(project.dir, 'build', 'min.elf');
+  const oracle = JSON.parse(readFileSync(join(project.dir, 'build', 'oracle.json'), 'utf8')) as Oracle;
+  const di = DebugInfo.fromElf(new Uint8Array(readFileSync(elf)));
+
+  it('is a big-endian ELF (ELFDATA2MSB)', () => {
+    expect(di.elf.littleEndian).toBe(false);
+  });
+
+  it('parses a DWARF line table from the big-endian payload', () => {
+    expect(di.hasLineInfo).toBe(true);
+    expect(di.hasTypeInfo).toBe(true);
+  });
+
+  it('spans multiple compilation units (main.c + util.c)', () => {
+    const files = new Set(di.lines.rows.map((r) => basename(r.file)));
+    expect(files.has('main.c')).toBe(true);
+    expect(files.has('util.c')).toBe(true);
+  });
+
+  it.each(FUNCS)('symbolToAddress(%s) matches nm', (fn) => {
+    expect(di.symbolToAddress(fn)).toBe(oracle.symbols[fn]);
+  });
+
+  it.each(FUNCS)('pcToFunction(%s entry) matches nm', (fn) => {
+    expect(di.pcToFunction(oracle.symbols[fn]!)?.name).toBe(fn);
+  });
+
+  it.each(FUNCS)('pcToSource(%s entry) matches addr2line', (fn) => {
+    // The whole .debug_line program — header, opcodes, DW_LNE_set_address operand —
+    // is read MSB-first here; a byte-order slip would put every row elsewhere.
+    const addr = oracle.symbols[fn]!;
+    const want = oracle.lines[hex(addr)]!;
+    const src = di.pcToSource(addr);
+    expect(src?.func).toBe(want.func);
+    expect(basename(src!.file)).toBe(basename(want.file));
+    expect(src?.line).toBe(want.line);
+  });
+
+  it('returns null for a PC outside any function/sequence', () => {
+    expect(di.pcToSource(0x7f000000)).toBeNull();
+    expect(di.pcToFunction(0x7f000000)).toBeNull();
+  });
+
+  it('resolves a named struct layout (offsets + sizes) — DebugInfo.struct', () => {
+    // Identical to the ARM layout: both ABIs align a 32-bit int to 4 bytes.
+    expect(di.struct('Probe')).toEqual({
+      name: 'Probe',
+      size: 32,
+      members: [
+        { name: 'tag', offset: 0, size: 1, signed: false },
+        { name: 'count', offset: 4, size: 4, signed: true },
+        { name: 'flags', offset: 8, size: 2, signed: true },
+        { name: 'name', offset: 10, size: 6, signed: null }, // unsigned char[6] → elem size × length
+        { name: 'ptr', offset: 16, size: 4, signed: null, pointer: true },
+        { name: 'inner', offset: 20, size: 8, signed: null }, // nested struct
+        { name: 'tail', offset: 28, size: 4, signed: true },
+      ],
+    });
+    expect(di.structMember('Probe', 'inner.y')).toEqual({ offset: 24, size: 2 });
+  });
+
+  it('resolves a struct from a second compilation unit (multi-abbrev-table)', () => {
+    expect(di.struct('UtilPair')).toEqual({
+      name: 'UtilPair',
+      size: 4,
+      members: [
+        { name: 'lo', offset: 0, size: 2, signed: true },
+        { name: 'hi', offset: 2, size: 2, signed: true },
+      ],
+    });
+  });
+
+  it('reports member base-type signedness and member-level volatile', () => {
+    expect(di.struct('Cv')).toEqual({
+      name: 'Cv',
+      size: 4,
+      members: [
+        { name: 'level', offset: 0, size: 1, signed: true },
+        { name: 'gain', offset: 2, size: 2, signed: false, volatile: true },
+      ],
+    });
+  });
+
+  // THE big-endian assertion class: a big-endian target allocates bitfields from the
+  // MOST significant end of the storage unit, so the identical C declaration that the
+  // ARM projects pin as {hearts@0>>0, stars@0>>2, cross@0..1>>5, wide@1>>4} is the
+  // mirror image here. Ground truth from the compilers' own read-modify-write of
+  // `cross` (a 2-byte load at offset 0, then insert at shift 4, width 7):
+  //   MIPS  lhu $t2,g_bits ; ins $t2,$v0,0x4,0x7 ; sh $t2,g_bits
+  //   PPC   lhz r6,0(r7)   ; rlwimi r6,r9,4,21,27 ; sth r6,0(r7)
+  it('resolves BIG-ENDIAN bitfields MSB-first — DebugInfo.struct', () => {
+    expect(di.struct('Bits')).toEqual({
+      name: 'Bits',
+      size: 8,
+      members: [
+        { name: 'hearts', offset: 0, size: 1, bitOffset: 6, bitWidth: 2, signed: false }, // top 2 bits of byte 0
+        { name: 'stars', offset: 0, size: 1, bitOffset: 3, bitWidth: 3, signed: false },
+        { name: 'cross', offset: 0, size: 2, bitOffset: 4, bitWidth: 7, signed: false }, // crosses the byte boundary
+        { name: 'wide', offset: 1, size: 1, bitOffset: 0, bitWidth: 4, signed: false }, // bottom 4 bits of byte 1
+        { name: 'after', offset: 4, size: 4, signed: true }, // plain member: no bitOffset/bitWidth
+      ],
+    });
+  });
+
+  it('carries the big-endian bitfield shift through resolveVariable', () => {
+    expect(di.resolveVariable('g_bits.cross')).toEqual({
+      address: di.symbolToAddress('g_bits'),
+      size: 2,
+      bitOffset: 4,
+      bitWidth: 7,
+    });
+    expect(di.variableMember('g_bits', 'wide')).toEqual({ offset: 1, size: 1, bitOffset: 0, bitWidth: 4 });
+  });
+
+  it('classifies every declaration shape — TypeIndex.variableShape', () => {
+    expect(di.types.variableShape('g_counter')).toEqual({
+      kind: 'scalar',
+      size: 4,
+      signed: true,
+      volatile: false,
+      const: false,
+    });
+    expect(di.types.variableShape('g_ptr')).toEqual({ kind: 'pointer', volatile: false, const: false });
+    expect(di.types.variableShape('g_table')).toEqual({
+      kind: 'array',
+      elemSize: 2,
+      elemSigned: true,
+      length: 4,
+      volatile: false,
+      const: false,
+    });
+    // const short g_rom_table[3] — the const qualifies the ELEMENT in DWARF
+    expect(di.types.variableShape('g_rom_table')).toEqual({
+      kind: 'array',
+      elemSize: 2,
+      elemSigned: true,
+      length: 3,
+      volatile: false,
+      const: true,
+    });
+    expect(di.types.variableShape('g_vol')).toEqual({
+      kind: 'scalar',
+      size: 4,
+      signed: true,
+      volatile: true,
+      const: false,
+    });
+    expect(di.types.variableShape('g_probe')).toEqual({
+      kind: 'struct',
+      structName: 'Probe',
+      size: 32,
+      volatile: false,
+      const: false,
+    });
+    expect(di.types.variableShape('g_cv')).toEqual({
+      kind: 'struct',
+      structName: 'Cv',
+      size: 4,
+      volatile: true,
+      const: false,
+    });
+    expect(di.types.variableShape('g_no_such')).toBeNull();
+  });
+
+  it('resolves whole-variable reads to address + size', () => {
+    expect(di.resolveVariable('g_table')).toEqual({ address: oracle.symbols.g_table, size: 8 });
+    expect(di.resolveVariable('g_rom_table')).toEqual({ address: oracle.symbols.g_rom_table, size: 6 });
+    expect(di.resolveVariable('g_probe.inner.y')).toEqual({ address: oracle.symbols.g_probe! + 24, size: 2 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-endian equivalence. The four projects declare a shared core (struct Probe /
+// Inner / Bits / Cv / UtilPair and six globals) and compile it with four different
+// compilers across BOTH byte orders. So:
+//
+//   - everything the ABI fixes must come out IDENTICAL in all four, and
+//   - the one thing byte order legitimately changes — the intra-unit bitfield shift
+//     — must come out MIRRORED, not merely different.
+//
+// The second half is the assertion that proves byte order is threaded through the
+// reader rather than working by accident: a parser that ignored ELFDATA2MSB would
+// either fail outright or report the little-endian shifts for the big-endian ELFs.
+// ---------------------------------------------------------------------------
+describe('cross-endian equivalence (same declarations, four toolchains, both byte orders)', () => {
+  const load = (project: Project) => ({
+    name: basename(project.dir),
+    di: DebugInfo.fromElf(new Uint8Array(readFileSync(join(project.dir, 'build', 'min.elf')))),
+  });
+  const LE = ARM_PROJECTS.map(load);
+  const BE = BE_PROJECTS.map(load);
+  const ALL = [...LE, ...BE];
+  type Loaded = (typeof ALL)[number];
+
+  // Every type/global any of the four declares. The ones not present in all four are
+  // enumerated by name below, so a project that genuinely lacks a shape is skipped
+  // EXPLICITLY rather than dropped silently.
+  const CANDIDATE_TYPES = ['Probe', 'Inner', 'Bits', 'Cv', 'UtilPair', 'Pair', 'Shape', 'Blob'];
+  const CANDIDATE_GLOBALS = [
+    'g_counter',
+    'g_probe',
+    'g_bits',
+    'g_cv',
+    'g_rom_table',
+    'g_util_pair',
+    'g_pair', // little-endian sources only
+    'g_color',
+    'g_mode',
+    'g_mmio',
+    'g_ptr', // big-endian sources only
+    'g_table',
+    'g_vol',
+    'g_shape', // devkitarm-min only (agbcc rejects anonymous unions / flexible arrays)
+    'g_wide',
+    'g_blob',
+  ];
+
+  const hasType = (p: Loaded, name: string): boolean => p.di.struct(name) !== null;
+  const hasGlobal = (p: Loaded, name: string): boolean => p.di.types.variableShape(name) !== null;
+
+  const sharedTypes = CANDIDATE_TYPES.filter((n) => ALL.every((p) => hasType(p, n)));
+  const sharedGlobals = CANDIDATE_GLOBALS.filter((n) => ALL.every((p) => hasGlobal(p, n)));
+
+  /** name → the projects that do NOT declare it, for everything not shared by all four. */
+  const skipped = (names: string[], has: (p: Loaded, n: string) => boolean): Record<string, string[]> =>
+    Object.fromEntries(
+      names
+        .map((n) => [n, ALL.filter((p) => !has(p, n)).map((p) => p.name)] as const)
+        .filter(([, absent]) => absent.length > 0),
+    );
+
+  it('compares two little-endian ELFs against two big-endian ones', () => {
+    expect(LE.map((p) => [p.name, p.di.elf.littleEndian])).toEqual([
+      ['agbcc-min', true],
+      ['devkitarm-min', true],
+    ]);
+    expect(BE.map((p) => [p.name, p.di.elf.littleEndian])).toEqual([
+      ['mips-min', false],
+      ['ppc-min', false],
+    ]);
+  });
+
+  it('shares exactly this declaration set — every other shape is skipped BY NAME', () => {
+    expect(sharedTypes).toEqual(['Probe', 'Inner', 'Bits', 'Cv', 'UtilPair']);
+    expect(sharedGlobals).toEqual(['g_counter', 'g_probe', 'g_bits', 'g_cv', 'g_rom_table', 'g_util_pair']);
+    // The rest, and who lacks each. These are SOURCE facts (the big-endian projects
+    // declare a different set of globals; agbcc/GCC 2.95 rejects anonymous unions and
+    // flexible array members), not parser gaps — pinned so a shape silently vanishing
+    // from a project's DWARF fails here instead of shrinking the comparison.
+    expect(skipped(CANDIDATE_TYPES, hasType)).toEqual({
+      Pair: ['mips-min', 'ppc-min'],
+      Shape: ['agbcc-min', 'mips-min', 'ppc-min'],
+      Blob: ['agbcc-min', 'mips-min', 'ppc-min'],
+    });
+    expect(skipped(CANDIDATE_GLOBALS, hasGlobal)).toEqual({
+      g_pair: ['mips-min', 'ppc-min'],
+      g_color: ['mips-min', 'ppc-min'],
+      g_mode: ['mips-min', 'ppc-min'],
+      g_mmio: ['mips-min', 'ppc-min'],
+      g_ptr: ['agbcc-min', 'devkitarm-min'],
+      g_table: ['agbcc-min', 'devkitarm-min'],
+      g_vol: ['agbcc-min', 'devkitarm-min'],
+      g_shape: ['agbcc-min', 'mips-min', 'ppc-min'],
+      g_wide: ['agbcc-min', 'mips-min', 'ppc-min'],
+      g_blob: ['agbcc-min', 'mips-min', 'ppc-min'],
+    });
+  });
+
+  // The byte layout every project must report, spelled `member@offset:size`. Both
+  // 32-bit ABIs align an int to 4, so these numbers are byte-order-independent.
+  const SHARED_LAYOUT: Record<string, { size: number; members: string }> = {
+    Probe: { size: 32, members: 'tag@0:1 count@4:4 flags@8:2 name@10:6 ptr@16:4 inner@20:8 tail@28:4' },
+    Inner: { size: 8, members: 'x@0:4 y@4:2' },
+    // `cross` spans the byte boundary in both byte orders, hence its 2-byte read.
+    Bits: { size: 8, members: 'hearts@0:1 stars@0:1 cross@0:2 wide@1:1 after@4:4' },
+    Cv: { size: 4, members: 'level@0:1 gain@2:2' },
+    UtilPair: { size: 4, members: 'lo@0:2 hi@2:2' },
+  };
+
+  it.each(sharedTypes)('every project reports the same byte layout for %s', (type) => {
+    for (const p of ALL) {
+      const layout = p.di.struct(type)!;
+      expect({
+        project: p.name,
+        size: layout.size,
+        members: layout.members.map((m) => `${m.name}@${m.offset}:${m.size}`).join(' '),
+      }).toEqual({ project: p.name, ...SHARED_LAYOUT[type] });
+    }
+  });
+
+  /** A layout with the ONE field byte order may change (the intra-unit shift) dropped.
+   *  Everything left — names, offsets, sizes, signedness, pointer-ness, member-level
+   *  volatile, and bitfield WIDTHS — is ABI, so all four must agree exactly. */
+  const withoutShift = (layout: StructType): StructType => ({
+    ...layout,
+    members: layout.members.map(({ bitOffset: _shift, ...rest }) => rest),
+  });
+
+  it.each(sharedTypes)('all four agree on every declaration fact of %s except the intra-unit shift', (type) => {
+    const reference = withoutShift(LE[0]!.di.struct(type)!);
+    for (const p of ALL) {
+      expect({ project: p.name, layout: withoutShift(p.di.struct(type)!) }).toEqual({
+        project: p.name,
+        layout: reference,
+      });
+    }
+  });
+
+  // Declaration shapes: scalar size/signedness, array elemSize/elemSigned/length,
+  // struct name/size, and the cv-qualifiers — all byte-order-independent.
+  const SHARED_SHAPES: Record<string, VariableShape> = {
+    g_counter: { kind: 'scalar', size: 4, signed: true, volatile: false, const: false },
+    g_probe: { kind: 'struct', structName: 'Probe', size: 32, volatile: false, const: false },
+    g_bits: { kind: 'struct', structName: 'Bits', size: 8, volatile: false, const: false },
+    g_cv: { kind: 'struct', structName: 'Cv', size: 4, volatile: true, const: false },
+    g_rom_table: { kind: 'array', elemSize: 2, elemSigned: true, length: 3, volatile: false, const: true },
+    g_util_pair: { kind: 'struct', structName: 'UtilPair', size: 4, volatile: false, const: false },
+  };
+
+  it.each(sharedGlobals)('every project classifies %s to the same shape — TypeIndex.variableShape', (name) => {
+    for (const p of ALL) {
+      expect({ project: p.name, shape: p.di.types.variableShape(name) }).toEqual({
+        project: p.name,
+        shape: SHARED_SHAPES[name],
+      });
+    }
+  });
+
+  // Bitfields: `unsigned hearts:2, stars:3, cross:7, wide:4` share ONE 4-byte storage
+  // unit at offset 0 under both ABIs. A little-endian target fills it from the LSB, a
+  // big-endian one from the MSB, so the shifts are mirror images of each other:
+  //     leShift + beShift + bitWidth === size * 8
+  // Ground truth for the big-endian side is the compilers' own read-modify-write of
+  // `cross` (MIPS `ins $t2,$v0,0x4,0x7`, PPC `rlwimi r6,r9,4,21,27` — see above).
+  const SHIFTS_LE: Record<string, number> = { hearts: 0, stars: 2, cross: 5, wide: 4 };
+  const SHIFTS_BE: Record<string, number> = { hearts: 6, stars: 3, cross: 4, wide: 0 };
+
+  it('bitfields differ ONLY in the shift, and each side matches its own ABI', () => {
+    const shifts = (p: Loaded): Record<string, number | undefined> =>
+      Object.fromEntries(
+        p.di
+          .struct('Bits')!
+          .members.filter((m) => m.bitWidth !== undefined)
+          .map((m) => [m.name, m.bitOffset]),
+      );
+    for (const p of LE) {
+      expect({ project: p.name, ...shifts(p) }).toEqual({ project: p.name, ...SHIFTS_LE });
+    }
+    for (const p of BE) {
+      expect({ project: p.name, ...shifts(p) }).toEqual({ project: p.name, ...SHIFTS_BE });
+    }
+
+    // …and they are MIRRORS of one another, not merely two different tables: each
+    // field starts the same distance from the opposite end of its own read.
+    for (const m of LE[0]!.di.struct('Bits')!.members) {
+      if (m.bitWidth === undefined) {
+        expect(m.bitOffset).toBeUndefined(); // `after` is a plain member, not a bitfield
+        continue;
+      }
+      expect(SHIFTS_LE[m.name]! + SHIFTS_BE[m.name]! + m.bitWidth).toBe(m.size! * 8);
+    }
+  });
+
+  it('carries the byte-order-correct shift all the way through resolveVariable', () => {
+    // The end-to-end consumer view: same C field, same address and read size on both
+    // sides, opposite shift. (`g_bits` sits at a different address per project, so the
+    // address is compared to each project's own symbol.)
+    for (const p of ALL) {
+      const want = p.di.elf.littleEndian ? SHIFTS_LE : SHIFTS_BE;
+      expect({ project: p.name, resolved: p.di.resolveVariable('g_bits.cross') }).toEqual({
+        project: p.name,
+        resolved: {
+          address: p.di.symbolToAddress('g_bits'),
+          size: 2,
+          bitOffset: want.cross,
+          bitWidth: 7,
+        },
+      });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ppc-min's RELOCATABLE object. PowerPC uses RELA relocations, so in a .o every
+// cross-section reference inside `.debug_*` is a ZERO field plus an addend parked
+// in `.rela.<section>`. Nothing in that DWARF reads correctly until ElfFile
+// applies them — this is the only artifact shape that exercises that path.
+// ---------------------------------------------------------------------------
+describe('DebugInfo on ppc-min/build/main.o (RELA-relocated DWARF)', () => {
+  const objDir = join(projectsDir, 'ppc-min', 'build');
+  const bytes = new Uint8Array(readFileSync(join(objDir, 'main.o')));
+  const oracle = JSON.parse(readFileSync(join(objDir, 'oracle-obj.json'), 'utf8')) as Oracle;
+  const elf = ElfFile.parse(bytes);
+  const di = DebugInfo.fromElf(bytes);
+
+  /** The `.rela.debug_info` entries, decoded as { r_offset, symbol value, addend }. */
+  const relocations = (): { at: number; symValue: number; addend: number }[] => {
+    const rela = elf.section('.rela.debug_info')!;
+    const symtab = elf.sections.find((s) => s.type === 2 /* SHT_SYMTAB */)!;
+    const rc = new Cursor(bytes, 0, false);
+    const symData = elf.sectionDataByIndex(elf.sections.indexOf(symtab))!;
+    const sc = new Cursor(symData, 0, false);
+    const out = [];
+    for (let off = rela.offset; off < rela.offset + rela.size; off += 12) {
+      const symIndex = rc.u32At(off + 4) >>> 8; // r_info >> 8
+      out.push({ at: rc.u32At(off), symValue: sc.u32At(symIndex * 16 + 4), addend: rc.u32At(off + 8) });
+    }
+    return out;
+  };
+
+  it('is a big-endian relocatable object with RELA-style debug relocations', () => {
+    expect(di.elf.littleEndian).toBe(false);
+    expect(elf.section('.rela.debug_info')?.type).toBe(4 /* SHT_RELA */);
+    // 59 of them with the toolchain CI installs; the count itself is a toolchain
+    // detail, so only its order of magnitude is asserted.
+    expect(relocations().length).toBeGreaterThan(20);
+  });
+
+  it('has NOTHING readable in the raw section — every relocated field is zero', () => {
+    // The premise of the RELA path: unrelocated, every site reads 0, so every
+    // DW_FORM_strp would resolve to .debug_str offset 0 (one and the same name).
+    const raw = new Cursor(bytes, elf.section('.debug_info')!.offset, false);
+    for (const { at } of relocations()) {
+      expect(raw.u32At(raw.offset + at)).toBe(0);
+    }
+  });
+
+  it('writes symbol value + addend at every relocation site', () => {
+    const patched = new Cursor(elf.sectionData('.debug_info')!, 0, false);
+    for (const { at, symValue, addend } of relocations()) {
+      expect(patched.u32At(at)).toBe(symValue + addend);
+    }
+    // Most sites target a section symbol (st_value 0, so the addend alone would do).
+    // The DW_AT_location of each global targets the data symbol itself, whose
+    // st_value is NOT 0 — those are what pin the "symbol value +" half of the sum.
+    const symValues = new Set(relocations().map((r) => r.symValue));
+    for (const global of ['g_bits', 'g_vol', 'g_table', 'g_ptr', 'g_counter'] as const) {
+      expect(oracle.symbols[global]).toBeGreaterThan(0); // nm: 4, 12, 16, 24, 28
+      expect(symValues.has(oracle.symbols[global]!)).toBe(true);
+    }
+  });
+
+  it('resolves DW_FORM_strp names — only reachable through the addends', () => {
+    // Every name here (the struct tags, and each member name too long for
+    // DW_FORM_string) is an offset into .debug_str that lives ONLY in an addend.
+    expect(di.struct('Probe')?.members.map((m) => m.name)).toEqual([
+      'tag',
+      'count',
+      'flags',
+      'name',
+      'ptr',
+      'inner',
+      'tail',
+    ]);
+    expect(di.struct('Bits')?.members.map((m) => m.name)).toEqual(['hearts', 'stars', 'cross', 'wide', 'after']);
+    expect(di.types.variableShape('g_probe')).toEqual({
+      kind: 'struct',
+      structName: 'Probe',
+      size: 32,
+      volatile: false,
+      const: false,
+    });
+    // util.c is a different object, so its type is absent here — the .o carries
+    // exactly one compilation unit.
+    expect(di.struct('UtilPair')).toBeNull();
+  });
+
+  it('agrees with the linked ELF on every layout it shares', () => {
+    const linked = DebugInfo.fromElf(new Uint8Array(readFileSync(join(objDir, 'min.elf'))));
+    for (const type of ['Probe', 'Bits', 'Cv', 'Inner']) {
+      expect(di.struct(type)).toEqual(linked.struct(type));
+    }
+  });
+
+  it('parses the object’s .debug_line program', () => {
+    // The PCs are section-relative and .text / .text.startup BOTH start at 0 in an
+    // unlinked object, so a PC does not identify a row here. Assert the rows by
+    // content instead: one file, and every function-entry line addr2line reports.
+    expect(new Set(di.lines.rows.map((r) => basename(r.file)))).toEqual(new Set(['main.c']));
+    const lines = new Set(di.lines.rows.map((r) => r.line));
+    for (const want of Object.values(oracle.lines)) {
+      expect(lines.has(want.line)).toBe(true);
+    }
   });
 });

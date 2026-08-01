@@ -1,0 +1,5 @@
+build/*
+!build/main.o
+!build/min.elf
+!build/oracle.json
+!build/oracle-obj.json

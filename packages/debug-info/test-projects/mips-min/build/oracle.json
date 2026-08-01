@@ -1,0 +1,53 @@
+{
+  "symbols": {
+    "_GLOBAL_OFFSET_TABLE_": 4260464,
+    "__bss_start": 4260480,
+    "_edata": 4260476,
+    "_end": 4260560,
+    "_fbss": 4260480,
+    "_fdata": 4260464,
+    "_ftext": 4194640,
+    "_gp": 4293216,
+    "add": 4194704,
+    "bump": 4194720,
+    "g_bits": 4260484,
+    "g_counter": 4260540,
+    "g_cv": 4260480,
+    "g_probe": 4260492,
+    "g_ptr": 4260536,
+    "g_rom_table": 4194912,
+    "g_table": 4260528,
+    "g_util_pair": 4260544,
+    "g_vol": 4260524,
+    "main": 4194640,
+    "square": 4194712,
+    "triple": 4194880
+  },
+  "lines": {
+    "0x400150": {
+      "func": "main",
+      "file": "main.c",
+      "line": 97
+    },
+    "0x400190": {
+      "func": "add",
+      "file": "main.c",
+      "line": 79
+    },
+    "0x4001a0": {
+      "func": "bump",
+      "file": "main.c",
+      "line": 86
+    },
+    "0x400198": {
+      "func": "square",
+      "file": "main.c",
+      "line": 83
+    },
+    "0x400240": {
+      "func": "triple",
+      "file": "util.c",
+      "line": 15
+    }
+  }
+}

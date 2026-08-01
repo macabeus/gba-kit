@@ -1,25 +1,52 @@
 # Test projects for `@gba-kit/debug-info`
 
-Two tiny GBA programs that produce real ELFs with symbols + DWARF, used as the
-test inputs for the parser — so the tests run against actual toolchain output
-across the two ecosystems GBA developers use:
+Four tiny programs that produce real ELFs with symbols + DWARF, used as the test
+inputs for the parser — so the tests run against actual toolchain output across
+both byte orders and three architectures:
 
-| Project         | Toolchain                                                          | DWARF (line) |
-| --------------- | ------------------------------------------------------------------ | ------------ |
-| `agbcc-min`     | agbcc (GCC 2.95), as a git submodule                               | v2           |
-| `devkitarm-min` | modern `arm-none-eabi-gcc`, GCC 14 (devkitARM / ARM GNU Toolchain) | v3+          |
+| Project         | Toolchain                                                          | Target                 | DWARF (line) |
+| --------------- | ------------------------------------------------------------------ | ---------------------- | ------------ |
+| `agbcc-min`     | agbcc (GCC 2.95), as a git submodule                               | ARM, little-endian     | v2           |
+| `devkitarm-min` | modern `arm-none-eabi-gcc`, GCC 14 (devkitARM / ARM GNU Toolchain) | ARM, little-endian     | v3+          |
+| `mips-min`      | `mips-linux-gnu-gcc` (stock Ubuntu cross package)                  | MIPS o32, big-endian   | v3+          |
+| `ppc-min`       | `powerpc-linux-gnu-gcc` (stock Ubuntu cross package)               | PowerPC 32, big-endian | v3+          |
 
-Both compile the same core shape — `add` / `square` (adjacent, exercises the
-sequence-boundary case), `bump`, `triple` (in a second `util.c` → multi-CU),
+The ARM pair compiles the same core shape — `add` / `square` (adjacent, exercises
+the sequence-boundary case), `bump`, `triple` (in a second `util.c` → multi-CU),
 `main`, and a global `g_counter` — with `-g -O2`.
 
 `devkitarm-min` additionally carries a few shapes agbcc (GCC 2.95) can't compile:
 an anonymous union (`struct Shape`), an 8-byte `long long` global (`g_wide`),
 and a flexible array member (`struct Blob`). It's covered by a devkitarm-only test block.
 
+## The big-endian pair
+
+`mips-min` and `ppc-min` compile one shared source (their `main.c` / `util.c` are
+byte-identical) with `-g -O2 -fno-eliminate-unused-debug-types`. Both the ELF
+container and the whole DWARF payload are stored MSB-first. Every declaration in
+that `main.c` is one shape the parser classifies: a scalar, a pointer, an array, a
+`const` array, a `volatile` scalar, a struct with named members, a struct with
+**bitfields**, and a struct with a member-level `volatile` next to a signed narrow
+member.
+
+The bitfields are the assertion class the little-endian projects structurally
+cannot make: a big-endian target allocates them from the **most** significant end
+of the storage unit, so the identical C declaration lands mirrored — `cross` is a
+2-byte read at offset 0 shifted right by 4 here, by 5 on ARM. The compilers' own
+read-modify-write of that field is the ground truth: MIPS
+`lhu $t2 ; ins $t2,$v0,0x4,0x7 ; sh $t2`, PowerPC `lhz r6 ; rlwimi r6,r9,4,21,27 ; sth r6`.
+
+`ppc-min` also vendors `build/main.o`, a **relocatable** object. PowerPC uses RELA
+relocations, so in a `.o` the `.debug_*` sections hold zeros where string and
+section offsets belong, and the real values sit in `.rela.<section>` addends — 59
+of them in the vendored object. None of its DWARF resolves until `ElfFile.sectionData` applies
+`symbol value + addend`, which makes it the only artifact shape that exercises
+that path.
+
 ## What's committed, and what runs the tests
 
-Each project's `build/min.elf` and `build/oracle.json` are **committed** (the rest
+Each project's built artifacts (`build/min.elf` + `build/oracle.json`, plus
+`ppc-min`'s `build/main.o` + `build/oracle-obj.json`) are **committed** (the rest
 of `build/` — `.o`/`.i`/`.s` intermediates — is git-ignored). So a normal clone
 runs `pnpm --filter @gba-kit/debug-info test` with **no toolchain**: vitest's
 `globalSetup` just checks the committed artifacts exist and the tests read them.
@@ -34,7 +61,7 @@ is machine-independent.
 ## Rebuilding (only when you change a project's sources)
 
 The build is per-project and rarely needed. After editing a project's sources,
-rebuild it and commit the refreshed `build/min.elf` + `build/oracle.json`:
+rebuild it and commit the refreshed `build/` artifacts:
 
 ```bash
 # agbcc-min — builds the GCC 2.95 compiler from the submodule, then the ELF + oracle.
@@ -42,14 +69,16 @@ rebuild it and commit the refreshed `build/min.elf` + `build/oracle.json`:
 git submodule update --init --recursive      # first time only
 cd agbcc-min && ./setup.sh
 
-# devkitarm-min — builds in Docker (devkitpro/devkitarm), so no local devkitARM
-# or arm-none-eabi install is required. Node is installed inside the container for
-# the oracle step.
+# The other three build in Docker, so no local cross toolchain is required:
+#   devkitarm-min      → devkitpro/devkitarm
+#   mips-min, ppc-min  → ubuntu:24.04 + the stock gcc-{mips,powerpc}-linux-gnu packages
 cd devkitarm-min && ./build.sh
+cd mips-min && ./build.sh
+cd ppc-min && ./build.sh
 ```
 
 `agbcc-min/agbcc` is the [`Dream-Atelier/agbcc`](https://github.com/Dream-Atelier/agbcc)
-submodule, pinned by commit. CI rebuilds **both** projects natively from scratch on
+submodule, pinned by commit. CI rebuilds **all four** projects natively from scratch on
 every run (see `../../../.github/workflows/ci.yml`), so the committed artifacts stay
 honest — `globalSetup` rebuilds when `process.env.CI` is set.
 

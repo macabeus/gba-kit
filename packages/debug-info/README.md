@@ -1,17 +1,31 @@
 # @gba-kit/debug-info
 
-Parse ELF symbols and DWARF debug info from a (`-g`-built) GBA ELF, and answer
-the queries a source-level debugger needs:
+Parse ELF symbols and DWARF debug info from a (`-g`-built) ELF32, and answer the
+queries a source-level debugger needs:
 
 - **PC → function** (`pcToFunction`) — from `.symtab`, so it covers every linked
   function, including `INCLUDE_ASM` stubs with no DWARF.
 - **name → address** / **address → symbol** (`symbolToAddress`, `addressToSymbol`).
 - **PC → C `file:line`** (`pcToSource`) — from the DWARF `.debug_line` table.
+- **type layout** (`struct`, `structMember`, `enumValues`) and **declaration shape**
+  (`types.variableShape`) — from `.debug_info`.
 
-It's a small, dependency-free, DOM-free parser meant to be shared by the headless
-runtime, the scripting engine, and the webapp's source debug view. The shipped
-`.gba` ROM carries no debug info (`objcopy -O binary` strips it); load the sidecar
-ELF — its loadable bytes are identical to the ROM, so addresses line up.
+This is the general ELF/DWARF piece of gba-kit, not a GBA-only one:
+
+- **both byte orders** — the order is read from `e_ident` and threaded through the
+  container and the DWARF payload alike. Big-endian bitfields are allocated from
+  the most significant end of the storage unit, and are reported that way.
+- **linked ELFs and relocatable objects** — in a `.o` whose relocations are
+  RELA-style (PowerPC), the raw `.debug_*` fields are zeros and the real values sit
+  in `.rela.<section>` addends; those are applied on read.
+- **DWARF 2 through 5**, as emitted by anything from GCC 2.95 to GCC 14.
+
+It is exercised against real ARM, MIPS and PowerPC toolchain output (see
+[Testing](#testing)). It's a small, dependency-free, DOM-free parser, shared by
+the headless runtime, the scripting engine, and the webapp's source debug view.
+For the GBA case: the shipped `.gba` ROM carries no debug info
+(`objcopy -O binary` strips it); load the sidecar ELF — its loadable bytes are
+identical to the ROM, so addresses line up.
 
 ## Usage
 
@@ -37,14 +51,23 @@ pnpm --filter @gba-kit/debug-info test
 
 ## Testing
 
-`@gba-kit/debug-info` is tested against real GBA ELFs that are **committed** to the
-repo (`packages/debug-info/test-projects/*/build/`), so tests run with no cross
-toolchain.
+`@gba-kit/debug-info` is tested against real ELFs from four minimal projects,
+**committed** to the repo (`packages/debug-info/test-projects/*/build/`), so tests
+run with no cross toolchain:
+
+| Project         | Toolchain                       | Target                 |
+| --------------- | ------------------------------- | ---------------------- |
+| `agbcc-min`     | agbcc (GCC 2.95), git submodule | ARM, little-endian     |
+| `devkitarm-min` | `arm-none-eabi-gcc` (GCC 14)    | ARM, little-endian     |
+| `mips-min`      | `mips-linux-gnu-gcc`            | MIPS o32, big-endian   |
+| `ppc-min`       | `powerpc-linux-gnu-gcc`         | PowerPC 32, big-endian |
+
+`ppc-min` vendors a relocatable `main.o` as well as the linked ELF — the artifact
+shape that exercises the RELA path.
 
 You only need to rebuild those ELFs when you change a test project's sources,
-and that's a per-project step (see[test-projects/README](packages/debug-info/test-projects/README.md)):
+and that's a per-project step (see [test-projects/README](test-projects/README.md)):
+`agbcc-min` builds the agbcc submodule via `./setup.sh`, the other three build in
+**Docker** via `./build.sh`, so no local cross toolchain is needed.
 
-- `agbcc-min` — `cd packages/debug-info/test-projects/agbcc-min && ./setup.sh` (builds the agbcc submodule)
-- `devkitarm-min` — `cd packages/debug-info/test-projects/devkitarm-min && ./build.sh` (builds in **Docker**, so no local devkitARM needed)
-
-CI rebuilds both from scratch on every run to re-validate the toolchains.
+CI rebuilds all four from scratch on every run to re-validate the toolchains.

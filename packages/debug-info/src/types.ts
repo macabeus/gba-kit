@@ -8,8 +8,10 @@
  * enough to read any field straight out of memory.
  *
  * Handles the DIE forest in `.debug_info` (resolved against `.debug_abbrev` and
- * `.debug_str`) for DWARF 2–5 as emitted by agbcc (GCC 2.95) and modern
- * arm-none-eabi-gcc. 64-bit DWARF is not supported (GBA ELFs are 32-bit).
+ * `.debug_str`) for DWARF 2–5, in either byte order — a big-endian payload is read
+ * MSB-first, and bitfields there are allocated from the opposite end of the storage
+ * unit (see {@link bitfieldAbsBitOffset}). 64-bit DWARF is not supported (the ELFs
+ * are 32-bit).
  */
 import { ElfFile } from './elf.js';
 import { Cursor, cstrAt } from './reader.js';
@@ -100,7 +102,7 @@ export interface StructMember {
   offset: number;
   /**
    * Bytes to read at `offset`. For a plain member this is the member's type size;
-   * for a bitfield it's the minimal little-endian span covering `bitOffset`+`bitWidth`.
+   * for a bitfield it's the minimal span covering `bitOffset`+`bitWidth`.
    */
   size: number | null;
   /**
@@ -124,8 +126,10 @@ export interface StructMember {
    */
   volatile?: true;
   /**
-   * Bitfield only: right-shift to apply to the `size`-byte little-endian value read
-   * at `offset` to reach the field's least-significant bit. Absent for plain members.
+   * Bitfield only: right-shift to apply to the `size`-byte value read at `offset`
+   * — in the ELF's own byte order — to reach the field's least-significant bit.
+   * Absent for plain members. A big-endian target allocates bitfields MSB-first, so
+   * the same C declaration yields mirrored shifts there (see {@link TypeIndex}).
    */
   bitOffset?: number;
   /** Bitfield only: width in bits. Absent for plain members. */
@@ -232,9 +236,12 @@ export class TypeIndex {
   readonly #typedefByName = new Map<string, Die>();
   /** global/static variable name → its DIE (carries DW_AT_type). */
   readonly #variableByName = new Map<string, Die>();
+  /** Byte order of the target — decides which end bitfields are allocated from. */
+  readonly #littleEndian: boolean;
 
   /** Use {@link TypeIndex.fromElf}; this constructor is an internal detail. */
-  constructor(roots: Die[]) {
+  constructor(roots: Die[], littleEndian = true) {
+    this.#littleEndian = littleEndian;
     const index = (die: Die): void => {
       this.#byOffset.set(die.offset, die);
       for (const child of die.children) {
@@ -481,11 +488,11 @@ export class TypeIndex {
       strOffsets: elf.sectionData('.debug_str_offsets') ?? new Uint8Array(0),
     };
     try {
-      return new TypeIndex(parseDebugInfo(info, abbrev, strings));
+      return new TypeIndex(parseDebugInfo(info, abbrev, strings), elf.littleEndian);
     } catch {
       // Type parsing is best-effort: a malformed .debug_info must never take down
       // the rest of DebugInfo (symbols, line table). Fall back to "no types".
-      return new TypeIndex([]);
+      return new TypeIndex([], elf.littleEndian);
     }
   }
 
@@ -517,8 +524,9 @@ export class TypeIndex {
    * Compute a member's read location. Plain members report `{ offset, size }`
    * (byte offset + type size). Bitfields additionally report `{ bitOffset, bitWidth }`
    * and a minimal byte `offset`/`size` such that
-   * `(read(offset, size) >>> bitOffset) & (2 ** bitWidth - 1)` is the field value
-   * (the `2 **` form stays correct for a full-width 32-bit field, where `1 << 32` wraps).
+   * `(read(offset, size) >>> bitOffset) & (2 ** bitWidth - 1)` is the field value,
+   * where `read` decodes `size` bytes in the ELF's own byte order (the `2 **` form
+   * stays correct for a full-width 32-bit field, where `1 << 32` wraps).
    */
   #memberLayout(member: Die): MemberLocation {
     const bitWidth = numberAttr(member, DW_AT_bit_size);
@@ -526,12 +534,17 @@ export class TypeIndex {
     if (bitWidth === null) {
       return { offset: memberOffset(member), size: typeSize };
     }
-    // Bitfield: normalize both DWARF encodings to an absolute bit offset, then to a
-    // little-endian byte read (offset + minimal byte span + intra-byte shift).
-    const absBitOffset = bitfieldAbsBitOffset(member, typeSize);
+    // Bitfield: normalize both DWARF encodings to an absolute bit offset counted from
+    // the end the target allocates from, then to a byte read (offset + minimal byte
+    // span + intra-unit shift).
+    const absBitOffset = bitfieldAbsBitOffset(member, typeSize, this.#littleEndian);
     const offset = absBitOffset >> 3;
-    const bitOffset = absBitOffset & 7;
-    return { offset, size: Math.ceil((bitOffset + bitWidth) / 8), bitOffset, bitWidth };
+    const bitsIntoByte = absBitOffset & 7;
+    const size = Math.ceil((bitsIntoByte + bitWidth) / 8);
+    // Little-endian: the bits counted so far already sit below the field, so they ARE
+    // the shift. Big-endian: they sit above it, so the shift is what remains beneath.
+    const bitOffset = this.#littleEndian ? bitsIntoByte : size * 8 - bitsIntoByte - bitWidth;
+    return { offset, size, bitOffset, bitWidth };
   }
 
   /** Follow a type reference through typedef/qualifier chains to a struct/union. */
@@ -638,20 +651,26 @@ function memberOffset(member: Die): number {
 }
 
 /**
- * Absolute bit offset of a bitfield member from the start of its struct, normalized
- * across the two DWARF encodings:
- *  - DWARF 4+: `DW_AT_data_bit_offset` is already that absolute bit offset.
+ * Absolute bit offset of a bitfield member from the start of its struct, counted from
+ * the end the target allocates bitfields from: the LSB of the first byte on a
+ * little-endian target, the MSB of it on a big-endian one. Normalized across the two
+ * DWARF encodings:
+ *  - DWARF 4+: `DW_AT_data_bit_offset` is already that offset — DWARF numbers bits
+ *    from the same end the target allocates from, so it needs no adjustment.
  *  - DWARF 2/3: `DW_AT_bit_offset` counts from the MSB of the storage unit (whose
- *    byte size is `DW_AT_byte_size`, at `DW_AT_data_member_location`). On a
- *    little-endian target the LSB offset within the unit is
- *    `storageBits - bit_offset - bit_size`.
+ *    byte size is `DW_AT_byte_size`, at `DW_AT_data_member_location`). That is
+ *    already the big-endian answer; on little-endian the offset within the unit
+ *    flips to `storageBits - bit_offset - bit_size`.
  */
-function bitfieldAbsBitOffset(member: Die, typeSize: number | null): number {
+function bitfieldAbsBitOffset(member: Die, typeSize: number | null, littleEndian: boolean): number {
   const dataBitOffset = numberAttr(member, DW_AT_data_bit_offset);
   if (dataBitOffset !== null) {
     return dataBitOffset;
   }
   const bitOffsetFromMsb = numberAttr(member, DW_AT_bit_offset) ?? 0;
+  if (!littleEndian) {
+    return memberOffset(member) * 8 + bitOffsetFromMsb;
+  }
   const bitWidth = numberAttr(member, DW_AT_bit_size) ?? 0;
   const storageBytes = numberAttr(member, DW_AT_byte_size) ?? typeSize ?? 0;
   const lsbWithinUnit = storageBytes * 8 - bitOffsetFromMsb - bitWidth;
