@@ -20,7 +20,7 @@
 int triple(int n); /* defined in util.c -> a second compilation unit */
 
 int g_counter;      /* scalar global (.bss) */
-int *g_ptr;         /* pointer global */
+int *g_ptr;         /* pointer global: its target is a scalar */
 short g_table[4];   /* array: element size 2, length 4, signed elements */
 volatile int g_vol; /* volatile scalar (an MMIO-register idiom) */
 
@@ -44,8 +44,8 @@ struct Probe {
     struct Inner inner;
     int tail;
 };
-
-struct Probe g_probe;
+struct Probe g_probe;                 /* struct global */
+struct Probe *g_probe_ptr = &g_probe; /* pointer whose target is a STRUCT, not a scalar */
 
 /* Bitfields. A big-endian target allocates them MSB-FIRST within the storage
  * unit, the mirror image of the little-endian projects' identical declaration:

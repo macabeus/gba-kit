@@ -134,6 +134,26 @@ export interface StructMember {
   bitOffset?: number;
   /** Bitfield only: width in bits. Absent for plain members. */
   bitWidth?: number;
+  /**
+   * Array member only: the byte size of ONE element. `size` above is the WHOLE member
+   * (`u8 x[16]` → 16), so it cannot express where the n-th element of that member starts;
+   * this is the stride that does. Absent when the member's type is not an array — its
+   * presence is what identifies one. Spelled like {@link VariableShape}'s array arm.
+   */
+  elemSize?: number;
+  /**
+   * Array member only: signedness of the ELEMENT's base type — the same fact `signed` carries
+   * for a plain member (the same byte reads as -1 or as 255 depending only on it; `signed` is
+   * null for an array, whose own type is not a base type). Absent when the element is not a
+   * base type (an array of structs/pointers/enums), or the member is not an array.
+   */
+  elemSigned?: boolean;
+  /**
+   * Array member only: the element count — the product of the DW_TAG_subrange dimensions, so a
+   * multidimensional member reports its total. Absent when no dimension bounds it (a flexible
+   * array member, `char data[]`, which declares a stride but no length).
+   */
+  length?: number;
 }
 
 export interface StructType {
@@ -153,11 +173,17 @@ export interface StructType {
  * The cv-qualifiers crossed while resolving are part of the shape: `volatile` says accesses to
  * the object are observable and may not be folded or reordered, `const` that it is read-only
  * (the ROM-table spelling). For arrays the element chain's qualifiers count too — `const u16
- * tbl[]` qualifies the element type in DWARF.
+ * tbl[]` qualifies the element type in DWARF. On the `pointer` arm they are the POINTER
+ * variable's own qualifiers (`struct S *volatile g`); what it points at carries its own, on
+ * {@link PointeeStruct}.
+ *
+ * The `struct` arm's `structName` is the name {@link TypeIndex.struct} looks the layout up by,
+ * under the same rule as {@link PointeeStruct}: the tag when the type has one, otherwise the
+ * typedef alias that names it.
  */
 export type VariableShape =
   | { kind: 'scalar'; size: number | null; signed: boolean | null; volatile: boolean; const: boolean }
-  | { kind: 'pointer'; volatile: boolean; const: boolean }
+  | { kind: 'pointer'; pointee: PointeeStruct | null; volatile: boolean; const: boolean }
   | {
       kind: 'array';
       elemSize: number | null;
@@ -168,10 +194,37 @@ export type VariableShape =
     }
   | { kind: 'struct'; structName: string | null; size: number | null; volatile: boolean; const: boolean };
 
+/**
+ * What a `pointer` shape points AT, when its target resolves (through typedefs/cv-qualifiers) to
+ * a struct or union: enough to name that type and to size it, without a full DIE→C-type renderer.
+ * `null` on the pointer arm when the target is anything else — a scalar, another pointer, a
+ * function, or `void`.
+ *
+ * `structName` is the name {@link TypeIndex.struct} looks the layout up by, which is not always a
+ * tag: for the `typedef struct {…} T;` idiom the struct itself is unnamed and `T` is the only name
+ * it has, so the last typedef alias crossed on the way is reported instead. Null when the target
+ * has neither — an unnamed struct reached without an alias, whose layout no name can retrieve.
+ *
+ * `volatile` / `const` are the TARGET's qualifiers — the ones a declaration spells to the LEFT of
+ * the `*` (`volatile struct S *g`): accesses made THROUGH the pointer are observable / read-only.
+ * They are a different fact from the pointer variable's own qualifiers to the right of it
+ * (`struct S *volatile g`), which stay on the enclosing {@link VariableShape}.
+ */
+export interface PointeeStruct {
+  structName: string | null;
+  /** DW_AT_byte_size of the target struct/union, or null if absent (an incomplete type). */
+  size: number | null;
+  volatile: boolean;
+  const: boolean;
+}
+
 /** A member's read location: its byte offset + size, plus bitfield shift/width. (Signedness,
- *  pointer-ness and volatility are declaration facts, not locations — they stay on
- *  {@link StructMember} / `struct()`.) */
-export type MemberLocation = Omit<StructMember, 'name' | 'signed' | 'pointer' | 'volatile'>;
+ *  pointer-ness, volatility and the array element facts are declaration facts, not locations —
+ *  they stay on {@link StructMember} / `struct()`.) */
+export type MemberLocation = Omit<
+  StructMember,
+  'name' | 'signed' | 'pointer' | 'volatile' | 'elemSize' | 'elemSigned' | 'length'
+>;
 
 /** A parsed DIE: its tag plus the attributes we kept, and its child DIEs. */
 interface Die {
@@ -355,13 +408,14 @@ export class TypeIndex {
       return null;
     }
     const cv = { volatile: false, const: false };
-    const die = this.#stripTypedefs(variable.attrs.get(DW_AT_type), cv);
+    const alias = { typedef: null as string | null };
+    const die = this.#stripTypedefs(variable.attrs.get(DW_AT_type), cv, alias);
     if (!die) {
       return null;
     }
     switch (die.tag) {
       case DW_TAG_pointer_type:
-        return { kind: 'pointer', ...cv };
+        return { kind: 'pointer', pointee: this.#pointee(die.attrs.get(DW_AT_type)), ...cv };
       case DW_TAG_array_type: {
         // The element chain's qualifiers count toward the variable's declaration
         // (`const u16 tbl[]` qualifies the ELEMENT type in DWARF) — collect into the same cv.
@@ -375,15 +429,8 @@ export class TypeIndex {
         };
       }
       case DW_TAG_structure_type:
-      case DW_TAG_union_type: {
-        const structName = die.attrs.get(DW_AT_name);
-        return {
-          kind: 'struct',
-          structName: typeof structName === 'string' ? structName : null,
-          size: numberAttr(die, DW_AT_byte_size),
-          ...cv,
-        };
-      }
+      case DW_TAG_union_type:
+        return { kind: 'struct', ...this.#structTarget(die, alias), ...cv };
       default:
         return {
           kind: 'scalar',
@@ -392,6 +439,40 @@ export class TypeIndex {
           ...cv,
         };
     }
+  }
+
+  /**
+   * The struct/union a pointer's target resolves to, named the way {@link TypeIndex.struct} looks
+   * a layout up and carrying the target's own cv-qualifiers (see {@link PointeeStruct}), or null
+   * when the target is not a struct/union. The qualifiers are those crossed BETWEEN the pointer
+   * and its target, so they are the pointee's alone — the pointer variable's own are accumulated
+   * by the separate walk that reached the `DW_TAG_pointer_type` DIE.
+   */
+  #pointee(ref: AttrValue | undefined): PointeeStruct | null {
+    const cv = { volatile: false, const: false };
+    const alias = { typedef: null as string | null };
+    const die = this.#stripTypedefs(ref, cv, alias);
+    if (!die || (die.tag !== DW_TAG_structure_type && die.tag !== DW_TAG_union_type)) {
+      return null;
+    }
+    return { ...this.#structTarget(die, alias), ...cv };
+  }
+
+  /**
+   * Name and size a resolved struct/union DIE, given the `alias` accumulated by the walk that
+   * reached it. The name is the one {@link TypeIndex.struct} looks a layout up by: the tag when
+   * the type has one, else the last typedef crossed — the `typedef struct {…} T;` idiom leaves
+   * the struct unnamed, so `T` is the only name its layout has. A DIE that is only a forward
+   * declaration carries no `DW_AT_byte_size`, so the size is read from the definition its tag
+   * resolves to.
+   */
+  #structTarget(die: Die, alias: { typedef: string | null }): { structName: string | null; size: number | null } {
+    const tag = die.attrs.get(DW_AT_name);
+    const defined = isDeclaration(die) ? this.#resolveStructByName(asString(tag)) : die;
+    return {
+      structName: typeof tag === 'string' ? tag : alias.typedef,
+      size: defined ? numberAttr(defined, DW_AT_byte_size) : null,
+    };
   }
 
   /** Walk `path` from a struct/union DIE, accumulating member byte offsets. */
@@ -583,23 +664,49 @@ export class TypeIndex {
     }
   }
 
-  /** A member's declaration facts: base-type signedness, pointer-ness, and volatility —
-   *  resolved through typedef/cv-qualifier chains (see the {@link StructMember} field docs). */
-  #memberFacts(member: Die): Pick<StructMember, 'signed' | 'pointer' | 'volatile'> {
+  /** A member's declaration facts: base-type signedness, pointer-ness, volatility, and — for an
+   *  array member — its element stride/signedness/count, all resolved through typedef/cv-qualifier
+   *  chains (see the {@link StructMember} field docs). */
+  #memberFacts(
+    member: Die,
+  ): Pick<StructMember, 'signed' | 'pointer' | 'volatile' | 'elemSize' | 'elemSigned' | 'length'> {
     const cv = { volatile: false, const: false };
     const die = this.#stripTypedefs(member.attrs.get(DW_AT_type), cv);
     return {
       signed: die ? baseTypeSignedness(die) : null,
       ...(die?.tag === DW_TAG_pointer_type ? { pointer: true as const } : {}),
       ...(cv.volatile ? { volatile: true as const } : {}),
+      ...(die?.tag === DW_TAG_array_type ? this.#arrayFacts(die) : {}),
+    };
+  }
+
+  /** An array member's element facts. Each is omitted when the DWARF does not determine it — an
+   *  unsized element type has no stride, a flexible array member no length — so a present key is
+   *  always a fact, never a default. */
+  #arrayFacts(arrayDie: Die): Pick<StructMember, 'elemSize' | 'elemSigned' | 'length'> {
+    const elemRef = arrayDie.attrs.get(DW_AT_type);
+    const elem = this.#stripTypedefs(elemRef);
+    const elemSize = this.#typeRefSize(elemRef);
+    const elemSigned = elem ? baseTypeSignedness(elem) : null;
+    const length = arrayLength(arrayDie);
+    return {
+      ...(elemSize !== null ? { elemSize } : {}),
+      ...(elemSigned !== null ? { elemSigned } : {}),
+      ...(length !== null ? { length } : {}),
     };
   }
 
   /** Follow typedef / cv-qualifier links to the underlying type DIE (cycle-guarded). With a
    *  `cv` accumulator, the const/volatile qualifiers crossed on the way are recorded into it —
    *  callers that report a declaration (variableShape, #memberFacts) need them; callers that
-   *  only want the underlying type omit it. */
-  #stripTypedefs(ref: AttrValue | undefined, cv?: { volatile: boolean; const: boolean }): Die | null {
+   *  only want the underlying type omit it. The `alias` accumulator is the same idea for the last
+   *  TYPEDEF name crossed, which naming an unnamed struct needs (see {@link #structTarget}) and the
+   *  cv object must not carry (it is spread straight into a declaration shape). */
+  #stripTypedefs(
+    ref: AttrValue | undefined,
+    cv?: { volatile: boolean; const: boolean },
+    alias?: { typedef: string | null },
+  ): Die | null {
     let die = this.#deref(ref);
     const seen = new Set<number>();
     while (die && isQualifierOrTypedef(die.tag) && !seen.has(die.offset)) {
@@ -608,6 +715,12 @@ export class TypeIndex {
       }
       if (cv && die.tag === DW_TAG_const_type) {
         cv.const = true;
+      }
+      if (alias && die.tag === DW_TAG_typedef) {
+        const name = die.attrs.get(DW_AT_name);
+        if (typeof name === 'string') {
+          alias.typedef = name;
+        }
       }
       seen.add(die.offset);
       die = this.#deref(die.attrs.get(DW_AT_type));

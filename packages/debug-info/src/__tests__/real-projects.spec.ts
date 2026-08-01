@@ -134,7 +134,9 @@ describe.each(ARM_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) 
         { name: 'tag', offset: 0, size: 1, signed: false }, // plain char is unsigned on ARM
         { name: 'count', offset: 4, size: 4, signed: true },
         { name: 'flags', offset: 8, size: 2, signed: true },
-        { name: 'name', offset: 10, size: 6, signed: null }, // char[6] → element size × length; not a base type
+        // char[6] → `size` is the WHOLE member (element size × length); the element facts are
+        // what an indexed read into it needs, and `signed` stays null (an array is not a base type)
+        { name: 'name', offset: 10, size: 6, signed: null, elemSize: 1, elemSigned: false, length: 6 },
         { name: 'ptr', offset: 16, size: 4, signed: null, pointer: true }, // pointer → 4 bytes
         { name: 'inner', offset: 20, size: 8, signed: null }, // nested struct
         { name: 'tail', offset: 28, size: 4, signed: true },
@@ -179,10 +181,28 @@ describe.each(ARM_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) 
       volatile: false,
       const: false,
     });
-    // typedef'd anonymous struct: shape resolves through the typedef (the tag is unnamed)
-    expect(di.types.variableShape('g_pair')).toMatchObject({ kind: 'struct', size: 8 });
+    // typedef'd anonymous struct: the tag is unnamed, so the alias is the name it is known by
+    expect(di.types.variableShape('g_pair')).toEqual({
+      kind: 'struct',
+      structName: 'Pair',
+      size: 8,
+      volatile: false,
+      const: false,
+    });
     // no DIE ⇒ null — the "is this name declared?" probe
     expect(di.types.variableShape('g_no_such')).toBeNull();
+  });
+
+  it('names an anonymous typedef struct GLOBAL the way struct() looks a layout up — the round trip', () => {
+    // `typedef struct {…} Pair; Pair g_pair;` — the struct itself has no tag, so the alias is the
+    // only name its layout has. The name is what makes the shape actionable: it is the argument
+    // struct() takes, so a consumer holding only the global's declaration reaches its members.
+    const shape = di.types.variableShape('g_pair')!;
+    expect(shape.kind).toBe('struct');
+    const structName = shape.kind === 'struct' ? shape.structName : null;
+    expect(structName).toBe('Pair');
+    expect(di.struct(structName!)).toEqual(di.struct('Pair'));
+    expect(di.struct(structName!)!.members.map((m) => m.name)).toEqual(['a', 'b']);
   });
 
   it('reports the cv-qualifiers variableShape resolves through — volatile scalar, const array, volatile struct', () => {
@@ -211,6 +231,19 @@ describe.each(ARM_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) 
       volatile: true,
       const: false,
     });
+  });
+
+  it('reports an array member’s element stride/signedness/count — the facts `size` cannot carry', () => {
+    // `char name[6]` at offset 10: `size` is 6 (the whole member), so the position of its n-th
+    // element is only derivable from the element stride, and how many there are only from `length`.
+    const members = Object.fromEntries(di.struct('Probe')!.members.map((m) => [m.name, m]));
+    expect(members.name).toMatchObject({ size: 6, elemSize: 1, elemSigned: false, length: 6 });
+    // Non-array members carry none of the three — their presence is what marks a member an array.
+    for (const plain of ['tag', 'count', 'ptr', 'inner']) {
+      expect(members[plain]).not.toHaveProperty('elemSize');
+      expect(members[plain]).not.toHaveProperty('elemSigned');
+      expect(members[plain]).not.toHaveProperty('length');
+    }
   });
 
   it('reports member base-type signedness — the s8-vs-u8 fact offsets cannot carry', () => {
@@ -334,6 +367,70 @@ describe('DebugInfo on devkitarm-min-only shapes', () => {
     expect(di.structMember('Blob', 'data')).toEqual({ offset: 4, size: null });
     // The null size propagates, so resolveVariable refuses to size the read.
     expect(di.resolveVariable('g_blob.data')).toBeNull();
+    // The member still declares an element STRIDE — what it has no bound. So `elemSize` is
+    // reported and `length` is absent, the two facts being independent.
+    const data = di.struct('Blob')!.members.find((m) => m.name === 'data')!;
+    expect(data).toEqual({ name: 'data', offset: 4, size: null, signed: null, elemSize: 1, elemSigned: false });
+  });
+
+  it('names an UNNAMED pointee by the typedef that aliases it', () => {
+    // `typedef struct {…} Pair; Pair *g_pair_ptr;` — the struct itself has no tag, so the alias
+    // is the only name its layout has, and struct() is the consumer that must accept it.
+    expect(di.types.variableShape('g_pair_ptr')).toEqual({
+      kind: 'pointer',
+      pointee: { structName: 'Pair', size: 8, volatile: false, const: false },
+      volatile: false,
+      const: false,
+    });
+    expect(di.struct('Pair')).toEqual({
+      name: 'Pair',
+      size: 8,
+      members: [
+        { name: 'a', offset: 0, size: 4, signed: true },
+        { name: 'b', offset: 4, size: 4, signed: true },
+      ],
+    });
+  });
+
+  it('reports a pointee’s OWN cv-qualifiers, on the side of the * they were written', () => {
+    // `volatile struct Cv *g_cv_ptr;` — accesses THROUGH the pointer are observable, the pointer
+    // variable itself is an ordinary object. Its mirror `struct Cv *volatile g_cv_vptr;` qualifies
+    // the pointer and not its target. The two declarations differ only in that placement, so the
+    // volatile must land on a different one of the two objects in each.
+    expect(di.types.variableShape('g_cv_ptr')).toEqual({
+      kind: 'pointer',
+      pointee: { structName: 'Cv', size: 4, volatile: true, const: false },
+      volatile: false,
+      const: false,
+    });
+    expect(di.types.variableShape('g_cv_vptr')).toEqual({
+      kind: 'pointer',
+      pointee: { structName: 'Cv', size: 4, volatile: false, const: false },
+      volatile: true,
+      const: false,
+    });
+  });
+
+  it('keeps a pointee’s qualifiers out of the pointer variable’s own, and vice versa', () => {
+    // The same two declarations read as the pair of facts a consumer re-spelling the declaration
+    // needs: each object's volatility, from its own side of the *. They are never the same walk.
+    const asPointer = (name: string) => {
+      const shape = di.types.variableShape(name)!;
+      return shape.kind === 'pointer' ? shape : null;
+    };
+    const target = asPointer('g_cv_ptr')!;
+    const self = asPointer('g_cv_vptr')!;
+
+    expect([target.volatile, target.pointee!.volatile]).toEqual([false, true]);
+    expect([self.volatile, self.pointee!.volatile]).toEqual([true, false]);
+    // An unqualified pointer to an unqualified struct is the control: neither side is set.
+    const plain = asPointer('g_pair_ptr')!;
+    expect([plain.volatile, plain.pointee!.volatile, plain.const, plain.pointee!.const]).toEqual([
+      false,
+      false,
+      false,
+      false,
+    ]);
   });
 
   it('keeps absolute ldscript globals but excludes section-relative linker markers', () => {
@@ -405,7 +502,7 @@ describe.each(BE_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) =
         { name: 'tag', offset: 0, size: 1, signed: false },
         { name: 'count', offset: 4, size: 4, signed: true },
         { name: 'flags', offset: 8, size: 2, signed: true },
-        { name: 'name', offset: 10, size: 6, signed: null }, // unsigned char[6] → elem size × length
+        { name: 'name', offset: 10, size: 6, signed: null, elemSize: 1, elemSigned: false, length: 6 },
         { name: 'ptr', offset: 16, size: 4, signed: null, pointer: true },
         { name: 'inner', offset: 20, size: 8, signed: null }, // nested struct
         { name: 'tail', offset: 28, size: 4, signed: true },
@@ -475,7 +572,20 @@ describe.each(BE_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) =
       volatile: false,
       const: false,
     });
-    expect(di.types.variableShape('g_ptr')).toEqual({ kind: 'pointer', volatile: false, const: false });
+    // `int *g_ptr` — the target is a scalar, so there is no struct pointee to report
+    expect(di.types.variableShape('g_ptr')).toEqual({
+      kind: 'pointer',
+      pointee: null,
+      volatile: false,
+      const: false,
+    });
+    // `struct Probe *g_probe_ptr` — the target IS a struct, named by its tag and sized
+    expect(di.types.variableShape('g_probe_ptr')).toEqual({
+      kind: 'pointer',
+      pointee: { structName: 'Probe', size: 32, volatile: false, const: false },
+      volatile: false,
+      const: false,
+    });
     expect(di.types.variableShape('g_table')).toEqual({
       kind: 'array',
       elemSize: 2,
@@ -515,6 +625,16 @@ describe.each(BE_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) =
       const: false,
     });
     expect(di.types.variableShape('g_no_such')).toBeNull();
+  });
+
+  it('names a pointee the way struct() looks a layout up — the round trip', () => {
+    // The point of reporting the name: it is the argument struct() takes, so a consumer holding
+    // only the pointer's own declaration can reach the layout it points at.
+    const shape = di.types.variableShape('g_probe_ptr')!;
+    expect(shape.kind).toBe('pointer');
+    const pointee = shape.kind === 'pointer' ? shape.pointee : null;
+    expect(di.struct(pointee!.structName!)).toEqual(di.struct('Probe'));
+    expect(pointee!.size).toBe(di.struct('Probe')!.size);
   });
 
   it('resolves whole-variable reads to address + size', () => {
@@ -563,11 +683,15 @@ describe('cross-endian equivalence (same declarations, four toolchains, both byt
     'g_mode',
     'g_mmio',
     'g_ptr', // big-endian sources only
+    'g_probe_ptr',
     'g_table',
     'g_vol',
     'g_shape', // devkitarm-min only (agbcc rejects anonymous unions / flexible arrays)
     'g_wide',
     'g_blob',
+    'g_pair_ptr',
+    'g_cv_ptr',
+    'g_cv_vptr',
   ];
 
   const hasType = (p: Loaded, name: string): boolean => p.di.struct(name) !== null;
@@ -613,11 +737,15 @@ describe('cross-endian equivalence (same declarations, four toolchains, both byt
       g_mode: ['mips-min', 'ppc-min'],
       g_mmio: ['mips-min', 'ppc-min'],
       g_ptr: ['agbcc-min', 'devkitarm-min'],
+      g_probe_ptr: ['agbcc-min', 'devkitarm-min'],
       g_table: ['agbcc-min', 'devkitarm-min'],
       g_vol: ['agbcc-min', 'devkitarm-min'],
       g_shape: ['agbcc-min', 'mips-min', 'ppc-min'],
       g_wide: ['agbcc-min', 'mips-min', 'ppc-min'],
       g_blob: ['agbcc-min', 'mips-min', 'ppc-min'],
+      g_pair_ptr: ['agbcc-min', 'mips-min', 'ppc-min'],
+      g_cv_ptr: ['agbcc-min', 'mips-min', 'ppc-min'],
+      g_cv_vptr: ['agbcc-min', 'mips-min', 'ppc-min'],
     });
   });
 
@@ -812,6 +940,13 @@ describe('DebugInfo on ppc-min/build/main.o (RELA-relocated DWARF)', () => {
       kind: 'struct',
       structName: 'Probe',
       size: 32,
+      volatile: false,
+      const: false,
+    });
+    // A pointee is named the same way, so it is unreachable through the same addends.
+    expect(di.types.variableShape('g_probe_ptr')).toEqual({
+      kind: 'pointer',
+      pointee: { structName: 'Probe', size: 32, volatile: false, const: false },
       volatile: false,
       const: false,
     });

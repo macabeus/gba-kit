@@ -39,8 +39,8 @@ typedef struct {
     int a;
     int b;
 } Pair;
-
 Pair g_pair;
+Pair *g_pair_ptr = &g_pair; // pointer to an UNNAMED struct: only the typedef names it
 
 // A tagged enum (explicit + continued values) and a typedef of an anonymous
 // enum — the parser must read both, and Mode via its typedef alias.
@@ -75,19 +75,19 @@ struct Bits {
 
 struct Bits g_bits;
 
-// cv-qualified globals + a SIGNED narrow member — declaration facts that offsets
-// and sizes alone cannot carry: the volatile/const qualifiers variableShape must
-// resolve through, and each member's base-type signedness from struct() (the same
-// byte reads as -1 or as 255 depending on it).
-//   Cv: level @0 (1, signed)  gain @2 (2, unsigned)                 size 4
+// cv-qualified globals + a SIGNED narrow member — declaration facts that offsets and sizes alone
+// cannot carry: the volatile/const qualifiers variableShape must resolve through (and, for a
+// pointer, WHICH SIDE of the * they fall on), and each member's base-type signedness from struct().
 struct Cv {
     signed char level;
     volatile unsigned short gain; /* member-level volatile (the vu16-field MMIO idiom) */
-};
+}; //   Cv: level @0 (1, signed)  gain @2 (2, unsigned)                 size 4
 
 volatile struct Cv g_cv;                // volatile struct (an MMIO-block idiom)
 volatile unsigned short g_mmio;         // volatile scalar (an MMIO register idiom)
 const short g_rom_table[3] = {1, 2, 3}; // const array (a ROM-table idiom)
+volatile struct Cv *g_cv_ptr;           // the TARGET is volatile — the qualifier is left of the *
+struct Cv *volatile g_cv_vptr;          // the mirror: the POINTER is volatile, its target is not
 
 // An anonymous union member — its fields are accessed transparently as
 // g_shape.circle / g_shape.pair, so the parser must descend into the unnamed
