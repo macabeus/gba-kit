@@ -28,6 +28,8 @@ const DW_TAG_typedef = 0x16;
 const DW_TAG_union_type = 0x17;
 const DW_TAG_base_type = 0x24;
 const DW_TAG_const_type = 0x26;
+const DW_TAG_subprogram = 0x2e;
+const DW_TAG_formal_parameter = 0x05;
 const DW_TAG_variable = 0x34;
 const DW_TAG_volatile_type = 0x35;
 const DW_TAG_restrict_type = 0x37;
@@ -43,7 +45,9 @@ const DW_AT_upper_bound = 0x2f;
 const DW_AT_data_bit_offset = 0x6b; // DWARF 4+ bitfield: absolute bit offset from the struct start
 const DW_AT_count = 0x37;
 const DW_AT_data_member_location = 0x38;
+const DW_AT_low_pc = 0x11; // present on a subprogram DEFINITION; absent on a mere declaration
 const DW_AT_declaration = 0x3c;
+const DW_AT_prototyped = 0x27; // the declaration stated an argument list (not K&R)
 const DW_AT_encoding = 0x3e;
 const DW_AT_type = 0x49;
 const DW_AT_str_offsets_base = 0x72;
@@ -173,6 +177,31 @@ export interface StructMember {
    * array member, `char data[]`, which declares a stride but no length).
    */
   length?: number;
+}
+
+/** The width/signedness facts of one declared type — shared by a parameter and a return type. */
+export interface TypeFacts {
+  /** byte width, or null when the DWARF does not size the type */
+  size: number | null;
+  /** base-type signedness; null when the type is not a base type (pointer, struct, enum, array) */
+  signed: boolean | null;
+  /** the resolved type is a pointer */
+  pointer?: true;
+  /** the type chain crosses a volatile qualifier */
+  volatile?: true;
+  /** the type chain crosses a const qualifier */
+  const?: true;
+}
+
+/** A compiled function's declared signature — see {@link TypeIndex.functionSignature}. */
+export interface FunctionSignature {
+  name: string;
+  /** the return type's facts, or null for a `void` function */
+  returns: TypeFacts | null;
+  params: (TypeFacts & { name: string | null })[];
+  /** the declaration stated an argument list; false means K&R, where `params` being empty says
+   *  nothing about how many arguments the function takes */
+  prototyped: boolean;
 }
 
 export interface StructType {
@@ -308,6 +337,7 @@ export class TypeIndex {
   readonly #typedefByName = new Map<string, Die>();
   /** global/static variable name → its DIE (carries DW_AT_type). */
   readonly #variableByName = new Map<string, Die>();
+  readonly #functionByName = new Map<string, Die>();
   /** Byte order of the target — decides which end bitfields are allocated from. */
   readonly #littleEndian: boolean;
 
@@ -343,6 +373,13 @@ export class TypeIndex {
         }
       } else if (die.tag === DW_TAG_typedef && !this.#typedefByName.has(name)) {
         this.#typedefByName.set(name, die);
+      } else if (die.tag === DW_TAG_subprogram) {
+        // Index DEFINITIONS only. A compiler emits a subprogram DIE for a function it
+        // COMPILED; a body-less declaration carries no parameter list worth reading, and
+        // (for gcc-2.x) is not emitted at all. `low_pc` is the definition witness.
+        if (die.attrs.has(DW_AT_low_pc) && !this.#functionByName.has(name)) {
+          this.#functionByName.set(name, die);
+        }
       } else if (die.tag === DW_TAG_variable && die.attrs.has(DW_AT_type)) {
         const existing = this.#variableByName.get(name);
         // The same global appears once per CU that includes its header; most are
@@ -421,6 +458,56 @@ export class TypeIndex {
    * also makes this the "is this name declared in the project headers?" probe. An unsized
    * extern array (`extern u16 tbl[]`) classifies as `array` with `length: null`.
    */
+  /**
+   * The DECLARED signature of a compiled function: what it returns and the type of each
+   * parameter, as the compiler recorded them.
+   *
+   * Only functions the ELF was compiled WITH a body for are known — `low_pc` is the witness. A
+   * function that is still hand-written assembly, or merely declared in a header, has no
+   * subprogram DIE at all (gcc-2.x drops body-less declarations outright), so `null` here means
+   * "this ELF did not compile that function", never "it takes no arguments".
+   *
+   * `returns: null` is a `void` function. `params` is the DEFINITION's own parameter list and is
+   * authoritative even when `prototyped` is false — that flag describes how the function was
+   * DECLARED (gcc-2.x never sets it), not what it was compiled to take.
+   */
+  functionSignature(fnName: string): FunctionSignature | null {
+    const fn = this.#functionByName.get(fnName);
+    if (!fn) {
+      return null;
+    }
+    const params = fn.children
+      .filter((c) => c.tag === DW_TAG_formal_parameter)
+      .map((c) => {
+        const name = c.attrs.get(DW_AT_name);
+        return {
+          name: typeof name === 'string' ? name : null,
+          ...this.#typeFacts(c.attrs.get(DW_AT_type)),
+        };
+      });
+    return {
+      name: fnName,
+      returns: fn.attrs.has(DW_AT_type) ? this.#typeFacts(fn.attrs.get(DW_AT_type)) : null,
+      params,
+      prototyped: fn.attrs.get(DW_AT_prototyped) === true,
+    };
+  }
+
+  /** The width/signedness/pointer-ness of a type reference, resolved through typedef and
+   *  cv-qualifier chains — the same vocabulary {@link StructMember} uses for a plain member, so a
+   *  parameter and a field of the same declared type describe identically. */
+  #typeFacts(ref: AttrValue | undefined): TypeFacts {
+    const cv = { volatile: false, const: false };
+    const die = this.#stripTypedefs(ref, cv);
+    return {
+      size: this.#typeRefSize(ref),
+      signed: die ? baseTypeSignedness(die) : null,
+      ...(die?.tag === DW_TAG_pointer_type ? { pointer: true as const } : {}),
+      ...(cv.volatile ? { volatile: true as const } : {}),
+      ...(cv.const ? { const: true as const } : {}),
+    };
+  }
+
   variableShape(varName: string): VariableShape | null {
     const variable = this.#variableByName.get(varName);
     if (!variable) {
