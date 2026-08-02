@@ -696,7 +696,7 @@ describe('cross-endian equivalence (same declarations, four toolchains, both byt
   // Every type/global any of the four declares. The ones not present in all four are
   // enumerated by name below, so a project that genuinely lacks a shape is skipped
   // EXPLICITLY rather than dropped silently.
-  const CANDIDATE_TYPES = ['Probe', 'Inner', 'Bits', 'Cv', 'UtilPair', 'Pair', 'Shape', 'Blob'];
+  const CANDIDATE_TYPES = ['Probe', 'Inner', 'Bits', 'Cv', 'UtilPair', 'Grid', 'Pair', 'Shape', 'Blob'];
   const CANDIDATE_GLOBALS = [
     'g_counter',
     'g_probe',
@@ -704,6 +704,9 @@ describe('cross-endian equivalence (same declarations, four toolchains, both byt
     'g_cv',
     'g_rom_table',
     'g_util_pair',
+    'g_grid3',
+    'g_grid',
+    'g_ext_grid', // agbcc-min only — the unsized-outer-bound spelling is a GCC 2.95 quirk
     'g_pair', // little-endian sources only
     'g_color',
     'g_mode',
@@ -746,8 +749,17 @@ describe('cross-endian equivalence (same declarations, four toolchains, both byt
   });
 
   it('shares exactly this declaration set — every other shape is skipped BY NAME', () => {
-    expect(sharedTypes).toEqual(['Probe', 'Inner', 'Bits', 'Cv', 'UtilPair']);
-    expect(sharedGlobals).toEqual(['g_counter', 'g_probe', 'g_bits', 'g_cv', 'g_rom_table', 'g_util_pair']);
+    expect(sharedTypes).toEqual(['Probe', 'Inner', 'Bits', 'Cv', 'UtilPair', 'Grid']);
+    expect(sharedGlobals).toEqual([
+      'g_counter',
+      'g_probe',
+      'g_bits',
+      'g_cv',
+      'g_rom_table',
+      'g_util_pair',
+      'g_grid3',
+      'g_grid',
+    ]);
     // The rest, and who lacks each. These are SOURCE facts (the big-endian projects
     // declare a different set of globals; agbcc/GCC 2.95 rejects anonymous unions and
     // flexible array members), not parser gaps — pinned so a shape silently vanishing
@@ -758,6 +770,7 @@ describe('cross-endian equivalence (same declarations, four toolchains, both byt
       Blob: ['agbcc-min', 'mips-min', 'ppc-min'],
     });
     expect(skipped(CANDIDATE_GLOBALS, hasGlobal)).toEqual({
+      g_ext_grid: ['devkitarm-min', 'mips-min', 'ppc-min'],
       g_pair: ['mips-min', 'ppc-min'],
       g_color: ['mips-min', 'ppc-min'],
       g_mode: ['mips-min', 'ppc-min'],
@@ -784,6 +797,7 @@ describe('cross-endian equivalence (same declarations, four toolchains, both byt
     Bits: { size: 8, members: 'hearts@0:1 stars@0:1 cross@0:2 wide@1:1 after@4:4' },
     Cv: { size: 4, members: 'level@0:1 gain@2:2' },
     UtilPair: { size: 4, members: 'lo@0:2 hi@2:2' },
+    Grid: { size: 16, members: 'id@0:4 cells@4:12' },
   };
 
   it.each(sharedTypes)('every project reports the same byte layout for %s', (type) => {
@@ -824,6 +838,19 @@ describe('cross-endian equivalence (same declarations, four toolchains, both byt
     g_cv: { kind: 'struct', structName: 'Cv', size: 4, volatile: true, const: false },
     g_rom_table: { kind: 'array', elemSize: 2, elemSigned: true, length: 3, dims: [3], volatile: false, const: true },
     g_util_pair: { kind: 'struct', structName: 'UtilPair', size: 4, volatile: false, const: false },
+    // RANK is byte-order- and producer-independent: the dimensions come from the
+    // DW_TAG_subrange chain, which every producer spells in declaration order. A reader that
+    // multiplied them away (or read them under the wrong endianness) shows up right here.
+    g_grid3: {
+      kind: 'array',
+      elemSize: 1,
+      elemSigned: false,
+      length: 24,
+      dims: [2, 3, 4],
+      volatile: false,
+      const: false,
+    },
+    g_grid: { kind: 'struct', structName: 'Grid', size: 16, volatile: false, const: false },
   };
 
   it.each(sharedGlobals)('every project classifies %s to the same shape — TypeIndex.variableShape', (name) => {
