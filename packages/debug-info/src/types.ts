@@ -178,6 +178,17 @@ export interface StructMember {
    * array member, `char data[]`, which declares a stride but no length).
    */
   length?: number;
+  /**
+   * Array member only: the per-dimension extents, outermost first — the RANK that {@link length}
+   * multiplies away (`u16 x[4][8]` → `[4, 8]`, length 32). One entry per DW_TAG_subrange_type,
+   * `null` where that dimension has no bound (a flexible one). Absent when the member is not an
+   * array or the DWARF gave the array no subranges at all.
+   *
+   * The rank is not decoration: `x[i]` on a `[4][8]` member is a ROW, not an element, so a
+   * consumer that only knows the flat count cannot spell an element access that type-checks
+   * against the project's own header.
+   */
+  dims?: (number | null)[];
 }
 
 /** The width/signedness facts of one declared type — shared by a parameter and a return type. */
@@ -238,6 +249,11 @@ export type VariableShape =
       elemSize: number | null;
       elemSigned: boolean | null;
       length: number | null;
+      /** the per-dimension extents, outermost first — the RANK `length` multiplies away
+       *  (`u16 g[4][0x400]` → `[4, 1024]`, length 4096). `null` where a dimension is
+       *  unbounded, and null overall when the rank itself is unknown (an unsized 1-D
+       *  extern) or the type is not subranged. `g[i]` on a rank-2 array is a ROW. */
+      dims: (number | null)[] | null;
       volatile: boolean;
       const: boolean;
     }
@@ -549,6 +565,12 @@ export class TypeIndex {
           // near-information-free fact. A DEFINED [1] keeps its length — the definition
           // is the witness.
           length: isDeclaration(variable) && length === 1 ? null : length,
+          // The RANK, under the same declaration rule applied per-dimension: on a DECLARATION
+          // a LEADING extent of 1 is that same unsized spelling (`extern T x[]`, `extern T
+          // x[][4]`) and reports null, while the inner extents ARE written down and survive —
+          // they are exactly what an element access needs. Only the outermost dimension can be
+          // unsized in C, so only it is normalized.
+          dims: declaredDims(variable, die),
           ...cv,
         };
       }
@@ -828,16 +850,18 @@ export class TypeIndex {
   /** An array member's element facts. Each is omitted when the DWARF does not determine it — an
    *  unsized element type has no stride, a flexible array member no length — so a present key is
    *  always a fact, never a default. */
-  #arrayFacts(arrayDie: Die): Pick<StructMember, 'elemSize' | 'elemSigned' | 'length'> {
+  #arrayFacts(arrayDie: Die): Pick<StructMember, 'elemSize' | 'elemSigned' | 'length' | 'dims'> {
     const elemRef = arrayDie.attrs.get(DW_AT_type);
     const elem = this.#stripTypedefs(elemRef);
     const elemSize = this.#typeRefSize(elemRef);
     const elemSigned = elem ? baseTypeSignedness(elem) : null;
     const length = arrayLength(arrayDie);
+    const dims = arrayDims(arrayDie);
     return {
       ...(elemSize !== null ? { elemSize } : {}),
       ...(elemSigned !== null ? { elemSigned } : {}),
       ...(length !== null ? { length } : {}),
+      ...(dims !== null ? { dims } : {}),
     };
   }
 
@@ -936,30 +960,57 @@ function bitfieldAbsBitOffset(member: Die, typeSize: number | null, littleEndian
 }
 
 /**
- * Element count of an array DIE (product of its DW_TAG_subrange_type dimensions),
- * or null if any dimension is flexible (no bound) or zero-length — those have no
- * fixed read size, so the member's size should surface as null, not 0.
+ * Per-dimension extents of an array DIE, outermost first — one entry per
+ * DW_TAG_subrange_type, `null` where that dimension is flexible (no bound) or
+ * zero-length. Null overall when the DIE carries no subranges at all.
+ *
+ * This is the RANK, which {@link arrayLength} multiplies away. Both readings are needed:
+ * the flat count sizes the object, the rank says how many subscripts an element access
+ * takes — and `x[i]` on a `[4][8]` is a row, not an element.
  */
-function arrayLength(arrayDie: Die): number | null {
-  let count = 1;
-  let sawDimension = false;
+function arrayDims(arrayDie: Die): (number | null)[] | null {
+  const dims: (number | null)[] = [];
   for (const child of arrayDie.children) {
     if (child.tag !== DW_TAG_subrange_type) {
       continue;
     }
-    sawDimension = true;
     const explicit = numberAttr(child, DW_AT_count);
     const rawUpper = numberAttr(child, DW_AT_upper_bound);
     // GCC 2.95 stores a zero-length array's -1 upper bound in UNSIGNED DW_FORM_data4;
     // read raw, upper+1 would claim 2^32 elements. Normalize to the modern sdata reading.
     const upper = rawUpper === 0xffffffff ? -1 : rawUpper;
     const dim = explicit !== null ? explicit : upper !== null ? upper + 1 : null;
-    if (dim === null || dim <= 0) {
-      return null;
-    }
-    count *= dim;
+    dims.push(dim === null || dim <= 0 ? null : dim);
   }
-  return sawDimension ? count : null;
+  return dims.length > 0 ? dims : null;
+}
+
+/**
+ * {@link arrayDims} for a VARIABLE, with the declaration quirk normalized: GCC 2.95
+ * encodes an unsized extern's outermost bound as upper_bound 0, byte-identical to a
+ * real `[1]`, so on a DW_AT_declaration a leading extent of 1 is reported as unknown.
+ * The rare genuine `extern T x[1]` / `extern T x[1][4]` loses a near-information-free
+ * fact; a DEFINITION keeps its 1, since the definition is the witness.
+ */
+function declaredDims(variable: Die, arrayDie: Die): (number | null)[] | null {
+  const dims = arrayDims(arrayDie);
+  if (dims === null || !isDeclaration(variable) || dims[0] !== 1) {
+    return dims;
+  }
+  return [null, ...dims.slice(1)];
+}
+
+/**
+ * Element count of an array DIE (product of its DW_TAG_subrange_type dimensions),
+ * or null if any dimension is flexible (no bound) or zero-length — those have no
+ * fixed read size, so the member's size should surface as null, not 0.
+ */
+function arrayLength(arrayDie: Die): number | null {
+  const dims = arrayDims(arrayDie);
+  if (dims === null || dims.some((d) => d === null)) {
+    return null;
+  }
+  return dims.reduce<number>((a, d) => a * d!, 1);
 }
 
 /** Signedness of a base type from DW_AT_encoding (DW_ATE_signed/signed_char = signed;

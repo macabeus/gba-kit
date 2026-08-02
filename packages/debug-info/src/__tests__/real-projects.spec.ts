@@ -136,7 +136,7 @@ describe.each(ARM_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) 
         { name: 'flags', offset: 8, size: 2, signed: true },
         // char[6] → `size` is the WHOLE member (element size × length); the element facts are
         // what an indexed read into it needs, and `signed` stays null (an array is not a base type)
-        { name: 'name', offset: 10, size: 6, signed: null, elemSize: 1, elemSigned: false, length: 6 },
+        { name: 'name', offset: 10, size: 6, signed: null, elemSize: 1, elemSigned: false, length: 6, dims: [6] },
         // pointer → 4 bytes, and the pointee facts pointer arithmetic scales by
         { name: 'ptr', offset: 16, size: 4, signed: null, pointer: true, pointeeSize: 4, pointeeSigned: true },
         { name: 'inner', offset: 20, size: 8, signed: null }, // nested struct
@@ -221,6 +221,7 @@ describe.each(ARM_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) 
       elemSize: 2,
       elemSigned: true,
       length: 3,
+      dims: [3],
       volatile: false,
       const: true,
     });
@@ -385,7 +386,15 @@ describe('DebugInfo on devkitarm-min-only shapes', () => {
     // The member still declares an element STRIDE — what it has no bound. So `elemSize` is
     // reported and `length` is absent, the two facts being independent.
     const data = di.struct('Blob')!.members.find((m) => m.name === 'data')!;
-    expect(data).toEqual({ name: 'data', offset: 4, size: null, signed: null, elemSize: 1, elemSigned: false });
+    expect(data).toEqual({
+      name: 'data',
+      offset: 4,
+      size: null,
+      signed: null,
+      elemSize: 1,
+      elemSigned: false,
+      dims: [null],
+    });
   });
 
   it('names an UNNAMED pointee by the typedef that aliases it', () => {
@@ -517,7 +526,7 @@ describe.each(BE_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) =
         { name: 'tag', offset: 0, size: 1, signed: false },
         { name: 'count', offset: 4, size: 4, signed: true },
         { name: 'flags', offset: 8, size: 2, signed: true },
-        { name: 'name', offset: 10, size: 6, signed: null, elemSize: 1, elemSigned: false, length: 6 },
+        { name: 'name', offset: 10, size: 6, signed: null, elemSize: 1, elemSigned: false, length: 6, dims: [6] },
         { name: 'ptr', offset: 16, size: 4, signed: null, pointer: true, pointeeSize: 4, pointeeSigned: true },
         { name: 'inner', offset: 20, size: 8, signed: null }, // nested struct
         { name: 'tail', offset: 28, size: 4, signed: true },
@@ -606,6 +615,7 @@ describe.each(BE_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) =
       elemSize: 2,
       elemSigned: true,
       length: 4,
+      dims: [4],
       volatile: false,
       const: false,
     });
@@ -615,6 +625,7 @@ describe.each(BE_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) =
       elemSize: 2,
       elemSigned: true,
       length: 3,
+      dims: [3],
       volatile: false,
       const: true,
     });
@@ -811,7 +822,7 @@ describe('cross-endian equivalence (same declarations, four toolchains, both byt
     g_probe: { kind: 'struct', structName: 'Probe', size: 32, volatile: false, const: false },
     g_bits: { kind: 'struct', structName: 'Bits', size: 8, volatile: false, const: false },
     g_cv: { kind: 'struct', structName: 'Cv', size: 4, volatile: true, const: false },
-    g_rom_table: { kind: 'array', elemSize: 2, elemSigned: true, length: 3, volatile: false, const: true },
+    g_rom_table: { kind: 'array', elemSize: 2, elemSigned: true, length: 3, dims: [3], volatile: false, const: true },
     g_util_pair: { kind: 'struct', structName: 'UtilPair', size: 4, volatile: false, const: false },
   };
 

@@ -26,3 +26,11 @@ __gccmain:
 	.align 1
 g_ext_table:
 	.hword 10, 20, 30, 40
+
+@ The same idiom with a RANK: main.c declares `extern const short g_ext_grid[][4];`,
+@ so only the inner extent is knowable from the DWARF.
+	.global g_ext_grid
+	.align 1
+g_ext_grid:
+	.hword 1, 2, 3, 4
+	.hword 5, 6, 7, 8

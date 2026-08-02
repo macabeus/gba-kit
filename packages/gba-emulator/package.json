@@ -1,6 +1,6 @@
 {
   "name": "@gba-kit/gba-emulator",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Full GBA hardware emulation",
   "author": "macabeus",
   "type": "module",

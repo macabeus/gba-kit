@@ -1,5 +1,13 @@
 # @gba-kit/gba-emulator
 
+## 0.5.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @gba-kit/debug-info@0.5.0
+  - @gba-kit/arm-emulator@0.5.0
+
 ## 0.4.0
 
 ### Patch Changes
