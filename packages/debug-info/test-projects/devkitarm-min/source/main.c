@@ -150,3 +150,12 @@ int main(void) {
     }
     return acc;
 }
+
+/* Macro-table fixtures, read from build/macinfo.o (see the Makefile's -g3 rule).
+ * The spellings a real decomp names fixed cells with. debug-macro.spec.ts asserts
+ * these by exact line number: append below, never insert above. */
+#define REG_DISPSTAT (*(volatile unsigned short *)0x04000004)
+#define g_save_slot (*(unsigned char *)0x03007FF0)
+#define EWRAM_BASE 0x02000000
+#define CLAMP(x, lo, hi) ((x) < (lo) ? (lo) : (x) > (hi) ? (hi) : (x))
+#define NO_BODY

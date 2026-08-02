@@ -61,6 +61,11 @@ export function parseDebugMacinfo(data: Uint8Array): MacroDefinition[] {
           return out; // truncated
         }
         const line = cur.uleb();
+        if (data.indexOf(0, cur.offset) === -1) {
+          // The string's NUL never arrives: a stream cut mid-define. Reporting the bytes we do
+          // have would surface a corrupted name/body as a real one — stop instead.
+          return out;
+        }
         const text = cur.cstr();
         if (opcode === DW_MACINFO_define) {
           const sp = text.indexOf(' ');
@@ -81,6 +86,9 @@ export function parseDebugMacinfo(data: Uint8Array): MacroDefinition[] {
           return out;
         }
         cur.uleb(); // constant
+        if (data.indexOf(0, cur.offset) === -1) {
+          return out; // truncated mid-string, same as a define
+        }
         cur.cstr();
         break;
       default:

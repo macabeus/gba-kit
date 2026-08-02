@@ -44,7 +44,7 @@ const PROJECTS: Project[] = [
   },
   {
     dir: join(projects, 'devkitarm-min'),
-    artifacts: ELF_AND_ORACLE,
+    artifacts: [...ELF_AND_ORACLE, 'macinfo.o'],
     rebuildHint: 'cd test-projects/devkitarm-min && ./build.sh   # builds in Docker',
   },
   {

@@ -19,6 +19,11 @@ the sequence-boundary case), `bump`, `triple` (in a second `util.c` → multi-CU
 an anonymous union (`struct Shape`), an 8-byte `long long` global (`g_wide`),
 and a flexible array member (`struct Blob`). It's covered by a devkitarm-only test block.
 
+It also vendors `build/macinfo.o`: its `main.c` compiled with
+`-gdwarf-2 -g3 -gstrict-dwarf` — the macro-sidecar recipe — whose `.debug_macinfo`
+records the fixture `#define`s at the end of that file (asserted by exact line number
+in `debug-macro.spec.ts`, so append there, never insert above).
+
 ## The big-endian pair
 
 `mips-min` and `ppc-min` compile one shared source (their `main.c` / `util.c` are
