@@ -46,6 +46,7 @@ const DW_AT_data_bit_offset = 0x6b; // DWARF 4+ bitfield: absolute bit offset fr
 const DW_AT_count = 0x37;
 const DW_AT_data_member_location = 0x38;
 const DW_AT_low_pc = 0x11; // present on a subprogram DEFINITION; absent on a mere declaration
+const DW_AT_abstract_origin = 0x31; // concrete half of an inlined-and-emitted definition → its abstract half
 const DW_AT_declaration = 0x3c;
 const DW_AT_prototyped = 0x27; // the declaration stated an argument list (not K&R)
 const DW_AT_encoding = 0x3e;
@@ -355,7 +356,13 @@ export class TypeIndex {
     }
 
     for (const die of this.#byOffset.values()) {
-      const name = die.attrs.get(DW_AT_name);
+      let name = die.attrs.get(DW_AT_name);
+      if (typeof name !== 'string' && die.tag === DW_TAG_subprogram && die.attrs.has(DW_AT_low_pc)) {
+        // Modern gcc at -O1+ splits a function that is both inlined and emitted into an
+        // ABSTRACT DIE (name, params) and a CONCRETE one (low_pc) referencing it. The
+        // pair is one definition; the concrete half is indexed under the abstract name.
+        name = this.#deref(die.attrs.get(DW_AT_abstract_origin))?.attrs.get(DW_AT_name);
+      }
       if (typeof name !== 'string') {
         continue;
       }
@@ -476,20 +483,25 @@ export class TypeIndex {
     if (!fn) {
       return null;
     }
-    const params = fn.children
+    // For a split definition the DECLARED facts (params, return type, prototyped) live on
+    // the abstract DIE; the concrete one contributes the address and parameter DIEs that
+    // are themselves just abstract_origin references. Read each fact where it was written.
+    const decl = this.#deref(fn.attrs.get(DW_AT_abstract_origin)) ?? fn;
+    const params = decl.children
       .filter((c) => c.tag === DW_TAG_formal_parameter)
       .map((c) => {
-        const name = c.attrs.get(DW_AT_name);
+        const p = c.attrs.has(DW_AT_type) ? c : (this.#deref(c.attrs.get(DW_AT_abstract_origin)) ?? c);
+        const name = p.attrs.get(DW_AT_name);
         return {
           name: typeof name === 'string' ? name : null,
-          ...this.#typeFacts(c.attrs.get(DW_AT_type)),
+          ...this.#typeFacts(p.attrs.get(DW_AT_type)),
         };
       });
     return {
       name: fnName,
-      returns: fn.attrs.has(DW_AT_type) ? this.#typeFacts(fn.attrs.get(DW_AT_type)) : null,
+      returns: decl.attrs.has(DW_AT_type) ? this.#typeFacts(decl.attrs.get(DW_AT_type)) : null,
       params,
-      prototyped: fn.attrs.get(DW_AT_prototyped) === true,
+      prototyped: decl.attrs.get(DW_AT_prototyped) === true,
     };
   }
 
@@ -526,11 +538,17 @@ export class TypeIndex {
         // The element chain's qualifiers count toward the variable's declaration
         // (`const u16 tbl[]` qualifies the ELEMENT type in DWARF) — collect into the same cv.
         const elem = this.#stripTypedefs(die.attrs.get(DW_AT_type), cv);
+        const length = arrayLength(die);
         return {
           kind: 'array',
           elemSize: this.#typeRefSize(die.attrs.get(DW_AT_type)),
           elemSigned: elem ? baseTypeSignedness(elem) : null,
-          length: arrayLength(die),
+          // A DECLARATION's [1] is GCC 2.95's spelling of an UNSIZED extern array
+          // (upper_bound 0, byte-identical to a real [1]). No compilation ever saw the
+          // size, so it is reported unknown; the rare genuine `extern T x[1]` loses a
+          // near-information-free fact. A DEFINED [1] keeps its length — the definition
+          // is the witness.
+          length: isDeclaration(variable) && length === 1 ? null : length,
           ...cv,
         };
       }
@@ -931,7 +949,10 @@ function arrayLength(arrayDie: Die): number | null {
     }
     sawDimension = true;
     const explicit = numberAttr(child, DW_AT_count);
-    const upper = numberAttr(child, DW_AT_upper_bound);
+    const rawUpper = numberAttr(child, DW_AT_upper_bound);
+    // GCC 2.95 stores a zero-length array's -1 upper bound in UNSIGNED DW_FORM_data4;
+    // read raw, upper+1 would claim 2^32 elements. Normalize to the modern sdata reading.
+    const upper = rawUpper === 0xffffffff ? -1 : rawUpper;
     const dim = explicit !== null ? explicit : upper !== null ? upper + 1 : null;
     if (dim === null || dim <= 0) {
       return null;
@@ -1189,8 +1210,12 @@ function readForm(
     case DW_FORM_addr:
       return readBytes(c, ctx.addressSize);
     case DW_FORM_data1:
-    case DW_FORM_flag:
       return c.u8();
+    case DW_FORM_flag:
+      // DWARF 2/3's boolean form (a byte). Returning the raw number made every `=== true`
+      // test in this file inert on those dialects — only DWARF 4+'s flag_present produced
+      // a boolean. A flag is a fact, not a number.
+      return c.u8() !== 0;
     case DW_FORM_data2:
       return c.u16();
     case DW_FORM_data4:
