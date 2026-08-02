@@ -5,6 +5,8 @@
     "g_bits": 4,
     "g_counter": 28,
     "g_cv": 0,
+    "g_grid": 56,
+    "g_grid3": 32,
     "g_probe": 0,
     "g_probe_ptr": 0,
     "g_ptr": 24,
@@ -23,7 +25,7 @@
     "0x20": {
       "func": "bump",
       "file": "main.c",
-      "line": 85
+      "line": 100
     },
     "0x10": {
       "func": "square",

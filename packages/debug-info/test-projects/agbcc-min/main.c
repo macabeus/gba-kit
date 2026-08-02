@@ -166,3 +166,26 @@ int poke(int i) { /* keeps every shape above live in the DWARF */
 }
 
 static const unsigned short g_fwd_sized_table[][2] = {{5, 6}, {7, 8}, {9, 10}};
+
+/* ---- RANK shapes. A flat element count cannot express how many subscripts an
+ * element access takes, and `g[i]` on a `[2][3]` is a ROW, not an element — so the
+ * per-dimension extents are their own fact (variableShape().dims / StructMember.dims).
+ *   g_grid3   — a fully-bounded rank 3, the ordinary case (dims [2,3,4], length 24);
+ *   g_ext_grid — the decomp `extern u8 tbl[][0x40]` idiom, defined outside C: its OUTER
+ *                bound is unknowable but the INNER one is written down and is exactly
+ *                what an element access needs, so the rank must survive as [null, 4];
+ *   Grid.cells — the same fact one level down, on a struct member. */
+unsigned char g_grid3[2][3][4];
+extern const short g_ext_grid[][4];
+
+struct Grid {
+    int id;
+    unsigned short cells[2][3];
+};
+struct Grid g_grid;
+
+int rank_poke(int i) { /* keeps the shapes above live in the DWARF */
+    g_grid3[1][2][3] = (unsigned char) i;
+    g_grid.cells[1][2] = (unsigned short) g_ext_grid[i][1];
+    return g_grid.id;
+}

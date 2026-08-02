@@ -82,6 +82,20 @@ int square(int n) {
     return n * n;
 }
 
+/* ---- RANK. A flat element count cannot say how many subscripts reach an ELEMENT, and
+ * `g[i]` on a `[2][3]` is a ROW. The per-dimension extents are their own fact
+ * (variableShape().dims / StructMember.dims), and they are ABI- and byte-order-independent,
+ * so all four toolchains must report them identically. (agbcc-min additionally carries the
+ * `extern T x[][4]` idiom, whose unsized outer bound is a GCC 2.95 ENCODING quirk — modern
+ * producers spell it differently, so it is pinned there rather than shared.) */
+unsigned char g_grid3[2][3][4]; /* fully-bounded rank 3: dims [2,3,4], length 24 */
+
+struct Grid { /*   Grid: id @0 (4)  cells @4 (12: [2][3] of u16)        size 16 */
+    int id;
+    unsigned short cells[2][3]; /* the same fact one level down, on a member */
+};
+struct Grid g_grid;
+
 void bump(void) {
     g_counter += 1;
     g_ptr = &g_counter;                          /* keep the pointer global live */
@@ -92,6 +106,8 @@ void bump(void) {
     g_bits.after = g_counter;
     g_cv.level = (signed char) g_counter;        /* keep struct Cv + its quals live */
     g_probe.count = g_rom_table[g_counter & 1];  /* keep the const table live */
+    g_grid3[1][2][3] = (unsigned char) g_counter; /* keep the rank-3 array live */
+    g_grid.cells[1][2] = (unsigned short) g_grid.id; /* keep struct Grid + its 2-D member live */
 }
 
 int main(void) {

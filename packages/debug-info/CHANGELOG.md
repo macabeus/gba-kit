@@ -1,5 +1,27 @@
 # @gba-kit/debug-info
 
+## 0.5.0
+
+### Minor Changes
+
+- Report an array's RANK, not just its flattened element count.
+
+  `variableShape()`'s array arm and `struct()`'s array members now carry `dims` — the
+  per-dimension extents, outermost first (`u16 g[4][0x400]` → `[4, 1024]`). `length` is
+  unchanged: it stays the product, which is what sizes the object.
+
+  The two readings answer different questions, and only `dims` answers the one a consumer
+  spelling C needs: `g[i]` on a rank-2 array is a **row**, not an element. A consumer that
+  knows only the flat count writes a single subscript, which against the project's own header
+  is either a type error or — where the row address flows into an integer context — silently
+  the wrong address.
+
+  `null` marks an unbounded dimension. On a `DW_AT_declaration` a leading extent of 1 is
+  GCC 2.95's spelling of an unsized outer bound (`extern T x[]`, `extern T x[][4]`) and is
+  reported as `null`, mirroring the rule `length` already applies; the inner extents are
+  written down and survive. A rank-1 array reports a one-entry `dims`, so an absent key
+  always means "not an array", never "rank unknown".
+
 ## 0.4.0
 
 ### Minor Changes

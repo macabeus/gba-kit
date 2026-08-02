@@ -88,6 +88,7 @@ describe('3. the 0xffffffff upper bound means zero-length, never 2^32 elements',
       elemSize: 1,
       elemSigned: false,
       length: null,
+      dims: [null], // rank 1, the single extent unbounded
       volatile: false,
       const: false,
     });
@@ -96,7 +97,15 @@ describe('3. the 0xffffffff upper bound means zero-length, never 2^32 elements',
   it('a zero-length trailing member reads exactly like modern flexible arrays', () => {
     // Mirrors the devkitarm-min `Blob.data` pin: stride reported, size and length not.
     const data = agbcc.struct('Flex')!.members.find((m) => m.name === 'data')!;
-    expect(data).toEqual({ name: 'data', offset: 4, size: null, signed: null, elemSize: 1, elemSigned: false });
+    expect(data).toEqual({
+      name: 'data',
+      offset: 4,
+      size: null,
+      signed: null,
+      elemSize: 1,
+      elemSigned: false,
+      dims: [null],
+    });
     expect(agbcc.resolveVariable('g_flex.data')).toBeNull();
   });
 
@@ -117,6 +126,7 @@ describe('4. an unsized extern array is not [1]', () => {
       elemSize: 2,
       elemSigned: true,
       length: null,
+      dims: [null], // the rank IS known (1); only its extent is not
       volatile: false,
       const: true,
     });
@@ -128,8 +138,40 @@ describe('4. an unsized extern array is not [1]', () => {
       elemSize: 2,
       elemSigned: true,
       length: 1,
+      dims: [1],
       volatile: false,
       const: false,
     });
+  });
+});
+
+describe('5. an array RANK is not its element count', () => {
+  // `length` is the PRODUCT of the subranges, so it cannot say how many subscripts an
+  // element access takes — and `g[i]` on a `[2][3]` is a ROW, not an element. A consumer
+  // that only knows the flat count cannot spell an access that type-checks against the
+  // project's own header, which is exactly how a flattened rank surfaces: as a compile
+  // error in the world the header lives in, never as a wrong number.
+  it('reports every dimension of a fully-bounded array, outermost first', () => {
+    expect(agbcc.types.variableShape('g_grid3')).toMatchObject({ dims: [2, 3, 4], length: 24 });
+    expect(agbcc.types.variableShape('g_init_table')).toMatchObject({ dims: [2, 2], length: 4 });
+    expect(agbcc.types.variableShape('g_fwd_sized_table')).toMatchObject({ dims: [3, 2], length: 6 });
+  });
+
+  it('a DECLARATION keeps its INNER extents and loses only the unsized outer one', () => {
+    // `extern const short g_ext_grid[][4];` — agbcc spells the outer bound as upper_bound 0
+    // (indistinguishable from a real [1]), but the inner 4 IS written down, and the inner
+    // extents are the ones an element access needs.
+    expect(agbcc.types.variableShape('g_ext_grid')).toMatchObject({ dims: [null, 4] });
+  });
+
+  it('reports the rank of an array MEMBER too', () => {
+    const cells = agbcc.struct('Grid')!.members.find((m) => m.name === 'cells')!;
+    expect(cells).toMatchObject({ offset: 4, size: 12, elemSize: 2, length: 6, dims: [2, 3] });
+  });
+
+  it('control: a rank-1 array reports a one-entry rank, not none', () => {
+    // Absence of `dims` must mean "this is not an array", never "rank unknown" — a consumer
+    // gating on key presence would otherwise read every plain table as unranked.
+    expect(agbcc.types.variableShape('g_rom_table')).toMatchObject({ dims: [3] });
   });
 });

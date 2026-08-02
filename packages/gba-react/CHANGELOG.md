@@ -1,5 +1,11 @@
 # @gba-kit/gba-react
 
+## 0.5.0
+
+### Patch Changes
+
+- @gba-kit/gba-browser@0.5.0
+
 ## 0.4.0
 
 ### Patch Changes
