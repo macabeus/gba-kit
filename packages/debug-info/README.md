@@ -9,6 +9,12 @@ queries a source-level debugger needs:
 - **PC → C `file:line`** (`pcToSource`) — from the DWARF `.debug_line` table.
 - **type layout** (`struct`, `structMember`, `enumValues`) and **declaration shape**
   (`types.variableShape`) — from `.debug_info`.
+- **function signatures** (`types.functionSignature`) — return and parameter types of
+  every function the ELF compiled from C; `null` means "not compiled here", never
+  "takes no arguments".
+- **the `-g3` macro table** (`macros`, `parseDebugMacinfo`) — the only place an
+  address-cast `#define gCounter (*(u16 *)0x03001234)` name survives: a macro leaves
+  no symbol and no DIE.
 
 This is the general ELF/DWARF piece of gba-kit, not a GBA-only one:
 
@@ -40,6 +46,13 @@ di.pcToSource(0x0801466a);
 di.pcToFunction(0x0801466a)?.name; // 'PlayerRespawnOrDeath'
 di.symbolToAddress('InitLevelGameplay'); // 0x0800ca0c
 di.addressToSymbol(0x0801466a); // { name: 'PlayerRespawnOrDeath', offset: 0x46 }
+
+di.types.variableShape('gSineTable');
+// → { kind: 'array', elemSize: 2, elemSigned: true, length: null, const: true, volatile: false }
+di.types.functionSignature('ReadUnalignedU16');
+// → { returns: { size: 4, signed: false }, params: [{ name: 'ptr', size: 4, pointer: true, ... }], prototyped: true, ... }
+di.macros.find((m) => m.name === 'gGfxStreamBuffer'); // (a -g3 build records the macro table)
+// → { name: 'gGfxStreamBuffer', body: '(*(u32 *)0x030007C8)', line: 191 }
 ```
 
 ## Develop
