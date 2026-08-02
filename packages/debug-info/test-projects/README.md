@@ -15,6 +15,11 @@ The ARM pair compiles the same core shape — `add` / `square` (adjacent, exerci
 the sequence-boundary case), `bump`, `triple` (in a second `util.c` → multi-CU),
 `main`, and a global `g_counter` — with `-g -O2`.
 
+`agbcc-min` additionally carries the producer-quirk shapes `producer-quirks.spec.ts`
+pins (a struct forward-declared in the first CU and defined in the second, zero-length
+and unsized-extern arrays, an asm-defined table in `crt0.s`) — all appended after the
+shared core shape, which stays line-stable.
+
 `devkitarm-min` additionally carries a few shapes agbcc (GCC 2.95) can't compile:
 an anonymous union (`struct Shape`), an 8-byte `long long` global (`g_wide`),
 and a flexible array member (`struct Blob`). It's covered by a devkitarm-only test block.

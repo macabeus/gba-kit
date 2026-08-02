@@ -121,3 +121,48 @@ int main(void) {
     }
     return acc;
 }
+
+/* ---- Producer-quirk shapes (append-only; the oracle pins lines above). Each of
+ * these is a spelling agbcc encodes ambiguously or wrongly enough to have caused
+ * a real parser bug; producer-quirks.spec.ts pins the correct reading. */
+
+/* A struct this CU only ever sees FORWARD-DECLARED. The definition is in util.c,
+ * whose CU links AFTER this one: the by-name index must still prefer it, or this
+ * decl-only DIE (DW_AT_declaration, no members) shadows the layout. */
+struct FwdPay;
+struct FwdPay *g_fwd_ptr;
+
+/* agbcc encodes both of these subranges as upper_bound 0xffffffff (DW_FORM_data4
+ * holding -1): the pre-C99 zero-length trailing array, and — unlike modern gcc —
+ * even an initializer-SIZED array. Reading that as upper+1 = 2^32 once claimed a
+ * 4 GiB member. */
+struct Flex {
+    int n;
+    unsigned char data[0];
+};
+struct Flex g_flex;
+const unsigned short g_init_table[][2] = {{1, 2}, {3, 4}};
+
+/* An unsized extern array (defined in crt0.s, i.e. outside any C compilation —
+ * the ldscript-placed-table idiom). agbcc emits upper_bound 0 for it, byte-equal
+ * to a real [1]; DW_AT_declaration on the variable is the disambiguator. The
+ * sized local definition below pins that a REAL one-element array keeps its 1. */
+extern const short g_ext_table[];
+short g_one_def[1];
+
+/* Negative control for the two above: the pret forward-declared static table —
+ * declared unsized, used, then sized by its initializer. agbcc patches the type
+ * at the definition (upper bounds 2,1), so this must keep length 3*2 = 6. */
+static const unsigned short g_fwd_sized_table[][2];
+
+/* The GNU zero-length array as a GLOBAL: its subrange is upper_bound 0xffffffff
+ * at the variable level, the encoding that once became a 2^32-element shape. */
+unsigned char g_zero[0];
+
+int poke(int i) { /* keeps every shape above live in the DWARF */
+    g_one_def[0] = (short) (g_ext_table[i] + g_init_table[i & 1][0] + g_fwd_sized_table[i & 1][1]);
+    g_flex.n = i;
+    return g_fwd_ptr != 0 && g_zero == g_flex.data;
+}
+
+static const unsigned short g_fwd_sized_table[][2] = {{5, 6}, {7, 8}, {9, 10}};
