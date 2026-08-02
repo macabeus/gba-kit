@@ -39,8 +39,8 @@ typedef struct {
     int a;
     int b;
 } Pair;
-
 Pair g_pair;
+Pair *g_pair_ptr = &g_pair; // pointer to an UNNAMED struct: only the typedef names it
 
 // A tagged enum (explicit + continued values) and a typedef of an anonymous
 // enum — the parser must read both, and Mode via its typedef alias.
@@ -75,11 +75,25 @@ struct Bits {
 
 struct Bits g_bits;
 
-// An anonymous union member — its fields are accessed transparently as
-// g_shape.circle / g_shape.pair, so the parser must descend into the unnamed
-// union to resolve them. Layout: kind @0 (4), union @4 (4), size 8.
+// cv-qualified globals + a SIGNED narrow member — declaration facts that offsets and sizes alone
+// cannot carry: the volatile/const qualifiers variableShape must resolve through (and, for a
+// pointer, WHICH SIDE of the * they fall on), and each member's base-type signedness from struct().
+struct Cv {
+    signed char level;
+    volatile unsigned short gain; /* member-level volatile (the vu16-field MMIO idiom) */
+}; //   Cv: level @0 (1, signed)  gain @2 (2, unsigned)                 size 4
+
+volatile struct Cv g_cv;                // volatile struct (an MMIO-block idiom)
+volatile unsigned short g_mmio;         // volatile scalar (an MMIO register idiom)
+const short g_rom_table[3] = {1, 2, 3}; // const array (a ROM-table idiom)
+volatile struct Cv *g_cv_ptr;           // the TARGET is volatile — the qualifier is left of the *
+struct Cv *volatile g_cv_vptr;          // the mirror: the POINTER is volatile, its target is not
+
+// An anonymous union member — its fields are accessed transparently as g_shape.circle /
+// g_shape.pair, so the parser must descend into the unnamed union to resolve them. Its tag field
+// is const, the read-only-member idiom. Layout: kind @0 (4), union @4 (4), size 8.
 struct Shape {
-    int kind;
+    const int kind; /* const does not move a field, so it is only visible as a declaration fact */
     union {
         int circle;
         short pair;
@@ -118,6 +132,9 @@ __attribute__((noinline)) void bump(void) {
     g_mode = MODE_ON;                            // keep enum Mode live
     g_bits.cross = g_counter;                    // keep struct Bits + its type live
     g_bits.after = g_counter;
+    g_cv.level = (signed char) g_counter;        // keep struct Cv + its quals live
+    g_mmio = (unsigned short) g_counter;         // keep the volatile scalar live
+    g_probe.count = g_rom_table[g_counter & 1];  // keep the const table live
     g_shape.circle = g_counter;                  // keep struct Shape + its anon union live
     g_wide = g_counter;                          // keep g_wide live
     g_blob.len = g_counter;                      // keep struct Blob + its flexible array live
@@ -133,3 +150,12 @@ int main(void) {
     }
     return acc;
 }
+
+/* Macro-table fixtures, read from build/macinfo.o (see the Makefile's -g3 rule).
+ * The spellings a real decomp names fixed cells with. debug-macro.spec.ts asserts
+ * these by exact line number: append below, never insert above. */
+#define REG_DISPSTAT (*(volatile unsigned short *)0x04000004)
+#define g_save_slot (*(unsigned char *)0x03007FF0)
+#define EWRAM_BASE 0x02000000
+#define CLAMP(x, lo, hi) ((x) < (lo) ? (lo) : (x) > (hi) ? (hi) : (x))
+#define NO_BODY

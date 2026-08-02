@@ -17,3 +17,12 @@ _start:
 	.thumb_func
 __gccmain:
 	bx lr
+
+@ Data defined OUTSIDE C, mirroring a decomp's ldscript/asm-placed table: main.c
+@ declares `extern const short g_ext_table[];` and only this assembly defines it.
+@ Its DWARF is therefore a DECLARATION with no knowable bound (see main.c).
+	.section .rodata
+	.global g_ext_table
+	.align 1
+g_ext_table:
+	.hword 10, 20, 30, 40

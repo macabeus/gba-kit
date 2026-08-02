@@ -28,13 +28,22 @@ LDFLAGS := -nostdlib -Wl,-Ttext=0x08000000 -Wl,-e,main -Wl,--defsym,gAbsGlobal=0
 
 GEN_ORACLE := ../tools/gen-oracle.mjs
 
-# Default: build the ELF and its test oracle (build/oracle.json) together.
-all: build/min.elf build/oracle.json
+# Default: build the ELF, its test oracle (build/oracle.json) and the macro table.
+all: build/min.elf build/oracle.json build/macinfo.o
 .PHONY: all
 
 build/min.elf: source/main.c source/util.c source/util.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(LDFLAGS) source/main.c source/util.c -o $@
+
+# The macro table, compiled the way a decomp's macro sidecar is: -g3 records every
+# #define, and -gdwarf-2 -gstrict-dwarf keeps the record in ONE self-contained
+# .debug_macinfo with inline strings (plain -g3 emits DWARF 5's .debug_macro, split
+# across COMDAT groups and leaning on .debug_str). Relocatable on purpose — the
+# graft source in a real project is a .o, not a link.
+build/macinfo.o: source/main.c source/util.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -gdwarf-2 -g3 -gstrict-dwarf -c source/main.c -o $@
 
 # Oracle for the parser tests: nm/addr2line reference output for this exact ELF.
 build/oracle.json: build/min.elf $(GEN_ORACLE)

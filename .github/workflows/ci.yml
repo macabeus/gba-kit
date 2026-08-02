@@ -8,11 +8,20 @@ jobs:
         with:
           submodules: recursive
 
-      # GBA cross toolchain for the @gba-kit/debug-info test ELFs
+      # ARM cross toolchain for the @gba-kit/debug-info little-endian test ELFs
       - name: Install arm-none-eabi GCC 14
         uses: carlosperate/arm-none-eabi-gcc-action@v1
         with:
           release: '14.2.Rel1'
+
+      # Big-endian cross toolchains for the mips-min / ppc-min test projects. The
+      # runner is x86 Linux, so these stock Ubuntu packages run natively — no
+      # Docker or qemu. vitest's globalSetup rebuilds every project when CI is set.
+      - name: Install big-endian cross toolchains
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-mips-linux-gnu binutils-mips-linux-gnu \
+            gcc-powerpc-linux-gnu binutils-powerpc-linux-gnu
 
       # Build the agbcc (GCC 2.95) compiler from the submodule once
       - name: Resolve agbcc commit

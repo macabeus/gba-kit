@@ -8,8 +8,10 @@
  * enough to read any field straight out of memory.
  *
  * Handles the DIE forest in `.debug_info` (resolved against `.debug_abbrev` and
- * `.debug_str`) for DWARF 2–5 as emitted by agbcc (GCC 2.95) and modern
- * arm-none-eabi-gcc. 64-bit DWARF is not supported (GBA ELFs are 32-bit).
+ * `.debug_str`) for DWARF 2–5, in either byte order — a big-endian payload is read
+ * MSB-first, and bitfields there are allocated from the opposite end of the storage
+ * unit (see {@link bitfieldAbsBitOffset}). 64-bit DWARF is not supported (the ELFs
+ * are 32-bit).
  */
 import { ElfFile } from './elf.js';
 import { Cursor, cstrAt } from './reader.js';
@@ -26,6 +28,8 @@ const DW_TAG_typedef = 0x16;
 const DW_TAG_union_type = 0x17;
 const DW_TAG_base_type = 0x24;
 const DW_TAG_const_type = 0x26;
+const DW_TAG_subprogram = 0x2e;
+const DW_TAG_formal_parameter = 0x05;
 const DW_TAG_variable = 0x34;
 const DW_TAG_volatile_type = 0x35;
 const DW_TAG_restrict_type = 0x37;
@@ -41,7 +45,11 @@ const DW_AT_upper_bound = 0x2f;
 const DW_AT_data_bit_offset = 0x6b; // DWARF 4+ bitfield: absolute bit offset from the struct start
 const DW_AT_count = 0x37;
 const DW_AT_data_member_location = 0x38;
+const DW_AT_low_pc = 0x11; // present on a subprogram DEFINITION; absent on a mere declaration
+const DW_AT_abstract_origin = 0x31; // concrete half of an inlined-and-emitted definition → its abstract half
 const DW_AT_declaration = 0x3c;
+const DW_AT_prototyped = 0x27; // the declaration stated an argument list (not K&R)
+const DW_AT_encoding = 0x3e;
 const DW_AT_type = 0x49;
 const DW_AT_str_offsets_base = 0x72;
 
@@ -99,16 +107,102 @@ export interface StructMember {
   offset: number;
   /**
    * Bytes to read at `offset`. For a plain member this is the member's type size;
-   * for a bitfield it's the minimal little-endian span covering `bitOffset`+`bitWidth`.
+   * for a bitfield it's the minimal span covering `bitOffset`+`bitWidth`.
    */
   size: number | null;
   /**
-   * Bitfield only: right-shift to apply to the `size`-byte little-endian value read
-   * at `offset` to reach the field's least-significant bit. Absent for plain members.
+   * Signedness of the member's type, resolved through typedefs/cv-qualifiers to a base
+   * type (`DW_AT_encoding`); null when the member's type is not a base type (arrays,
+   * pointers, nested structs, enums). Offset and size alone do not carry it: the same
+   * byte reads as -1 or as 255 depending only on this.
+   */
+  signed: boolean | null;
+  /**
+   * Present (true) when the member's resolved type is a pointer. Disambiguates the
+   * `signed: null` 4-byte cases (pointer vs enum vs nested struct), which offset and
+   * size cannot tell apart and which differ in how the value may be compared
+   * (pointers compare as unsigned).
+   */
+  pointer?: true;
+  /**
+   * Pointer member only: the byte size of the type it points AT, when that type is a base
+   * type (`u16 *` → 2). Absent when the target is not a base type (`void *`, `struct S *`, a
+   * function pointer) or the DWARF does not size it.
+   *
+   * The member's own size is 4 whatever it addresses, so this describes the OTHER end — and it
+   * is not decoration: pointer arithmetic scales by it, so `p - 4` on a `u16 *` and on a
+   * `void *` address different bytes.
+   */
+  pointeeSize?: number;
+  /** Pointer member only: signedness of the pointed-at base type, on the same terms as
+   *  {@link pointeeSize} (`s8 *` → true). Absent whenever `pointeeSize` is. */
+  pointeeSigned?: boolean;
+  /**
+   * Present (true) when the member's type chain crosses a volatile qualifier — the
+   * `vu16 field;` MMIO idiom. Part of the declaration rather than of the layout: it
+   * says repeated accesses to the field are observable and not interchangeable.
+   */
+  volatile?: true;
+  /**
+   * Present (true) when the member's type chain crosses a const qualifier — the read-only-field
+   * idiom. Part of the declaration rather than of the layout, and not interchangeable with an
+   * unqualified member: a write through it is a constraint violation, not another spelling.
+   */
+  const?: true;
+  /**
+   * Bitfield only: right-shift to apply to the `size`-byte value read at `offset`
+   * — in the ELF's own byte order — to reach the field's least-significant bit.
+   * Absent for plain members. A big-endian target allocates bitfields MSB-first, so
+   * the same C declaration yields mirrored shifts there (see {@link TypeIndex}).
    */
   bitOffset?: number;
   /** Bitfield only: width in bits. Absent for plain members. */
   bitWidth?: number;
+  /**
+   * Array member only: the byte size of ONE element. `size` above is the WHOLE member
+   * (`u8 x[16]` → 16), so it cannot express where the n-th element of that member starts;
+   * this is the stride that does. Absent when the member's type is not an array — its
+   * presence is what identifies one. Spelled like {@link VariableShape}'s array arm.
+   */
+  elemSize?: number;
+  /**
+   * Array member only: signedness of the ELEMENT's base type — the same fact `signed` carries
+   * for a plain member (the same byte reads as -1 or as 255 depending only on it; `signed` is
+   * null for an array, whose own type is not a base type). Absent when the element is not a
+   * base type (an array of structs/pointers/enums), or the member is not an array.
+   */
+  elemSigned?: boolean;
+  /**
+   * Array member only: the element count — the product of the DW_TAG_subrange dimensions, so a
+   * multidimensional member reports its total. Absent when no dimension bounds it (a flexible
+   * array member, `char data[]`, which declares a stride but no length).
+   */
+  length?: number;
+}
+
+/** The width/signedness facts of one declared type — shared by a parameter and a return type. */
+export interface TypeFacts {
+  /** byte width, or null when the DWARF does not size the type */
+  size: number | null;
+  /** base-type signedness; null when the type is not a base type (pointer, struct, enum, array) */
+  signed: boolean | null;
+  /** the resolved type is a pointer */
+  pointer?: true;
+  /** the type chain crosses a volatile qualifier */
+  volatile?: true;
+  /** the type chain crosses a const qualifier */
+  const?: true;
+}
+
+/** A compiled function's declared signature — see {@link TypeIndex.functionSignature}. */
+export interface FunctionSignature {
+  name: string;
+  /** the return type's facts, or null for a `void` function */
+  returns: TypeFacts | null;
+  params: (TypeFacts & { name: string | null })[];
+  /** the declaration stated an argument list; false means K&R, where `params` being empty says
+   *  nothing about how many arguments the function takes */
+  prototyped: boolean;
 }
 
 export interface StructType {
@@ -119,8 +213,67 @@ export interface StructType {
   members: StructMember[];
 }
 
-/** A member's read location: its byte offset + size, plus bitfield shift/width. */
-export type MemberLocation = Omit<StructMember, 'name'>;
+/**
+ * The declaration SHAPE of a global variable — what kind of thing its C type is, resolved
+ * through typedefs and cv-qualifiers. A small closed set, for a consumer that needs to know how
+ * a name is declared (`extern u16 tbl[]` vs a scalar vs a struct) without a full DIE→C-type
+ * renderer.
+ *
+ * The cv-qualifiers crossed while resolving are part of the shape: `volatile` says accesses to
+ * the object are observable and may not be folded or reordered, `const` that it is read-only
+ * (the ROM-table spelling). For arrays the element chain's qualifiers count too — `const u16
+ * tbl[]` qualifies the element type in DWARF. On the `pointer` arm they are the POINTER
+ * variable's own qualifiers (`struct S *volatile g`); what it points at carries its own, on
+ * {@link PointeeStruct}.
+ *
+ * The `struct` arm's `structName` is the name {@link TypeIndex.struct} looks the layout up by,
+ * under the same rule as {@link PointeeStruct}: the tag when the type has one, otherwise the
+ * typedef alias that names it.
+ */
+export type VariableShape =
+  | { kind: 'scalar'; size: number | null; signed: boolean | null; volatile: boolean; const: boolean }
+  | { kind: 'pointer'; pointee: PointeeStruct | null; volatile: boolean; const: boolean }
+  | {
+      kind: 'array';
+      elemSize: number | null;
+      elemSigned: boolean | null;
+      length: number | null;
+      volatile: boolean;
+      const: boolean;
+    }
+  | { kind: 'struct'; structName: string | null; size: number | null; volatile: boolean; const: boolean };
+
+/**
+ * What a `pointer` shape points AT, when its target resolves (through typedefs/cv-qualifiers) to
+ * a struct or union: enough to name that type and to size it, without a full DIE→C-type renderer.
+ * `null` on the pointer arm when the target is anything else — a scalar, another pointer, a
+ * function, or `void`.
+ *
+ * `structName` is the name {@link TypeIndex.struct} looks the layout up by, which is not always a
+ * tag: for the `typedef struct {…} T;` idiom the struct itself is unnamed and `T` is the only name
+ * it has, so the last typedef alias crossed on the way is reported instead. Null when the target
+ * has neither — an unnamed struct reached without an alias, whose layout no name can retrieve.
+ *
+ * `volatile` / `const` are the TARGET's qualifiers — the ones a declaration spells to the LEFT of
+ * the `*` (`volatile struct S *g`): accesses made THROUGH the pointer are observable / read-only.
+ * They are a different fact from the pointer variable's own qualifiers to the right of it
+ * (`struct S *volatile g`), which stay on the enclosing {@link VariableShape}.
+ */
+export interface PointeeStruct {
+  structName: string | null;
+  /** DW_AT_byte_size of the target struct/union, or null if absent (an incomplete type). */
+  size: number | null;
+  volatile: boolean;
+  const: boolean;
+}
+
+/** A member's read location: its byte offset + size, plus bitfield shift/width. (Signedness,
+ *  pointer-ness, cv-qualifiers and the array element facts are declaration facts, not locations —
+ *  they stay on {@link StructMember} / `struct()`.) */
+export type MemberLocation = Omit<
+  StructMember,
+  'name' | 'signed' | 'pointer' | 'volatile' | 'const' | 'elemSize' | 'elemSigned' | 'length'
+>;
 
 /** A parsed DIE: its tag plus the attributes we kept, and its child DIEs. */
 interface Die {
@@ -142,6 +295,8 @@ type AttrValue = number | string | Uint8Array | boolean;
 
 /** The DWARF string sections an attribute form may resolve a name against. */
 interface DebugStrings {
+  /** byte order of the DWARF payload (matches the ELF container) */
+  littleEndian: boolean;
   /** `.debug_str` — DW_FORM_strp and the targets of DW_FORM_strx. */
   str: Uint8Array;
   /** `.debug_line_str` — DW_FORM_line_strp. */
@@ -183,9 +338,13 @@ export class TypeIndex {
   readonly #typedefByName = new Map<string, Die>();
   /** global/static variable name → its DIE (carries DW_AT_type). */
   readonly #variableByName = new Map<string, Die>();
+  readonly #functionByName = new Map<string, Die>();
+  /** Byte order of the target — decides which end bitfields are allocated from. */
+  readonly #littleEndian: boolean;
 
   /** Use {@link TypeIndex.fromElf}; this constructor is an internal detail. */
-  constructor(roots: Die[]) {
+  constructor(roots: Die[], littleEndian = true) {
+    this.#littleEndian = littleEndian;
     const index = (die: Die): void => {
       this.#byOffset.set(die.offset, die);
       for (const child of die.children) {
@@ -197,7 +356,13 @@ export class TypeIndex {
     }
 
     for (const die of this.#byOffset.values()) {
-      const name = die.attrs.get(DW_AT_name);
+      let name = die.attrs.get(DW_AT_name);
+      if (typeof name !== 'string' && die.tag === DW_TAG_subprogram && die.attrs.has(DW_AT_low_pc)) {
+        // Modern gcc at -O1+ splits a function that is both inlined and emitted into an
+        // ABSTRACT DIE (name, params) and a CONCRETE one (low_pc) referencing it. The
+        // pair is one definition; the concrete half is indexed under the abstract name.
+        name = this.#deref(die.attrs.get(DW_AT_abstract_origin))?.attrs.get(DW_AT_name);
+      }
       if (typeof name !== 'string') {
         continue;
       }
@@ -215,6 +380,13 @@ export class TypeIndex {
         }
       } else if (die.tag === DW_TAG_typedef && !this.#typedefByName.has(name)) {
         this.#typedefByName.set(name, die);
+      } else if (die.tag === DW_TAG_subprogram) {
+        // Index DEFINITIONS only. A compiler emits a subprogram DIE for a function it
+        // COMPILED; a body-less declaration carries no parameter list worth reading, and
+        // (for gcc-2.x) is not emitted at all. `low_pc` is the definition witness.
+        if (die.attrs.has(DW_AT_low_pc) && !this.#functionByName.has(name)) {
+          this.#functionByName.set(name, die);
+        }
       } else if (die.tag === DW_TAG_variable && die.attrs.has(DW_AT_type)) {
         const existing = this.#variableByName.get(name);
         // The same global appears once per CU that includes its header; most are
@@ -250,7 +422,7 @@ export class TypeIndex {
       if (typeof memberName !== 'string') {
         continue; // anonymous member (e.g. an unnamed union) — skip
       }
-      members.push({ name: memberName, ...this.#memberLayout(child) });
+      members.push({ name: memberName, ...this.#memberLayout(child), ...this.#memberFacts(child) });
     }
     return { name, size: numberAttr(die, DW_AT_byte_size), members };
   }
@@ -285,6 +457,146 @@ export class TypeIndex {
   variableSize(varName: string): number | null {
     const variable = this.#variableByName.get(varName);
     return variable ? this.#typeRefSize(variable.attrs.get(DW_AT_type)) : null;
+  }
+
+  /**
+   * Classify a global/static variable's declaration shape (scalar | pointer | array | struct),
+   * resolved through typedefs/cv-qualifiers. `null` when the variable has no DWARF DIE — which
+   * also makes this the "is this name declared in the project headers?" probe. An unsized
+   * extern array (`extern u16 tbl[]`) classifies as `array` with `length: null`.
+   */
+  /**
+   * The DECLARED signature of a compiled function: what it returns and the type of each
+   * parameter, as the compiler recorded them.
+   *
+   * Only functions the ELF was compiled WITH a body for are known — `low_pc` is the witness. A
+   * function that is still hand-written assembly, or merely declared in a header, has no
+   * subprogram DIE at all (gcc-2.x drops body-less declarations outright), so `null` here means
+   * "this ELF did not compile that function", never "it takes no arguments".
+   *
+   * `returns: null` is a `void` function. `params` is the DEFINITION's own parameter list and is
+   * authoritative even when `prototyped` is false — that flag describes how the function was
+   * DECLARED (gcc-2.x never sets it), not what it was compiled to take.
+   */
+  functionSignature(fnName: string): FunctionSignature | null {
+    const fn = this.#functionByName.get(fnName);
+    if (!fn) {
+      return null;
+    }
+    // For a split definition the DECLARED facts (params, return type, prototyped) live on
+    // the abstract DIE; the concrete one contributes the address and parameter DIEs that
+    // are themselves just abstract_origin references. Read each fact where it was written.
+    const decl = this.#deref(fn.attrs.get(DW_AT_abstract_origin)) ?? fn;
+    const params = decl.children
+      .filter((c) => c.tag === DW_TAG_formal_parameter)
+      .map((c) => {
+        const p = c.attrs.has(DW_AT_type) ? c : (this.#deref(c.attrs.get(DW_AT_abstract_origin)) ?? c);
+        const name = p.attrs.get(DW_AT_name);
+        return {
+          name: typeof name === 'string' ? name : null,
+          ...this.#typeFacts(p.attrs.get(DW_AT_type)),
+        };
+      });
+    return {
+      name: fnName,
+      returns: decl.attrs.has(DW_AT_type) ? this.#typeFacts(decl.attrs.get(DW_AT_type)) : null,
+      params,
+      prototyped: decl.attrs.get(DW_AT_prototyped) === true,
+    };
+  }
+
+  /** The width/signedness/pointer-ness of a type reference, resolved through typedef and
+   *  cv-qualifier chains — the same vocabulary {@link StructMember} uses for a plain member, so a
+   *  parameter and a field of the same declared type describe identically. */
+  #typeFacts(ref: AttrValue | undefined): TypeFacts {
+    const cv = { volatile: false, const: false };
+    const die = this.#stripTypedefs(ref, cv);
+    return {
+      size: this.#typeRefSize(ref),
+      signed: die ? baseTypeSignedness(die) : null,
+      ...(die?.tag === DW_TAG_pointer_type ? { pointer: true as const } : {}),
+      ...(cv.volatile ? { volatile: true as const } : {}),
+      ...(cv.const ? { const: true as const } : {}),
+    };
+  }
+
+  variableShape(varName: string): VariableShape | null {
+    const variable = this.#variableByName.get(varName);
+    if (!variable) {
+      return null;
+    }
+    const cv = { volatile: false, const: false };
+    const alias = { typedef: null as string | null };
+    const die = this.#stripTypedefs(variable.attrs.get(DW_AT_type), cv, alias);
+    if (!die) {
+      return null;
+    }
+    switch (die.tag) {
+      case DW_TAG_pointer_type:
+        return { kind: 'pointer', pointee: this.#pointee(die.attrs.get(DW_AT_type)), ...cv };
+      case DW_TAG_array_type: {
+        // The element chain's qualifiers count toward the variable's declaration
+        // (`const u16 tbl[]` qualifies the ELEMENT type in DWARF) — collect into the same cv.
+        const elem = this.#stripTypedefs(die.attrs.get(DW_AT_type), cv);
+        const length = arrayLength(die);
+        return {
+          kind: 'array',
+          elemSize: this.#typeRefSize(die.attrs.get(DW_AT_type)),
+          elemSigned: elem ? baseTypeSignedness(elem) : null,
+          // A DECLARATION's [1] is GCC 2.95's spelling of an UNSIZED extern array
+          // (upper_bound 0, byte-identical to a real [1]). No compilation ever saw the
+          // size, so it is reported unknown; the rare genuine `extern T x[1]` loses a
+          // near-information-free fact. A DEFINED [1] keeps its length — the definition
+          // is the witness.
+          length: isDeclaration(variable) && length === 1 ? null : length,
+          ...cv,
+        };
+      }
+      case DW_TAG_structure_type:
+      case DW_TAG_union_type:
+        return { kind: 'struct', ...this.#structTarget(die, alias), ...cv };
+      default:
+        return {
+          kind: 'scalar',
+          size: this.#typeRefSize(variable.attrs.get(DW_AT_type)),
+          signed: baseTypeSignedness(die),
+          ...cv,
+        };
+    }
+  }
+
+  /**
+   * The struct/union a pointer's target resolves to, named the way {@link TypeIndex.struct} looks
+   * a layout up and carrying the target's own cv-qualifiers (see {@link PointeeStruct}), or null
+   * when the target is not a struct/union. The qualifiers are those crossed BETWEEN the pointer
+   * and its target, so they are the pointee's alone — the pointer variable's own are accumulated
+   * by the separate walk that reached the `DW_TAG_pointer_type` DIE.
+   */
+  #pointee(ref: AttrValue | undefined): PointeeStruct | null {
+    const cv = { volatile: false, const: false };
+    const alias = { typedef: null as string | null };
+    const die = this.#stripTypedefs(ref, cv, alias);
+    if (!die || (die.tag !== DW_TAG_structure_type && die.tag !== DW_TAG_union_type)) {
+      return null;
+    }
+    return { ...this.#structTarget(die, alias), ...cv };
+  }
+
+  /**
+   * Name and size a resolved struct/union DIE, given the `alias` accumulated by the walk that
+   * reached it. The name is the one {@link TypeIndex.struct} looks a layout up by: the tag when
+   * the type has one, else the last typedef crossed — the `typedef struct {…} T;` idiom leaves
+   * the struct unnamed, so `T` is the only name its layout has. A DIE that is only a forward
+   * declaration carries no `DW_AT_byte_size`, so the size is read from the definition its tag
+   * resolves to.
+   */
+  #structTarget(die: Die, alias: { typedef: string | null }): { structName: string | null; size: number | null } {
+    const tag = die.attrs.get(DW_AT_name);
+    const defined = isDeclaration(die) ? this.#resolveStructByName(asString(tag)) : die;
+    return {
+      structName: typeof tag === 'string' ? tag : alias.typedef,
+      size: defined ? numberAttr(defined, DW_AT_byte_size) : null,
+    };
   }
 
   /** Walk `path` from a struct/union DIE, accumulating member byte offsets. */
@@ -375,16 +687,17 @@ export class TypeIndex {
       return new TypeIndex([]);
     }
     const strings: DebugStrings = {
+      littleEndian: elf.littleEndian,
       str: elf.sectionData('.debug_str') ?? new Uint8Array(0),
       lineStr: elf.sectionData('.debug_line_str') ?? new Uint8Array(0),
       strOffsets: elf.sectionData('.debug_str_offsets') ?? new Uint8Array(0),
     };
     try {
-      return new TypeIndex(parseDebugInfo(info, abbrev, strings));
+      return new TypeIndex(parseDebugInfo(info, abbrev, strings), elf.littleEndian);
     } catch {
       // Type parsing is best-effort: a malformed .debug_info must never take down
       // the rest of DebugInfo (symbols, line table). Fall back to "no types".
-      return new TypeIndex([]);
+      return new TypeIndex([], elf.littleEndian);
     }
   }
 
@@ -416,8 +729,9 @@ export class TypeIndex {
    * Compute a member's read location. Plain members report `{ offset, size }`
    * (byte offset + type size). Bitfields additionally report `{ bitOffset, bitWidth }`
    * and a minimal byte `offset`/`size` such that
-   * `(read(offset, size) >>> bitOffset) & (2 ** bitWidth - 1)` is the field value
-   * (the `2 **` form stays correct for a full-width 32-bit field, where `1 << 32` wraps).
+   * `(read(offset, size) >>> bitOffset) & (2 ** bitWidth - 1)` is the field value,
+   * where `read` decodes `size` bytes in the ELF's own byte order (the `2 **` form
+   * stays correct for a full-width 32-bit field, where `1 << 32` wraps).
    */
   #memberLayout(member: Die): MemberLocation {
     const bitWidth = numberAttr(member, DW_AT_bit_size);
@@ -425,12 +739,17 @@ export class TypeIndex {
     if (bitWidth === null) {
       return { offset: memberOffset(member), size: typeSize };
     }
-    // Bitfield: normalize both DWARF encodings to an absolute bit offset, then to a
-    // little-endian byte read (offset + minimal byte span + intra-byte shift).
-    const absBitOffset = bitfieldAbsBitOffset(member, typeSize);
+    // Bitfield: normalize both DWARF encodings to an absolute bit offset counted from
+    // the end the target allocates from, then to a byte read (offset + minimal byte
+    // span + intra-unit shift).
+    const absBitOffset = bitfieldAbsBitOffset(member, typeSize, this.#littleEndian);
     const offset = absBitOffset >> 3;
-    const bitOffset = absBitOffset & 7;
-    return { offset, size: Math.ceil((bitOffset + bitWidth) / 8), bitOffset, bitWidth };
+    const bitsIntoByte = absBitOffset & 7;
+    const size = Math.ceil((bitsIntoByte + bitWidth) / 8);
+    // Little-endian: the bits counted so far already sit below the field, so they ARE
+    // the shift. Big-endian: they sit above it, so the shift is what remains beneath.
+    const bitOffset = this.#littleEndian ? bitsIntoByte : size * 8 - bitsIntoByte - bitWidth;
+    return { offset, size, bitOffset, bitWidth };
   }
 
   /** Follow a type reference through typedef/qualifier chains to a struct/union. */
@@ -469,11 +788,85 @@ export class TypeIndex {
     }
   }
 
-  /** Follow typedef / cv-qualifier links to the underlying type DIE (cycle-guarded). */
-  #stripTypedefs(ref: AttrValue | undefined): Die | null {
+  /** A member's declaration facts: base-type signedness, pointer-ness, its cv-qualifiers, and —
+   *  for an array member — its element stride/signedness/count, all resolved through
+   *  typedef/cv-qualifier chains (see the {@link StructMember} field docs). */
+  #memberFacts(
+    member: Die,
+  ): Pick<
+    StructMember,
+    'signed' | 'pointer' | 'pointeeSize' | 'pointeeSigned' | 'volatile' | 'const' | 'elemSize' | 'elemSigned' | 'length'
+  > {
+    const cv = { volatile: false, const: false };
+    const die = this.#stripTypedefs(member.attrs.get(DW_AT_type), cv);
+    return {
+      signed: die ? baseTypeSignedness(die) : null,
+      ...(die?.tag === DW_TAG_pointer_type ? { pointer: true as const, ...this.#pointeeFacts(die) } : {}),
+      ...(cv.volatile ? { volatile: true as const } : {}),
+      ...(cv.const ? { const: true as const } : {}),
+      ...(die?.tag === DW_TAG_array_type ? this.#arrayFacts(die) : {}),
+    };
+  }
+
+  /** A pointer member's target facts, when the target resolves to a BASE type. Anything else —
+   *  `void *`, a struct/function pointer, an unsized target — reports nothing, so a present key
+   *  is always a fact rather than a default. */
+  #pointeeFacts(pointerDie: Die): Pick<StructMember, 'pointeeSize' | 'pointeeSigned'> {
+    const targetRef = pointerDie.attrs.get(DW_AT_type);
+    const target = this.#stripTypedefs(targetRef);
+    if (!target || target.tag !== DW_TAG_base_type) {
+      return {};
+    }
+    const pointeeSize = this.#typeRefSize(targetRef);
+    const pointeeSigned = baseTypeSignedness(target);
+    return {
+      ...(pointeeSize !== null ? { pointeeSize } : {}),
+      ...(pointeeSigned !== null ? { pointeeSigned } : {}),
+    };
+  }
+
+  /** An array member's element facts. Each is omitted when the DWARF does not determine it — an
+   *  unsized element type has no stride, a flexible array member no length — so a present key is
+   *  always a fact, never a default. */
+  #arrayFacts(arrayDie: Die): Pick<StructMember, 'elemSize' | 'elemSigned' | 'length'> {
+    const elemRef = arrayDie.attrs.get(DW_AT_type);
+    const elem = this.#stripTypedefs(elemRef);
+    const elemSize = this.#typeRefSize(elemRef);
+    const elemSigned = elem ? baseTypeSignedness(elem) : null;
+    const length = arrayLength(arrayDie);
+    return {
+      ...(elemSize !== null ? { elemSize } : {}),
+      ...(elemSigned !== null ? { elemSigned } : {}),
+      ...(length !== null ? { length } : {}),
+    };
+  }
+
+  /** Follow typedef / cv-qualifier links to the underlying type DIE (cycle-guarded). With a
+   *  `cv` accumulator, the const/volatile qualifiers crossed on the way are recorded into it —
+   *  callers that report a declaration (variableShape, #memberFacts) need them; callers that
+   *  only want the underlying type omit it. The `alias` accumulator is the same idea for the last
+   *  TYPEDEF name crossed, which naming an unnamed struct needs (see {@link #structTarget}) and the
+   *  cv object must not carry (it is spread straight into a declaration shape). */
+  #stripTypedefs(
+    ref: AttrValue | undefined,
+    cv?: { volatile: boolean; const: boolean },
+    alias?: { typedef: string | null },
+  ): Die | null {
     let die = this.#deref(ref);
     const seen = new Set<number>();
     while (die && isQualifierOrTypedef(die.tag) && !seen.has(die.offset)) {
+      if (cv && die.tag === DW_TAG_volatile_type) {
+        cv.volatile = true;
+      }
+      if (cv && die.tag === DW_TAG_const_type) {
+        cv.const = true;
+      }
+      if (alias && die.tag === DW_TAG_typedef) {
+        const name = die.attrs.get(DW_AT_name);
+        if (typeof name === 'string') {
+          alias.typedef = name;
+        }
+      }
       seen.add(die.offset);
       die = this.#deref(die.attrs.get(DW_AT_type));
     }
@@ -516,20 +909,26 @@ function memberOffset(member: Die): number {
 }
 
 /**
- * Absolute bit offset of a bitfield member from the start of its struct, normalized
- * across the two DWARF encodings:
- *  - DWARF 4+: `DW_AT_data_bit_offset` is already that absolute bit offset.
+ * Absolute bit offset of a bitfield member from the start of its struct, counted from
+ * the end the target allocates bitfields from: the LSB of the first byte on a
+ * little-endian target, the MSB of it on a big-endian one. Normalized across the two
+ * DWARF encodings:
+ *  - DWARF 4+: `DW_AT_data_bit_offset` is already that offset — DWARF numbers bits
+ *    from the same end the target allocates from, so it needs no adjustment.
  *  - DWARF 2/3: `DW_AT_bit_offset` counts from the MSB of the storage unit (whose
- *    byte size is `DW_AT_byte_size`, at `DW_AT_data_member_location`). On a
- *    little-endian target the LSB offset within the unit is
- *    `storageBits - bit_offset - bit_size`.
+ *    byte size is `DW_AT_byte_size`, at `DW_AT_data_member_location`). That is
+ *    already the big-endian answer; on little-endian the offset within the unit
+ *    flips to `storageBits - bit_offset - bit_size`.
  */
-function bitfieldAbsBitOffset(member: Die, typeSize: number | null): number {
+function bitfieldAbsBitOffset(member: Die, typeSize: number | null, littleEndian: boolean): number {
   const dataBitOffset = numberAttr(member, DW_AT_data_bit_offset);
   if (dataBitOffset !== null) {
     return dataBitOffset;
   }
   const bitOffsetFromMsb = numberAttr(member, DW_AT_bit_offset) ?? 0;
+  if (!littleEndian) {
+    return memberOffset(member) * 8 + bitOffsetFromMsb;
+  }
   const bitWidth = numberAttr(member, DW_AT_bit_size) ?? 0;
   const storageBytes = numberAttr(member, DW_AT_byte_size) ?? typeSize ?? 0;
   const lsbWithinUnit = storageBytes * 8 - bitOffsetFromMsb - bitWidth;
@@ -550,7 +949,10 @@ function arrayLength(arrayDie: Die): number | null {
     }
     sawDimension = true;
     const explicit = numberAttr(child, DW_AT_count);
-    const upper = numberAttr(child, DW_AT_upper_bound);
+    const rawUpper = numberAttr(child, DW_AT_upper_bound);
+    // GCC 2.95 stores a zero-length array's -1 upper bound in UNSIGNED DW_FORM_data4;
+    // read raw, upper+1 would claim 2^32 elements. Normalize to the modern sdata reading.
+    const upper = rawUpper === 0xffffffff ? -1 : rawUpper;
     const dim = explicit !== null ? explicit : upper !== null ? upper + 1 : null;
     if (dim === null || dim <= 0) {
       return null;
@@ -558,6 +960,16 @@ function arrayLength(arrayDie: Die): number | null {
     count *= dim;
   }
   return sawDimension ? count : null;
+}
+
+/** Signedness of a base type from DW_AT_encoding (DW_ATE_signed/signed_char = signed;
+ *  unsigned/unsigned_char/boolean = unsigned). Non-base types (enums, etc.) → null. */
+function baseTypeSignedness(die: Die): boolean | null {
+  if (die.tag !== DW_TAG_base_type) {
+    return null;
+  }
+  const enc = numberAttr(die, DW_AT_encoding);
+  return enc === null ? null : enc === 0x05 || enc === 0x06;
 }
 
 function numberAttr(die: Die, attr: number): number | null {
@@ -590,9 +1002,9 @@ interface CuHeader {
  * DWARF), or the first truncated/inconsistent header — returning the units decoded
  * so far rather than throwing, so a malformed tail unit can't lose the whole section.
  */
-function collectCuHeaders(info: Uint8Array): CuHeader[] {
+function collectCuHeaders(info: Uint8Array, littleEndian: boolean): CuHeader[] {
   const headers: CuHeader[] = [];
-  const c = new Cursor(info);
+  const c = new Cursor(info, 0, littleEndian);
   while (c.remaining >= 4) {
     const cuStart = c.offset;
     const unitLength = c.u32();
@@ -630,12 +1042,12 @@ function collectCuHeaders(info: Uint8Array): CuHeader[] {
 function parseDebugInfo(info: Uint8Array, abbrev: Uint8Array, strings: DebugStrings): Die[] {
   const roots: Die[] = [];
   const abbrevTables = new Map<number, Map<number, Abbrev>>();
-  const headers = collectCuHeaders(info);
+  const headers = collectCuHeaders(info, strings.littleEndian);
   // agbcc (DWARF-2) does not emit a trailing 0-code terminator on each abbrev
   // table — tables abut and are delimited only by the CUs' debug_abbrev_offset.
   // Bound each table to the next one's start (in addition to the 0-code terminator).
   const boundaries = abbrevTableBoundaries(headers, abbrev.length);
-  const c = new Cursor(info);
+  const c = new Cursor(info, 0, strings.littleEndian);
 
   for (const h of headers) {
     // Skeleton/split units carry a dwo_id we don't handle — skip the unit.
@@ -798,8 +1210,12 @@ function readForm(
     case DW_FORM_addr:
       return readBytes(c, ctx.addressSize);
     case DW_FORM_data1:
-    case DW_FORM_flag:
       return c.u8();
+    case DW_FORM_flag:
+      // DWARF 2/3's boolean form (a byte). Returning the raw number made every `=== true`
+      // test in this file inert on those dialects — only DWARF 4+'s flag_present produced
+      // a boolean. A flag is a fact, not a number.
+      return c.u8() !== 0;
     case DW_FORM_data2:
       return c.u16();
     case DW_FORM_data4:
@@ -909,6 +1325,6 @@ function resolveStrx(index: number, ctx: UnitContext, strings: DebugStrings): st
   if (at + 4 > strings.strOffsets.length) {
     return '';
   }
-  const c = new Cursor(strings.strOffsets);
+  const c = new Cursor(strings.strOffsets, 0, strings.littleEndian);
   return cstrAt(strings.str, c.u32At(at));
 }

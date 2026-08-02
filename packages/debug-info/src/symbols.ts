@@ -79,7 +79,7 @@ export class SymbolIndex {
     const strtab = elf.sectionDataByIndex(symtab.link) ?? new Uint8Array(0);
 
     const SYM_SIZE = 16; // Elf32_Sym
-    const c = new Cursor(data);
+    const c = new Cursor(data, 0, elf.littleEndian);
     const symbols: ElfSymbol[] = [];
     for (let off = 0; off + SYM_SIZE <= data.length; off += SYM_SIZE) {
       const stName = c.u32At(off);

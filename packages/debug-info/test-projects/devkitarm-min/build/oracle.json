@@ -1,58 +1,59 @@
 {
   "symbols": {
     "add": 134217756,
-    "__bss_end__": 134222040,
-    "_bss_end__": 134222040,
-    "__bss_start": 134221960,
-    "__bss_start__": 134221960,
+    "__bss_end__": 134222088,
+    "_bss_end__": 134222088,
+    "__bss_start": 134221992,
+    "__bss_start__": 134221992,
     "bump": 134217768,
-    "__data_start": 134221956,
-    "_edata": 134221956,
-    "__end__": 134222040,
-    "_end": 134222040,
+    "__data_start": 134221988,
+    "_edata": 134221992,
+    "__end__": 134222088,
+    "_end": 134222088,
     "gAbsGlobal": 50336308,
-    "g_bits": 134222008,
-    "g_blob": 134222032,
-    "g_color": 134222004,
-    "g_counter": 134221960,
-    "g_mode": 134222005,
-    "g_pair": 134221996,
-    "g_probe": 134221964,
-    "g_shape": 134222016,
-    "g_util_pair": 134222036,
-    "g_wide": 134222024,
+    "g_bits": 134222040,
+    "g_blob": 134222072,
+    "g_color": 134222036,
+    "g_counter": 134221992,
+    "g_cv": 134222048,
+    "g_cv_ptr": 134222080,
+    "g_cv_vptr": 134222076,
+    "g_mmio": 134222052,
+    "g_mode": 134222037,
+    "g_pair": 134222028,
+    "g_pair_ptr": 134221988,
+    "g_probe": 134221996,
+    "g_rom_table": 134217884,
+    "g_shape": 134222056,
+    "g_util_pair": 134222084,
+    "g_wide": 134222064,
     "main": 134217728,
     "square": 134217760,
     "_stack": 524288,
-    "triple": 134217844
+    "triple": 134217868
   },
   "lines": {
     "0x800001c": {
       "func": "add",
       "file": "main.c",
-      "line": 106
+      "line": 120
     },
     "0x8000028": {
       "func": "bump",
       "file": "main.c",
-      "line": 114
-    },
-    "0x8001084": {
-      "func": "??",
-      "file": "??",
-      "line": 0
+      "line": 128
     },
     "0x8000000": {
       "func": "main",
       "file": "main.c",
-      "line": 126
+      "line": 143
     },
     "0x8000020": {
       "func": "square",
       "file": "main.c",
-      "line": 110
+      "line": 124
     },
-    "0x8000074": {
+    "0x800008c": {
       "func": "triple",
       "file": "util.c",
       "line": 17

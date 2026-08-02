@@ -1,4 +1,3 @@
 build/*
 !build/min.elf
 !build/oracle.json
-!build/macinfo.o

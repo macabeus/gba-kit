@@ -1,16 +1,19 @@
 /**
- * Little-endian byte cursor to walk ELF tables and DWARF programs.
- * Tailored for ELF/DWARF relevant for ARM GBA.
+ * Byte cursor to walk ELF tables and DWARF programs. Little-endian by default
+ * (ARM GBA); big-endian for MSB-first targets (MIPS, PowerPC) — the DWARF
+ * payload's byte order always matches its ELF container's.
  */
 export class Cursor {
   readonly view: DataView;
   readonly bytes: Uint8Array;
+  readonly littleEndian: boolean;
   offset: number;
 
-  constructor(bytes: Uint8Array, offset = 0) {
+  constructor(bytes: Uint8Array, offset = 0, littleEndian = true) {
     this.bytes = bytes;
     this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     this.offset = offset;
+    this.littleEndian = littleEndian;
   }
 
   get eof(): boolean {
@@ -38,28 +41,28 @@ export class Cursor {
   }
 
   u16(): number {
-    const v = this.view.getUint16(this.offset, true);
+    const v = this.view.getUint16(this.offset, this.littleEndian);
     this.offset += 2;
     return v;
   }
 
   u32(): number {
-    const v = this.view.getUint32(this.offset, true);
+    const v = this.view.getUint32(this.offset, this.littleEndian);
     this.offset += 4;
     return v >>> 0;
   }
 
-  /** Absolute little-endian reads that don't move `offset` (for fixed-layout tables). */
+  /** Absolute reads that don't move `offset` (for fixed-layout tables). */
   u8At(offset: number): number {
     return this.view.getUint8(offset);
   }
 
   u16At(offset: number): number {
-    return this.view.getUint16(offset, true);
+    return this.view.getUint16(offset, this.littleEndian);
   }
 
   u32At(offset: number): number {
-    return this.view.getUint32(offset, true) >>> 0;
+    return this.view.getUint32(offset, this.littleEndian) >>> 0;
   }
 
   /** Unsigned LEB128 */

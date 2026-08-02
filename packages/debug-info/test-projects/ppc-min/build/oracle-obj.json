@@ -1,0 +1,34 @@
+{
+  "symbols": {
+    "add": 0,
+    "bump": 32,
+    "g_bits": 4,
+    "g_counter": 28,
+    "g_cv": 0,
+    "g_probe": 0,
+    "g_probe_ptr": 0,
+    "g_ptr": 24,
+    "g_rom_table": 4,
+    "g_table": 16,
+    "g_vol": 12,
+    "main": 0,
+    "square": 16
+  },
+  "lines": {
+    "0x0": {
+      "func": "add",
+      "file": "main.c",
+      "line": 79
+    },
+    "0x20": {
+      "func": "bump",
+      "file": "main.c",
+      "line": 85
+    },
+    "0x10": {
+      "func": "square",
+      "file": "main.c",
+      "line": 83
+    }
+  }
+}

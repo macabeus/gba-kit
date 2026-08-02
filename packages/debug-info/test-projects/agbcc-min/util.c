@@ -16,3 +16,13 @@ int triple(int n) {
     g_util_pair.lo = (short) n;
     return n * 3;
 }
+
+/* The DEFINITION of the struct main.c only forward-declares (see main.c: this CU
+ * links second, so a first-CU-wins index would lose this layout).
+ *   FwdPay: amount @0 (4)  currency @4 (2)                           size 8 */
+struct FwdPay {
+    int amount;
+    short currency;
+};
+
+struct FwdPay g_fwd_pay;

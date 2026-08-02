@@ -9,4 +9,12 @@ export { DebugInfo, type SourceLocation, type ResolvedLocation } from './debug-i
 export { ElfFile, type ElfSection } from './elf.js';
 export { SymbolIndex, type ElfSymbol, type FunctionEntry, STT_FUNC, STT_NOTYPE, STT_OBJECT } from './symbols.js';
 export { LineTable, parseDebugLine, type LineRow } from './debug-line.js';
-export { TypeIndex, type StructType, type StructMember, type MemberLocation } from './types.js';
+export { parseDebugMacinfo, type MacroDefinition } from './debug-macro.js';
+export {
+  TypeIndex,
+  type StructType,
+  type StructMember,
+  type MemberLocation,
+  type FunctionSignature,
+  type TypeFacts,
+} from './types.js';
