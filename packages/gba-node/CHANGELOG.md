@@ -1,5 +1,12 @@
 # @gba-kit/gba-node
 
+## 0.4.0
+
+### Patch Changes
+
+- @gba-kit/gba-emulator@0.4.0
+- @gba-kit/arm-emulator@0.4.0
+
 ## 0.3.0
 
 ### Minor Changes

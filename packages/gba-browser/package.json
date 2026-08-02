@@ -1,6 +1,6 @@
 {
   "name": "@gba-kit/gba-browser",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Browser runtime for GBA emulation",
   "author": "macabeus",
   "type": "module",
