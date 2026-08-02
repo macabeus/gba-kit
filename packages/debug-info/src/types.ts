@@ -187,6 +187,13 @@ export interface StructMember {
    * The rank is not decoration: `x[i]` on a `[4][8]` member is a ROW, not an element, so a
    * consumer that only knows the flat count cannot spell an element access that type-checks
    * against the project's own header.
+   *
+   * Reported for SYMMETRY with {@link VariableShape}'s array arm — a member and a global are the
+   * same DWARF array type, and a reader that answers the rank question for one should answer it
+   * for the other. It is the consumer that differs: a consumer synthesizing its OWN struct
+   * declaration may flatten the member, since its access and its declaration then agree by
+   * construction and no foreign header is involved. Rank only becomes load-bearing where the
+   * declaration belongs to someone else.
    */
   dims?: (number | null)[];
 }
