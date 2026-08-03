@@ -28,6 +28,32 @@ const BIT_TO_BUTTON_NAME: Record<number, string> = {
   9: 'l',
 };
 
+/** Script button name → GBA button bit position (inverse of BIT_TO_BUTTON_NAME). */
+const BUTTON_NAME_TO_BIT: Record<string, number> = Object.fromEntries(
+  Object.entries(BIT_TO_BUTTON_NAME).map(([bit, name]) => [name, Number(bit)]),
+);
+
+/** The button names a script may use, for error messages. */
+export const BUTTON_NAMES: readonly string[] = Object.values(BIT_TO_BUTTON_NAME);
+
+/**
+ * Parse a '+'-separated button name string back into bit positions.
+ * Inverse of buttonsToString. Returns null if any name is unknown, so the
+ * caller can report which token was bad rather than silently dropping input.
+ */
+export function buttonsFromString(text: string): number[] | null {
+  const names = text.split('+').map((n) => n.trim());
+  const bits: number[] = [];
+  for (const name of names) {
+    const bit = BUTTON_NAME_TO_BIT[name.toLowerCase()];
+    if (bit === undefined) {
+      return null;
+    }
+    bits.push(bit);
+  }
+  return bits.sort((a, b) => a - b);
+}
+
 /** Convert button bit positions to a sorted '+'-separated name string. */
 export function buttonsToString(buttons: number[]): string | null {
   if (buttons.length === 0) {
