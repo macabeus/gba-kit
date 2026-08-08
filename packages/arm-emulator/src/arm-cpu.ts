@@ -1160,6 +1160,24 @@ export class ArmCpu {
     const rb = bits(instr, 10, 8);
     const rlist = instr & 0xff;
     let addr = this.registers[rb]!;
+    // Empty register list. The encoding permits Rlist == 0, and ARM7TDMI does NOT treat it as a
+    // no-op: it transfers R15 and advances the base by 0x40.
+    //
+    //   GBATEK, THUMB.15: "Empty Rlist: R15 loaded/stored (ARMv4 only), and Rb=Rb+40h
+    //   (ARMv4-v5)."
+    //
+    // The stored value is the pipeline PC (instrAddr+4) plus one instruction width, matching
+    // mGBA's `cpu->gprs[ARM_PC] + WORD_SIZE_THUMB`. registers[PC] here is instrAddr+2, so the
+    // architectural PC is registers[PC]+2 and the stored value is registers[PC]+4.
+    if (rlist === 0) {
+      if (l === 1) {
+        this.registers[PC] = this.memory.read32(addr) & ~1;
+      } else {
+        this.memory.write32(addr, (this.registers[PC]! + 4) >>> 0);
+      }
+      this.registers[rb] = (addr + 0x40) >>> 0;
+      return;
+    }
     if (l === 1) {
       // LDMIA
       for (let i = 0; i < 8; i++) {

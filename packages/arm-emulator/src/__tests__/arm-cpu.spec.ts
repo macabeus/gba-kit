@@ -1177,4 +1177,46 @@ describe('ArmCpu', () => {
       expect(cpu.registers[3]).toBe(0); // EQ: false
     });
   });
+  describe('THUMB block transfer with an empty register list', () => {
+    // THUMB.15 encoding: 1100 L Rb Rlist. Rlist == 0 is encodable, and ARM7TDMI does not treat it
+    // as a no-op — it transfers R15 and advances the base by 0x40.
+    //
+    //   GBATEK, THUMB.15: "Empty Rlist: R15 loaded/stored (ARMv4 only), and Rb=Rb+40h (ARMv4-v5)."
+    //
+    // mGBA implements the same quirk in its STM_LOOP/LDM_LOOP macros (src/gba/memory.c): an
+    // `if (UNLIKELY(!mask))` arm that transfers the PC and does `address += 64` before the
+    // per-register loop. This emulator previously did neither: the loop simply did not run and
+    // the base was left untouched.
+    const DATA = 0x02001000;
+
+    it('STMIA with an empty list stores the PC and adds 0x40 to the base', () => {
+      const { cpu, mem } = setupThumbCpu([0xc100]); // stmia r1!, {}
+      cpu.registers[1] = DATA;
+      cpu.step();
+      // The stored value is the pipeline PC (instrAddr+4) plus one instruction width, which is
+      // what mGBA stores as `cpu->gprs[ARM_PC] + WORD_SIZE_THUMB`.
+      expect(mem.read32(DATA)).toBe(0x08000006);
+      expect(cpu.registers[1]).toBe(DATA + 0x40);
+    });
+
+    it('LDMIA with an empty list loads the PC and adds 0x40 to the base', () => {
+      const { cpu, mem } = setupThumbCpu([0xc900]); // ldmia r1!, {}
+      cpu.registers[1] = DATA;
+      mem.write32(DATA, 0x08000123);
+      cpu.step();
+      expect(cpu.registers[PC]).toBe(0x08000122); // halfword-aligned, Thumb bit dropped
+      expect(cpu.registers[1]).toBe(DATA + 0x40);
+    });
+
+    it('a NON-empty list is unaffected', () => {
+      // 0xC102: STMIA (bit 11 = 0), Rb = r1, Rlist = 0x02 = {r1} — the base is in its own list and
+      // is the lowest entry, which is the DEFINED case: the old base is stored. Guards against the
+      // empty-list arm swallowing ordinary transfers.
+      const { cpu, mem } = setupThumbCpu([0xc102]);
+      cpu.registers[1] = DATA;
+      cpu.step();
+      expect(cpu.registers[1]).toBe(DATA + 4); // one transfer, not 0x40
+      expect(mem.read32(DATA)).toBe(DATA); // old base, per GBATEK's "Rb is FIRST entry" rule
+    });
+  });
 });
