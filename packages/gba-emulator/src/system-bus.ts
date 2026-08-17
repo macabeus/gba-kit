@@ -232,6 +232,57 @@ export class GbaSystemBus implements MemoryBus {
     }
   }
 
+  // ─── Memory Map Classification ────────────────────────────────────
+
+  /**
+   * What actually backs `address`, or `null` when nothing does.
+   *
+   * The `read*` methods below are the HARDWARE interface: they answer every address,
+   * because the console does — an unbacked one reads as open bus, which on real
+   * silicon is a value, not a fault. That is correct for the CPU and wrong for a
+   * human or an agent, who gets a plausible number back from a question that had no
+   * answer. Debug-facing callers use this first so they can refuse instead
+   * (see `ScriptingEngine.read16`/`read32`/`readBytes`).
+   *
+   * Side-effect free — unlike a read, which can advance the EEPROM serial state.
+   */
+  describeAddress(address: number): { region: string } | null {
+    const addr = address >>> 0;
+    switch ((addr >>> 24) & 0xff) {
+      case 0x00:
+        return (addr & 0x00ffffff) < 0x4000 ? { region: 'BIOS' } : null;
+      case 0x02:
+        return { region: 'EWRAM' };
+      case 0x03:
+        return { region: 'IWRAM' };
+      case 0x04:
+        // The register file is 0x04000000..0x040003FE, plus the mirrored internal
+        // memory control word at 0x04000800. Everything between is unbacked.
+        return (addr & 0x00ffffff) <= 0x3fe || (addr & 0x00ffffff & ~3) === 0x800 ? { region: 'MMIO' } : null;
+      case 0x05:
+        return { region: 'palette RAM' };
+      case 0x06:
+        return { region: 'VRAM' };
+      case 0x07:
+        return { region: 'OAM' };
+      case 0x08:
+      case 0x09:
+      case 0x0a:
+      case 0x0b:
+      case 0x0c:
+      case 0x0d:
+        // The three wait-state mirrors all address the same cartridge, so what
+        // decides is the offset into it — a pointer past the end of THIS ROM reads
+        // as 0, which is the case worth catching.
+        return (addr & 0x01ffffff) < this.#rom.length ? { region: 'ROM' } : null;
+      case 0x0e:
+      case 0x0f:
+        return this.#hasSram ? { region: 'SRAM' } : null;
+      default:
+        return null;
+    }
+  }
+
   // ─── MemoryBus Implementation ─────────────────────────────────────
 
   read8(address: number): number {

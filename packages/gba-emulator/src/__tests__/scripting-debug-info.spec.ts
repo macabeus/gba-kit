@@ -47,7 +47,7 @@ describe('ScriptingEngine debug info', () => {
     expect(engine.hasDebugInfo).toBe(true);
     expect(engine.symbolToAddress('add')).toBe(0x08000008);
     expect(engine.pcToFunction(0x08000008)?.name).toBe('add');
-    expect(engine.addressToSymbol(0x0800000a)).toEqual({ name: 'add', offset: 0x2 });
+    expect(engine.addressToSymbol(0x0800000a)).toEqual({ name: 'add', offset: 0x2, exact: true });
 
     const src = engine.pcToSource(0x08000008);
     expect(src?.func).toBe('add');

@@ -5,7 +5,10 @@ queries a source-level debugger needs:
 
 - **PC → function** (`pcToFunction`) — from `.symtab`, so it covers every linked
   function, including `INCLUDE_ASM` stubs with no DWARF.
-- **name → address** / **address → symbol** (`symbolToAddress`, `addressToSymbol`).
+- **name → address** / **address → symbol** (`symbolToAddress`, `addressToSymbol`) — the
+  latter reports whether the containment was **stated** by the symbol's `st_size` or
+  **inferred** from where the next symbol starts, because in a decomp ELF most symbols
+  come from hand-written asm and declare no size at all.
 - **PC → C `file:line`** (`pcToSource`) — from the DWARF `.debug_line` table.
 - **type layout** (`struct`, `structMember`, `enumValues`) and **declaration shape**
   (`types.variableShape`) — from `.debug_info`.
@@ -45,7 +48,9 @@ di.pcToSource(0x0801466a);
 
 di.pcToFunction(0x0801466a)?.name; // 'PlayerRespawnOrDeath'
 di.symbolToAddress('InitLevelGameplay'); // 0x0800ca0c
-di.addressToSymbol(0x0801466a); // { name: 'PlayerRespawnOrDeath', offset: 0x46 }
+di.addressToSymbol(0x0801466a); // { name: 'PlayerRespawnOrDeath', offset: 0x46, exact: true }
+// `exact: false` means the ELF never placed that address inside the symbol — the hit
+// comes from the gap to the next symbol, so it is a hint and not evidence.
 
 di.types.variableShape('gSineTable');
 // → { kind: 'array', elemSize: 2, elemSigned: true, length: null, const: true, volatile: false }

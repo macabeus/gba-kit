@@ -27,6 +27,17 @@ export interface FunctionEntry {
   address: number;
   /** End address (exclusive). Uses st_size when present, else the next symbol. */
   end: number;
+  /**
+   * True when `end` came from the symbol's own `st_size` — the ELF stated the extent.
+   * False when it was inferred from where the NEXT symbol starts, which is a guess
+   * that is only as good as the symbol table is dense.
+   *
+   * This is not a detail. In a decomp ELF most symbols come from hand-written asm and
+   * carry no size at all (in Klonoa: 827 of 1162 functions), so a lookup that lands
+   * 3 KB past a function's real body still resolves to it, with nothing in the answer
+   * to say the containment was never established.
+   */
+  exact: boolean;
 }
 
 /** Address range of a loadable section, used to bound size-0 trailing symbols. */
@@ -130,10 +141,17 @@ export class SymbolIndex {
     return findContaining(this.#functions, pc);
   }
 
-  /** Nearest enclosing symbol (function or data object) as `name+0xNN`, or null. */
-  addressToSymbol(addr: number): { name: string; offset: number } | null {
+  /**
+   * Nearest enclosing symbol (function or data object) as `name+0xNN`, or null.
+   *
+   * `exact` says whether the ELF actually placed `addr` inside that symbol (the symbol
+   * declared an `st_size` covering it) or whether the containment was inferred from
+   * the gap to the next symbol — see {@link FunctionEntry.exact}. An inferred hit is a
+   * usable hint and is not evidence; anything written down as fact should check it.
+   */
+  addressToSymbol(addr: number): { name: string; offset: number; exact: boolean } | null {
     const e = findContaining(this.#all, addr);
-    return e ? { name: e.name, offset: addr - e.address } : null;
+    return e ? { name: e.name, offset: addr - e.address, exact: e.exact } : null;
   }
 }
 
@@ -185,7 +203,7 @@ function buildRanges(syms: ElfSymbol[], sections: SectionRange[]): FunctionEntry
         : next
           ? next.address
           : (sectionEndContaining(s.address, sections) ?? s.address + 2);
-    return { name: s.name, address: s.address, end };
+    return { name: s.name, address: s.address, end, exact: s.size > 0 };
   });
 }
 

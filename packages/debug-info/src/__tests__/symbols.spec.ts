@@ -33,7 +33,21 @@ describe('SymbolIndex', () => {
 
   it('addressToSymbol reports name + offset', () => {
     const idx = new SymbolIndex([{ name: 'Foo', address: 0x800, size: 0x20, type: STT_FUNC }]);
-    expect(idx.addressToSymbol(0x80a)).toEqual({ name: 'Foo', offset: 0xa });
+    expect(idx.addressToSymbol(0x80a)).toEqual({ name: 'Foo', offset: 0xa, exact: true });
+  });
+
+  it('addressToSymbol marks a containment it INFERRED, so a guess cannot pass as a fact', () => {
+    // `asm` carries no st_size — the norm for a decomp's hand-written functions — so its
+    // extent is only "wherever the next symbol starts". `sized` states its own.
+    const idx = new SymbolIndex([
+      { name: 'sized', address: 0x100, size: 0x10, type: STT_FUNC },
+      { name: 'asm', address: 0x200, size: 0, type: STT_FUNC },
+      { name: 'next', address: 0x900, size: 0x10, type: STT_FUNC },
+    ]);
+    expect(idx.addressToSymbol(0x108)).toEqual({ name: 'sized', offset: 8, exact: true });
+    // 0x600 is 1 KB past anything the ELF actually attributes to `asm`. It still
+    // resolves — a useful hint — but says it is a guess.
+    expect(idx.addressToSymbol(0x600)).toEqual({ name: 'asm', offset: 0x400, exact: false });
   });
 
   it('addressToSymbol resolves data (STT_OBJECT) symbols, not only functions', () => {
@@ -41,7 +55,7 @@ describe('SymbolIndex', () => {
       { name: 'fn', address: 0x100, size: 0x10, type: STT_FUNC },
       { name: 'gState', address: 0x03000000, size: 0x20, type: STT_OBJECT },
     ]);
-    expect(idx.addressToSymbol(0x03000004)).toEqual({ name: 'gState', offset: 4 });
+    expect(idx.addressToSymbol(0x03000004)).toEqual({ name: 'gState', offset: 4, exact: true });
     expect(idx.pcToFunction(0x03000004)).toBeNull(); // data is not a function
     expect(idx.addressToSymbol(0x03000020)).toBeNull(); // past the object's size
   });

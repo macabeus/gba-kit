@@ -6,7 +6,7 @@
  * Both web and Node.js consumers provide their own ScriptingHost implementation.
  */
 import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassembler';
-import { DebugInfo, type ResolvedLocation, type SourceLocation } from '@gba-kit/debug-info';
+import { DebugInfo, type MemberLocation, type ResolvedLocation, type SourceLocation } from '@gba-kit/debug-info';
 
 import { Gba } from './gba.js';
 import type { CpuSnapshot, GbaSnapshot } from './savestate.js';
@@ -40,6 +40,26 @@ const BUTTON_MAP: Record<string, GbaButton> = {
 };
 
 type ButtonName = 'a' | 'b' | 'select' | 'start' | 'right' | 'left' | 'up' | 'down' | 'r' | 'l';
+
+/**
+ * A member's byte width, or a throw naming the member that lacks one. `size` is null
+ * for an incomplete type or a flexible array — cases where there is no span to read,
+ * and where guessing one would invent the value the caller is about to believe.
+ */
+function requireMemberSize(member: MemberLocation, api: string): number {
+  if (member.size === null) {
+    throw new Error(
+      `${api}: this member has no known byte size (an incomplete type or a flexible array), so there is nothing to read.`,
+    );
+  }
+  if (member.size > 4) {
+    throw new Error(
+      `${api}: this member is ${member.size} bytes, which is not a number. ` +
+        `Use getMemory(base + ${member.offset}, ${member.size}) for an aggregate member.`,
+    );
+  }
+  return member.size;
+}
 
 function resolveButton(name: string): GbaButton {
   const button = BUTTON_MAP[name.toLowerCase()];
@@ -579,12 +599,82 @@ export class ScriptingEngine {
     this.#watchDisposers.clear();
   }
 
+  /**
+   * Read a halfword. **Throws** on an odd address, and on an address nothing backs.
+   *
+   * The hardware bus answers those: a GBA forces `LDRH` to an even address, so
+   * `read16(0x03000103)` returns the halfword at `0x03000102` — the right answer to a
+   * question you did not ask. That is the correct emulation and the wrong debugger,
+   * because the number that comes back is indistinguishable from the one you wanted.
+   * It has already produced a confidently wrong reading of a struct field that
+   * happened to sit at an odd offset. To read two bytes at an odd address — which is
+   * a perfectly ordinary thing for a struct member to need — use {@link readBytes}.
+   */
   read16(address: number): number {
+    this.#requireReadable(address, 2, 'read16');
+    this.#requireAligned(address, 2, 'read16');
     return this.#gba.bus.read16(address);
   }
 
+  /**
+   * Read a word. **Throws** on a misaligned address, and on one nothing backs — see
+   * {@link read16}.
+   *
+   * The result is unsigned, like every other read on this surface. The bus assembles a
+   * word with `|`, which is an int32 operator, so a word with bit 31 set comes back
+   * negative there — 18.6% of the words in one measured commercial ROM, including its
+   * very first, whose `EA00002E` prints as `-15ffffd2`. Harmless to the CPU, which
+   * stores into a register; not harmless to a reader comparing or formatting it.
+   */
   read32(address: number): number {
-    return this.#gba.bus.read32(address);
+    this.#requireReadable(address, 4, 'read32');
+    this.#requireAligned(address, 4, 'read32');
+    return this.#gba.bus.read32(address) >>> 0;
+  }
+
+  /**
+   * Read 1–4 bytes as an unsigned little-endian integer, at **any** alignment — the
+   * honest way to read a value the hardware's aligned loads cannot address. Assembled
+   * byte by byte, so an odd address means what it says. Throws if any byte of the span
+   * is unbacked.
+   */
+  readBytes(address: number, size: number): number {
+    if (!Number.isInteger(size) || size < 1 || size > 4) {
+      throw new Error(`readBytes: size must be 1..4, got ${size}`);
+    }
+    this.#requireReadable(address, size, 'readBytes');
+    return this.#readSized(address, size);
+  }
+
+  /** Throw unless `size` bytes at `address` are aligned for a hardware load of that width. */
+  #requireAligned(address: number, size: number, api: string): void {
+    if ((address & (size - 1)) === 0) {
+      return;
+    }
+    throw new Error(
+      `${api}: address 0x${(address >>> 0).toString(16)} is not ${size}-byte aligned. ` +
+        `The hardware would silently read 0x${(address & ~(size - 1)).toString(16)} instead. ` +
+        `Use readBytes(address, ${size}) to read ${size} bytes at this address.`,
+    );
+  }
+
+  /** Throw unless every byte of `[address, address + size)` is backed by real memory. */
+  #requireReadable(address: number, size: number, api: string): void {
+    const bus = this.#gba.bus;
+    const start = bus.describeAddress(address);
+    if (start === null) {
+      throw new Error(
+        `${api}: nothing is mapped at 0x${(address >>> 0).toString(16)}. ` +
+          `A read there returns open bus (typically 0), which is not data.`,
+      );
+    }
+    const last = bus.describeAddress(address + size - 1);
+    if (last === null || last.region !== start.region) {
+      throw new Error(
+        `${api}: the ${size} bytes at 0x${(address >>> 0).toString(16)} run off the end of ${start.region}. ` +
+          `Only part of that span is backed by memory.`,
+      );
+    }
   }
 
   /**
@@ -649,6 +739,60 @@ export class ScriptingEngine {
       value |= bus.read8(address + i) << (8 * i);
     }
     return value >>> 0;
+  }
+
+  /**
+   * Read a DWARF-described struct member out of a struct instance at `base` —
+   * bitfields decoded, and correct at any alignment.
+   *
+   * `member` is a {@link MemberLocation} from `structMember()` / `variableMember()`,
+   * so the offset, width and bit range all come from the build's own debug info
+   * rather than from a hand-typed constant. The read is byte-assembled, which is what
+   * makes a member at an odd offset (`u8 x[2]` at offset 3 is ordinary) read the bytes
+   * it names instead of the aligned ones next to them.
+   *
+   * @example
+   *   const f = di.structMember('GfxControlFlags', 'bgAffine');
+   *   readMember(structBase, f); // the field's value, already shifted and masked
+   */
+  readMember(base: number, member: MemberLocation): number {
+    const size = requireMemberSize(member, 'readMember');
+    const raw = this.readBytes(base + member.offset, size);
+    return member.bitWidth === undefined ? raw : ((raw >>> member.bitOffset!) & (2 ** member.bitWidth - 1)) >>> 0;
+  }
+
+  /**
+   * Write a DWARF-described struct member, preserving a bitfield's neighbours — the
+   * write counterpart to {@link readMember}, and correct at any alignment for the same
+   * reason. Throws if the target is not writable memory, rather than dropping the
+   * write the way the cartridge bus does.
+   */
+  writeMember(base: number, member: MemberLocation, value: number): void {
+    const size = requireMemberSize(member, 'writeMember');
+    const address = base + member.offset;
+    this.#requireWritable(address, size, 'writeMember');
+    let toStore = value >>> 0;
+    if (member.bitWidth !== undefined) {
+      const mask = ((2 ** member.bitWidth - 1) << member.bitOffset!) >>> 0;
+      const current = this.#readSized(address, size);
+      toStore = (((current & ~mask) >>> 0) | (((value << member.bitOffset!) >>> 0) & mask)) >>> 0;
+    }
+    const bus = this.#gba.bus;
+    for (let i = 0; i < size; i++) {
+      bus.write8(address + i, (toStore >>> (8 * i)) & 0xff);
+    }
+  }
+
+  /** Throw unless `size` bytes at `address` are backed by memory a write can reach. */
+  #requireWritable(address: number, size: number, api: string): void {
+    this.#requireReadable(address, size, api);
+    const region = this.#gba.bus.describeAddress(address)!.region;
+    if (region === 'ROM' || region === 'BIOS') {
+      throw new Error(
+        `${api}: 0x${(address >>> 0).toString(16)} is in ${region}, which is read-only. ` +
+          `The bus discards such a write silently, so the value you read back would be the old one.`,
+      );
+    }
   }
 
   disassemble(

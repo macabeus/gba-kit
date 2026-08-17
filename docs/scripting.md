@@ -216,14 +216,45 @@ const data = getMemory(0x03000000, 16);
 console.log(data[0]); // First byte
 ```
 
-### `read16(address)` / `read32(address)` — Typed Memory Reads
+### `read16(address)` / `read32(address)` — Aligned Memory Reads
 
-Read a 16-bit or 32-bit value from any address, using the system bus's proper alignment and region handling.
+Read an unsigned 16-bit or 32-bit value. The address must be aligned for that width, and something must be mapped there; otherwise these **throw**.
 
 ```javascript
 const funcPtr = read32(0x08116620); // read a ROM function pointer
 const entityX = read16(0x03002922); // read an entity X coordinate
 ```
+
+They throw rather than answer because the hardware's answer would be a different question's. A GBA forces `LDRH` to an even address, so `read16(0x03002923)` would return the halfword at `0x03002922` — a number indistinguishable from the one you asked for. Reads of unmapped space are the same trap wearing `0`. That is correct emulation and a bad debugger, and it has already produced a confidently wrong reading of a struct field that happened to sit at an odd offset.
+
+```javascript
+read16(0x03002923); // throws: not 2-byte aligned; the hardware would read 0x03002922
+read32(0x01000000); // throws: nothing is mapped there
+```
+
+Note that `read32` is **unsigned**. The bus assembles words with `|`, an int32 operator, so a word with bit 31 set reads as a negative number there — about 19% of a typical ROM, including Klonoa's very first word, whose `0xEA00002E` formats as `"-15ffffd2"`.
+
+### `readBytes(address, size)` — Unaligned Memory Reads
+
+Read 1–4 bytes as an unsigned little-endian integer at **any** alignment. Assembled byte by byte, so an odd address means what it says. This is the honest way to read a value the hardware's aligned loads cannot address — a `u8 x[2]` at offset 3 of a struct is ordinary, and reaching it is not an error.
+
+```javascript
+readBytes(0x03002923, 2); // the two bytes at 0x...23 and 0x...24
+```
+
+Throws if any byte of the span is unmapped, or if it runs off the end of its region.
+
+### `readMember(base, member)` / `writeMember(base, member, value)` — DWARF Struct Members
+
+Read or write a struct member described by the build's own debug info, bitfields decoded, correct at any alignment. `member` is a `MemberLocation` from `structMember()` / `variableMember()`, so the offset, width and bit range come from the ELF rather than from a hand-typed constant — rename the field in C and the lookup fails loudly instead of reading the wrong bytes.
+
+```javascript
+const f = di.structMember('GfxControlFlags', 'bgAffine');
+readMember(structBase, f); // already shifted and masked
+writeMember(structBase, f, 1); // preserves the field's neighbours
+```
+
+`writeMember` throws if the target is ROM or BIOS, rather than letting the cartridge bus discard the write and leave you reading back the old value.
 
 ### `disassemble(address, count?, mode?)` — Instruction Disassembly
 
