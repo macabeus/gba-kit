@@ -216,14 +216,57 @@ const data = getMemory(0x03000000, 16);
 console.log(data[0]); // First byte
 ```
 
-### `read16(address)` / `read32(address)` — Typed Memory Reads
+### `read16(address)` / `read32(address)` — Aligned Memory Reads
 
-Read a 16-bit or 32-bit value from any address, using the system bus's proper alignment and region handling.
+Read an unsigned 16-bit or 32-bit value. Both **throw** if the address is not aligned for that width, or if the bus decodes nothing there.
 
 ```javascript
 const funcPtr = read32(0x08116620); // read a ROM function pointer
 const entityX = read16(0x03002922); // read an entity X coordinate
+
+read16(0x03002923); // throws: not 2-byte aligned; the hardware would read 0x03002922
+read32(0x01000000); // throws: nothing is mapped there
 ```
+
+They throw because the hardware's answer would be to a different question. A GBA forces `LDRH` to an even address, so `read16(0x03002923)` reads the halfword at `0x03002922` — a number indistinguishable from the one you asked for. An undecoded address is the same trap wearing a `0`. Use `readBytes` to read at any alignment.
+
+A RAM mirror is not an error: the RAM regions mirror their store across a 16 MB window, so `0x02F00000` reads the same byte as `0x02000000` and neither throws.
+
+### `readBytes(address, size)` — Unaligned Memory Reads
+
+Read 1–4 bytes as an unsigned little-endian integer at **any** alignment. Assembled byte by byte, so an odd address means what it says — a `u8 x[2]` at offset 3 of a struct is ordinary, and reaching it is not an error.
+
+```javascript
+readBytes(0x03002923, 2); // the two bytes at 0x...23 and 0x...24
+```
+
+Throws if any byte of the span is undecoded, or if the span runs off the end of its region.
+
+### `readVariable(path)` / `writeVariable(path, value)` — Named Globals
+
+Read or write a global by a `symbol` or `symbol.field.subfield` path. The address comes from the symbol table and the width and bit range from the variable's DWARF type, so the right bytes are read and a bitfield is decoded — or, on write, merged into its container without disturbing the fields beside it.
+
+```javascript
+readVariable('g_game_vars.score');
+readVariable('gPlayerFlags.invincible'); // a bitfield, decoded
+writeVariable('g_game_vars.score', 1000);
+writeVariable('gPlayerFlags.invincible', 1); // neighbouring bits survive
+```
+
+Throws if debug info isn't loaded, the path can't be resolved, the field is wider than 4 bytes, or the target is read-only.
+
+### `readMember(base, member)` / `writeMember(base, member, value)` — Struct Members at a Runtime Address
+
+The same read and write, addressed by a base plus a `MemberLocation` from `structMember()` / `variableMember()` rather than by name. Use these when the instance has no symbol of its own — one reached through a pointer, an array element, or anything placed at run time, none of which a `readVariable` path can express.
+
+```javascript
+const f = di.structMember('PlayerState', 'invincible');
+const base = read32(symbolToAddress('gPlayerPtr'));
+readMember(base, f); // already shifted and masked
+writeMember(base, f, 1); // preserves the field's neighbours
+```
+
+The offset, width and bit range come from the ELF rather than from a hand-typed constant, so renaming the field in C makes the lookup fail loudly instead of reading the wrong bytes.
 
 ### `disassemble(address, count?, mode?)` — Instruction Disassembly
 

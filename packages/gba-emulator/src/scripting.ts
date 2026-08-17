@@ -6,7 +6,7 @@
  * Both web and Node.js consumers provide their own ScriptingHost implementation.
  */
 import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassembler';
-import { DebugInfo, type ResolvedLocation, type SourceLocation } from '@gba-kit/debug-info';
+import { DebugInfo, type MemberLocation, type ResolvedLocation, type SourceLocation } from '@gba-kit/debug-info';
 
 import { Gba } from './gba.js';
 import type { CpuSnapshot, GbaSnapshot } from './savestate.js';
@@ -40,6 +40,36 @@ const BUTTON_MAP: Record<string, GbaButton> = {
 };
 
 type ButtonName = 'a' | 'b' | 'select' | 'start' | 'right' | 'left' | 'up' | 'down' | 'r' | 'l';
+
+/**
+ * The optional bitfield pair carried by both location shapes the debug info produces —
+ * a `ResolvedLocation` (symbol path) and a `MemberLocation` (base + offset). Neither is
+ * a supertype of the other, and the decode needs nothing else from either.
+ */
+interface BitfieldSpan {
+  bitOffset?: number;
+  bitWidth?: number;
+}
+
+/**
+ * A member's byte width, or a throw naming the member that lacks one. `size` is null
+ * for an incomplete type or a flexible array — cases where there is no span to read,
+ * and where guessing one would invent the value the caller is about to believe.
+ */
+function requireMemberSize(member: MemberLocation, api: string): number {
+  if (member.size === null) {
+    throw new Error(
+      `${api}: this member has no known byte size (an incomplete type or a flexible array), so there is nothing to read.`,
+    );
+  }
+  if (member.size > 4) {
+    throw new Error(
+      `${api}: this member is ${member.size} bytes, which is not a number. ` +
+        `Use getMemory(base + ${member.offset}, ${member.size}) for an aggregate member.`,
+    );
+  }
+  return member.size;
+}
 
 function resolveButton(name: string): GbaButton {
   const button = BUTTON_MAP[name.toLowerCase()];
@@ -579,12 +609,80 @@ export class ScriptingEngine {
     this.#watchDisposers.clear();
   }
 
+  /**
+   * Read a halfword. **Throws** on an odd address, and on one the bus decodes to
+   * nothing.
+   *
+   * The hardware bus answers both: a GBA forces `LDRH` to an even address, so
+   * `read16(0x03000103)` returns the halfword at `0x03000102` — the right answer to a
+   * question you did not ask, and indistinguishable from the one you wanted. That is
+   * the correct emulation and the wrong debugger. To read two bytes at an odd
+   * address — ordinary for a struct member — use {@link readBytes}.
+   */
   read16(address: number): number {
+    this.#requireReadable(address, 2, 'read16');
+    this.#requireAligned(address, 2, 'read16');
     return this.#gba.bus.read16(address);
   }
 
+  /**
+   * Read a word. **Throws** on a misaligned address, and on one nothing backs — see
+   * {@link read16}.
+   *
+   * The result is unsigned, like every other read on this surface. The bus assembles a
+   * word with `|`, which is an int32 operator, so a word with bit 31 set comes back
+   * negative there — harmless to the CPU, which stores it into a register, and not
+   * harmless to a reader comparing or formatting it.
+   */
   read32(address: number): number {
-    return this.#gba.bus.read32(address);
+    this.#requireReadable(address, 4, 'read32');
+    this.#requireAligned(address, 4, 'read32');
+    return this.#gba.bus.read32(address) >>> 0;
+  }
+
+  /**
+   * Read 1–4 bytes as an unsigned little-endian integer, at **any** alignment — the
+   * honest way to read a value the hardware's aligned loads cannot address. Assembled
+   * byte by byte, so an odd address means what it says. Throws if any byte of the span
+   * is unbacked.
+   */
+  readBytes(address: number, size: number): number {
+    if (!Number.isInteger(size) || size < 1 || size > 4) {
+      throw new Error(`readBytes: size must be 1..4, got ${size}`);
+    }
+    this.#requireReadable(address, size, 'readBytes');
+    return this.#readSized(address, size);
+  }
+
+  /** Throw unless `size` bytes at `address` are aligned for a hardware load of that width. */
+  #requireAligned(address: number, size: number, api: string): void {
+    if ((address & (size - 1)) === 0) {
+      return;
+    }
+    throw new Error(
+      `${api}: address 0x${(address >>> 0).toString(16)} is not ${size}-byte aligned. ` +
+        `The hardware would silently read 0x${(address & ~(size - 1)).toString(16)} instead. ` +
+        `Use readBytes(address, ${size}) to read ${size} bytes at this address.`,
+    );
+  }
+
+  /** Throw unless every byte of `[address, address + size)` is backed by real memory. */
+  #requireReadable(address: number, size: number, api: string): void {
+    const bus = this.#gba.bus;
+    const start = bus.describeAddress(address);
+    if (start === null) {
+      throw new Error(
+        `${api}: nothing is mapped at 0x${(address >>> 0).toString(16)}. ` +
+          `A read there returns open bus (typically 0), which is not data.`,
+      );
+    }
+    const last = bus.describeAddress(address + size - 1);
+    if (last === null || last.region !== start.region) {
+      throw new Error(
+        `${api}: the ${size} bytes at 0x${(address >>> 0).toString(16)} run off the end of ${start.region}. ` +
+          `Only part of that span is backed by memory.`,
+      );
+    }
   }
 
   /**
@@ -600,13 +698,29 @@ export class ScriptingEngine {
    *   readVariable('gPlayerFlags.invincible'); // a bitfield, decoded
    */
   readVariable(path: string): number {
-    return this.#readResolved(this.#resolveForRead(path));
+    const loc = this.#resolveLocation(path, 'readVariable');
+    return this.#readDecoded(loc.address, loc.size, loc, 'readVariable');
   }
 
-  /** Resolve a path to a readable (≤ 4-byte) location, or throw with the reason. */
-  #resolveForRead(path: string): ResolvedLocation {
+  /**
+   * Write a global/static variable by the same `symbol` or `symbol.field.subfield` path
+   * {@link readVariable} reads — the address and width come from the ELF, and a
+   * bitfield is merged into its container without disturbing the fields beside it.
+   * Throws if the path can't be resolved or the target is read-only.
+   *
+   * @example
+   *   writeVariable('g_game_vars.score', 1000);
+   *   writeVariable('gPlayerFlags.invincible', 1); // neighbouring bits survive
+   */
+  writeVariable(path: string, value: number): void {
+    const loc = this.#resolveLocation(path, 'writeVariable');
+    this.#writeDecoded(loc.address, loc.size, loc, value, 'writeVariable');
+  }
+
+  /** Resolve a path to a ≤ 4-byte location, or throw with the reason. */
+  #resolveLocation(path: string, api: string): ResolvedLocation {
     if (!this.#debugInfo) {
-      throw new Error(`resolving "${path}" requires debug info; call loadDebugInfo(elfBytes) first`);
+      throw new Error(`${api}: resolving "${path}" requires debug info; call loadDebugInfo(elfBytes) first`);
     }
     const loc = this.#debugInfo.resolveVariable(path);
     if (loc === null) {
@@ -618,12 +732,6 @@ export class ScriptingEngine {
     return loc;
   }
 
-  /** Read + bitfield-decode the value at a resolved location; result is unsigned. */
-  #readResolved(loc: ResolvedLocation): number {
-    const raw = this.#readSized(loc.address, loc.size);
-    return loc.bitOffset === undefined ? raw : ((raw >>> loc.bitOffset) & (2 ** loc.bitWidth! - 1)) >>> 0;
-  }
-
   /**
    * Build a value reader + a human label for a `wait`/`assert` memory address: a raw
    * number reads a single byte; a `symbol`/`symbol.field` path resolves through the
@@ -633,8 +741,11 @@ export class ScriptingEngine {
     if (typeof address === 'number') {
       return { read: () => this.#gba.bus.read8(address), label: `0x${address.toString(16)}` };
     }
-    const loc = this.#resolveForRead(address);
-    return { read: () => this.#readResolved(loc), label: `"${address}" (0x${loc.address.toString(16)})` };
+    const loc = this.#resolveLocation(address, 'wait/assert');
+    return {
+      read: () => this.#readDecoded(loc.address, loc.size, loc, 'wait/assert'),
+      label: `"${address}" (0x${loc.address.toString(16)})`,
+    };
   }
 
   /**
@@ -649,6 +760,84 @@ export class ScriptingEngine {
       value |= bus.read8(address + i) << (8 * i);
     }
     return value >>> 0;
+  }
+
+  /**
+   * Read a DWARF-described struct member out of a struct instance at `base` —
+   * bitfields decoded, and correct at any alignment.
+   *
+   * `member` is a {@link MemberLocation} from `structMember()` / `variableMember()`,
+   * so the offset, width and bit range all come from the build's own debug info
+   * rather than from a hand-typed constant. Unlike {@link readVariable}, the base is a
+   * plain address, so this reaches an instance the symbol table cannot name: one
+   * behind a pointer, an array element, or anything else placed at run time.
+   *
+   * @example
+   *   const f = di.structMember('PlayerState', 'invincible');
+   *   readMember(structBase, f); // the field's value, already shifted and masked
+   */
+  readMember(base: number, member: MemberLocation): number {
+    const size = requireMemberSize(member, 'readMember');
+    return this.#readDecoded(base + member.offset, size, member, 'readMember');
+  }
+
+  /**
+   * Write a DWARF-described struct member, preserving a bitfield's neighbours — the
+   * write counterpart to {@link readMember}, reaching the same run-time instances
+   * {@link writeVariable} cannot name.
+   */
+  writeMember(base: number, member: MemberLocation, value: number): void {
+    const size = requireMemberSize(member, 'writeMember');
+    this.#writeDecoded(base + member.offset, size, member, value, 'writeMember');
+  }
+
+  /**
+   * Read `size` bytes at `address` and extract the bitfield `bits` describes, if any.
+   *
+   * The one place a described location becomes a value. Both entry points reach it —
+   * a symbol path via {@link readVariable}, a base + offset via {@link readMember} —
+   * so the shift/mask exists once, and so does the guarantee that the read is
+   * byte-assembled rather than issued as an aligned load that would round the address
+   * down. `bits` is anything carrying the optional `bitOffset`/`bitWidth` pair; a
+   * plain member carries neither and reads whole.
+   */
+  #readDecoded(address: number, size: number, bits: BitfieldSpan, api: string): number {
+    this.#requireReadable(address, size, api);
+    const raw = this.#readSized(address, size);
+    return bits.bitWidth === undefined ? raw : ((raw >>> bits.bitOffset!) & (2 ** bits.bitWidth - 1)) >>> 0;
+  }
+
+  /**
+   * Store `value` into `size` bytes at `address`, merging rather than replacing when
+   * `bits` describes a bitfield — the write counterpart to {@link #readDecoded}, and
+   * the only place the read-modify-write lives. Byte-assembled for the same reason:
+   * an aligned store would rewrite the container next door, which corrupts the guest
+   * instead of merely misreading it.
+   */
+  #writeDecoded(address: number, size: number, bits: BitfieldSpan, value: number, api: string): void {
+    this.#requireWritable(address, size, api);
+    let toStore = value >>> 0;
+    if (bits.bitWidth !== undefined) {
+      const mask = ((2 ** bits.bitWidth - 1) << bits.bitOffset!) >>> 0;
+      const current = this.#readSized(address, size);
+      toStore = (((current & ~mask) >>> 0) | (((value << bits.bitOffset!) >>> 0) & mask)) >>> 0;
+    }
+    const bus = this.#gba.bus;
+    for (let i = 0; i < size; i++) {
+      bus.write8(address + i, (toStore >>> (8 * i)) & 0xff);
+    }
+  }
+
+  /** Throw unless `size` bytes at `address` are backed by memory a write can reach. */
+  #requireWritable(address: number, size: number, api: string): void {
+    this.#requireReadable(address, size, api);
+    const region = this.#gba.bus.describeAddress(address)!.region;
+    if (region === 'ROM' || region === 'BIOS') {
+      throw new Error(
+        `${api}: 0x${(address >>> 0).toString(16)} is in ${region}, which is read-only. ` +
+          `The bus discards such a write silently, so the value you read back would be the old one.`,
+      );
+    }
   }
 
   disassemble(

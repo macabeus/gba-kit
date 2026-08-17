@@ -47,7 +47,7 @@ describe('ScriptingEngine debug info', () => {
     expect(engine.hasDebugInfo).toBe(true);
     expect(engine.symbolToAddress('add')).toBe(0x08000008);
     expect(engine.pcToFunction(0x08000008)?.name).toBe('add');
-    expect(engine.addressToSymbol(0x0800000a)).toEqual({ name: 'add', offset: 0x2 });
+    expect(engine.addressToSymbol(0x0800000a)).toEqual({ name: 'add', offset: 0x2, exact: true });
 
     const src = engine.pcToSource(0x08000008);
     expect(src?.func).toBe('add');
@@ -127,6 +127,54 @@ describe('ScriptingEngine debug info', () => {
     expect(engine.readVariable('g_counter')).toBe(0x80000001);
 
     expect(() => engine.readVariable('nope')).toThrow(/cannot resolve/);
+  });
+
+  it('writeVariable writes a field sized from DWARF, merging bitfields', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+
+    // Round-trips through the same path readVariable resolves.
+    engine.writeVariable('g_probe.count', 0xdeadbeef);
+    expect(engine.readVariable('g_probe.count')).toBe(0xdeadbeef);
+
+    // A narrower field writes only its own bytes.
+    const probe = engine.symbolToAddress('g_probe')!;
+    gba.bus.write32(probe + 8, 0x11112222);
+    engine.writeVariable('g_probe.flags', 0xabcd);
+    expect(engine.readVariable('g_probe.flags')).toBe(0xabcd);
+    expect(engine.readBytes(probe + 10, 2)).toBe(0x1111); // the halfword above survived
+
+    // A bitfield merges into its container instead of replacing it.
+    const bits = engine.symbolToAddress('g_bits')!;
+    gba.bus.write16(bits, 0xffff);
+    engine.writeVariable('g_bits.cross', 0);
+    expect(engine.readVariable('g_bits.cross')).toBe(0);
+    expect(engine.readBytes(bits, 2)).toBe(0xf01f); // bits 5..11 cleared, the rest kept
+
+    expect(() => engine.writeVariable('nope', 1)).toThrow(/cannot resolve/);
+  });
+
+  it('writeVariable refuses a read-only target instead of dropping the write', () => {
+    const gba = new Gba();
+    gba.loadRom(new Uint8Array(0x100).fill(0x5a));
+    const engine = new ScriptingEngine(gba, stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+
+    // `add` is a function, so it resolves to an address in ROM.
+    expect(() => engine.writeVariable('add', 0)).toThrow(/is in ROM, which is read-only/);
+    // Positive control: the same location reads fine, so the refusal is about the
+    // write and not about the address being unreachable.
+    expect(engine.readVariable('add')).toBe(0x5a5a5a5a);
+  });
+
+  it('readVariable refuses a symbol that resolves to undecoded space', () => {
+    const engine = new ScriptingEngine(new Gba(), stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+    // No ROM is loaded, so `add`'s address in the cartridge region backs nothing.
+    expect(() => engine.readVariable('add')).toThrow(/nothing is mapped/);
+    // Positive control: a symbol in IWRAM still reads.
+    expect(engine.readVariable('g_counter')).toBeTypeOf('number');
   });
 
   it('readVariable refuses values it cannot size', () => {

@@ -80,7 +80,12 @@ export class DebugInfo {
     return size ? size : null;
   }
 
-  addressToSymbol(addr: number): { name: string; offset: number } | null {
+  /**
+   * Nearest enclosing symbol as `name+0xNN`, or null. `exact` distinguishes a
+   * containment the ELF stated from one inferred from the next symbol's address —
+   * see {@link SymbolIndex.addressToSymbol}.
+   */
+  addressToSymbol(addr: number): { name: string; offset: number; exact: boolean } | null {
     return this.symbols.addressToSymbol(addr);
   }
 
