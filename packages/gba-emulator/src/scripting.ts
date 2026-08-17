@@ -600,15 +600,14 @@ export class ScriptingEngine {
   }
 
   /**
-   * Read a halfword. **Throws** on an odd address, and on an address nothing backs.
+   * Read a halfword. **Throws** on an odd address, and on one the bus decodes to
+   * nothing.
    *
-   * The hardware bus answers those: a GBA forces `LDRH` to an even address, so
+   * The hardware bus answers both: a GBA forces `LDRH` to an even address, so
    * `read16(0x03000103)` returns the halfword at `0x03000102` — the right answer to a
-   * question you did not ask. That is the correct emulation and the wrong debugger,
-   * because the number that comes back is indistinguishable from the one you wanted.
-   * It has already produced a confidently wrong reading of a struct field that
-   * happened to sit at an odd offset. To read two bytes at an odd address — which is
-   * a perfectly ordinary thing for a struct member to need — use {@link readBytes}.
+   * question you did not ask, and indistinguishable from the one you wanted. That is
+   * the correct emulation and the wrong debugger. To read two bytes at an odd
+   * address — ordinary for a struct member — use {@link readBytes}.
    */
   read16(address: number): number {
     this.#requireReadable(address, 2, 'read16');
@@ -622,9 +621,8 @@ export class ScriptingEngine {
    *
    * The result is unsigned, like every other read on this surface. The bus assembles a
    * word with `|`, which is an int32 operator, so a word with bit 31 set comes back
-   * negative there — 18.6% of the words in one measured commercial ROM, including its
-   * very first, whose `EA00002E` prints as `-15ffffd2`. Harmless to the CPU, which
-   * stores into a register; not harmless to a reader comparing or formatting it.
+   * negative there — harmless to the CPU, which stores it into a register, and not
+   * harmless to a reader comparing or formatting it.
    */
   read32(address: number): number {
     this.#requireReadable(address, 4, 'read32');
@@ -752,7 +750,7 @@ export class ScriptingEngine {
    * it names instead of the aligned ones next to them.
    *
    * @example
-   *   const f = di.structMember('GfxControlFlags', 'bgAffine');
+   *   const f = di.structMember('PlayerState', 'invincible');
    *   readMember(structBase, f); // the field's value, already shifted and masked
    */
   readMember(base: number, member: MemberLocation): number {

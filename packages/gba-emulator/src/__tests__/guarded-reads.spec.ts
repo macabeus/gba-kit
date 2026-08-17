@@ -87,10 +87,10 @@ describe('read32 signedness', () => {
   });
 });
 
-describe('unmapped memory', () => {
-  it('refuses reads from address space nothing backs', () => {
+describe('undecoded memory', () => {
+  it('refuses reads from address space the bus decodes to nothing', () => {
     const engine = engineWithBytes(BASE, BYTES);
-    for (const addr of [0x01000000, 0x10000000, 0x04001000]) {
+    for (const addr of [0x01000000, 0x10000000, 0x04001000, 0x00004000]) {
       expect(() => engine.read32(addr)).toThrow(/nothing is mapped/);
       expect(() => engine.readBytes(addr, 1)).toThrow(/nothing is mapped/);
     }
@@ -98,17 +98,49 @@ describe('unmapped memory', () => {
 
   it('refuses a span that starts in memory and runs off the end of it', () => {
     const engine = engineWithBytes(BASE, BYTES);
-    // The last byte of the MMIO register file; a word from there leaves the region.
+    // A word starting at the last halfword of the I/O register file leaves it.
     expect(() => engine.readBytes(0x040003fe, 4)).toThrow(/run off the end of MMIO/);
-    expect(engine.readBytes(0x040003fe, 1)).toBeTypeOf('number'); // positive control
+    expect(engine.readBytes(0x040003fe, 2)).toBeTypeOf('number'); // positive control
   });
 
-  it('still reads every region that IS backed', () => {
+  it('covers the whole I/O register file, including its last halfword', () => {
+    const engine = engineWithBytes(BASE, BYTES);
+    // The backing store is 0x400 bytes, so the last readable halfword is at 0x3FE and
+    // its high byte at 0x3FF. A bound that stopped at 0x3FE would reject this.
+    expect(() => engine.read16(0x040003fe)).not.toThrow();
+    expect(() => engine.read16(0x04000400)).toThrow(/nothing is mapped/);
+  });
+
+  it('reports SRAM whether or not a save chip was detected', () => {
+    // Detection is a pattern scan of the ROM; gating the guard on it would turn a
+    // missed heuristic into a hard refusal of a legitimate read.
+    const engine = engineWithBytes(BASE, BYTES); // no ROM loaded, so nothing detected
+    expect(() => engine.read16(0x0e000000)).not.toThrow();
+  });
+
+  it('treats the EEPROM region as its own, not as cartridge data', () => {
+    const gba = new Gba();
+    gba.loadRom(new Uint8Array(0x100).fill(0x5a));
+    const engine = new ScriptingEngine(gba, stubHost);
+    // A wide read here is a serial transaction, not a fetch from ROM — so it must not
+    // be range-checked against the ROM's length, which would refuse it by accident.
+    expect(() => engine.read16(0x0d000000)).not.toThrow();
+    expect(() => engine.read16(0x08000100)).toThrow(/nothing is mapped/); // past this ROM
+  });
+
+  it('still reads every region the bus decodes', () => {
     const engine = engineWithBytes(BASE, BYTES);
     // Positive control for the guard as a whole: it must not reject ordinary memory.
-    for (const addr of [0x02000000, 0x03000000, 0x04000000, 0x05000000, 0x06000000, 0x07000000]) {
+    for (const addr of [0x00000000, 0x02000000, 0x03000000, 0x04000000, 0x05000000, 0x06000000, 0x07000000]) {
       expect(() => engine.read16(addr)).not.toThrow();
     }
+  });
+
+  it('accepts a RAM mirror, which is a real read and not a mistake', () => {
+    const engine = engineWithBytes(BASE, BYTES);
+    // EWRAM and IWRAM mirror their small stores across the whole 16 MB region.
+    expect(engine.read16(0x02f00000)).toBe(engine.read16(0x02000000));
+    expect(engine.read16(0x03ff0000 + 0x100)).toBe(engine.read16(BASE));
   });
 });
 
@@ -129,8 +161,8 @@ describe('readBytes', () => {
 });
 
 describe('readMember / writeMember', () => {
-  // The shape that produced a wrong reading in practice: a 2-byte member at an ODD
-  // offset inside a struct — `u8 bgMapSize[2]` at offset 3 of Klonoa's GfxControlFlags.
+  // The shape that reads wrong through an aligned load: a 2-byte member at an ODD
+  // offset, e.g. a `u8 x[2]` following three bytes of flags.
   const oddTwoByte = { offset: 3, size: 2 };
   const bitfieldAtOddByte = { offset: 1, size: 1, bitOffset: 0, bitWidth: 1 };
 

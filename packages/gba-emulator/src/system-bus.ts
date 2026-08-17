@@ -235,30 +235,39 @@ export class GbaSystemBus implements MemoryBus {
   // ─── Memory Map Classification ────────────────────────────────────
 
   /**
-   * What actually backs `address`, or `null` when nothing does.
+   * The region this bus decodes `address` to, or `null` when it decodes nothing.
    *
    * The `read*` methods below are the HARDWARE interface: they answer every address,
-   * because the console does — an unbacked one reads as open bus, which on real
+   * because the console does — an undecoded one reads as open bus, which on real
    * silicon is a value, not a fault. That is correct for the CPU and wrong for a
    * human or an agent, who gets a plausible number back from a question that had no
    * answer. Debug-facing callers use this first so they can refuse instead
    * (see `ScriptingEngine.read16`/`read32`/`readBytes`).
    *
+   * "Decoded" is the test, not "distinct". The RAM regions mirror a small store
+   * across their whole 16 MB window, and a read from a mirror is a real read — so
+   * this reports the region rather than claiming the address is a mistake. What it
+   * does catch is space nothing answers for: the holes in the BIOS and I/O regions,
+   * region 0x01, everything from 0x10 up, and an offset past the end of the
+   * cartridge actually loaded.
+   *
    * Side-effect free — unlike a read, which can advance the EEPROM serial state.
    */
   describeAddress(address: number): { region: string } | null {
     const addr = address >>> 0;
+    const offset = addr & 0x00ffffff;
     switch ((addr >>> 24) & 0xff) {
       case 0x00:
-        return (addr & 0x00ffffff) < 0x4000 ? { region: 'BIOS' } : null;
+        return offset < 0x4000 ? { region: 'BIOS' } : null;
       case 0x02:
         return { region: 'EWRAM' };
       case 0x03:
         return { region: 'IWRAM' };
       case 0x04:
-        // The register file is 0x04000000..0x040003FE, plus the mirrored internal
-        // memory control word at 0x04000800. Everything between is unbacked.
-        return (addr & 0x00ffffff) <= 0x3fe || (addr & 0x00ffffff & ~3) === 0x800 ? { region: 'MMIO' } : null;
+        // The register file this bus backs, exactly: mmioRegisters is 0x400 bytes and
+        // every access is masked into it. Nothing models the memory-control register
+        // at 0x04000800, so reporting it as I/O would assert something untrue.
+        return offset < 0x400 ? { region: 'MMIO' } : null;
       case 0x05:
         return { region: 'palette RAM' };
       case 0x06:
@@ -270,14 +279,20 @@ export class GbaSystemBus implements MemoryBus {
       case 0x0a:
       case 0x0b:
       case 0x0c:
-      case 0x0d:
-        // The three wait-state mirrors all address the same cartridge, so what
-        // decides is the offset into it — a pointer past the end of THIS ROM reads
-        // as 0, which is the case worth catching.
+        // The wait-state mirrors all address the same cartridge, so what decides is
+        // the offset into it — past the end of the loaded ROM reads as 0.
         return (addr & 0x01ffffff) < this.#rom.length ? { region: 'ROM' } : null;
+      case 0x0d:
+        // Not cartridge data: a wide read here is an EEPROM serial transaction that
+        // returns one data bit. Decoded, so not refused — but it is its own region.
+        return { region: 'EEPROM' };
       case 0x0e:
       case 0x0f:
-        return this.#hasSram ? { region: 'SRAM' } : null;
+        // Reported whether or not a save chip was detected. Detection is a pattern
+        // scan of the ROM, and a guard must not be more certain than its evidence:
+        // gating on it would turn a missed heuristic into a hard refusal of a
+        // legitimate read.
+        return { region: 'SRAM' };
       default:
         return null;
     }

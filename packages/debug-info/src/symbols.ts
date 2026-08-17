@@ -33,9 +33,9 @@ export interface FunctionEntry {
    * that is only as good as the symbol table is dense.
    *
    * This is not a detail. In a decomp ELF most symbols come from hand-written asm and
-   * carry no size at all (in Klonoa: 827 of 1162 functions), so a lookup that lands
-   * 3 KB past a function's real body still resolves to it, with nothing in the answer
-   * to say the containment was never established.
+   * carry no size at all, so a lookup landing kilobytes past a function's real body
+   * still resolves to it, with nothing in the answer to say the containment was never
+   * established.
    */
   exact: boolean;
 }
