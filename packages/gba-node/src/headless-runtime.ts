@@ -122,6 +122,7 @@ export class HeadlessRuntime {
       read32: (address: number) => engine.read32(address),
       readBytes: (address: number, size: number) => engine.readBytes(address, size),
       readVariable: (path: string) => engine.readVariable(path),
+      writeVariable: (path: string, value: number) => engine.writeVariable(path, value),
       readMember: (base: number, member: Parameters<ScriptingEngine['readMember']>[1]) =>
         engine.readMember(base, member),
       writeMember: (base: number, member: Parameters<ScriptingEngine['writeMember']>[1], value: number) =>

@@ -42,6 +42,16 @@ const BUTTON_MAP: Record<string, GbaButton> = {
 type ButtonName = 'a' | 'b' | 'select' | 'start' | 'right' | 'left' | 'up' | 'down' | 'r' | 'l';
 
 /**
+ * The optional bitfield pair carried by both location shapes the debug info produces —
+ * a `ResolvedLocation` (symbol path) and a `MemberLocation` (base + offset). Neither is
+ * a supertype of the other, and the decode needs nothing else from either.
+ */
+interface BitfieldSpan {
+  bitOffset?: number;
+  bitWidth?: number;
+}
+
+/**
  * A member's byte width, or a throw naming the member that lacks one. `size` is null
  * for an incomplete type or a flexible array — cases where there is no span to read,
  * and where guessing one would invent the value the caller is about to believe.
@@ -688,13 +698,29 @@ export class ScriptingEngine {
    *   readVariable('gPlayerFlags.invincible'); // a bitfield, decoded
    */
   readVariable(path: string): number {
-    return this.#readResolved(this.#resolveForRead(path));
+    const loc = this.#resolveLocation(path, 'readVariable');
+    return this.#readDecoded(loc.address, loc.size, loc, 'readVariable');
   }
 
-  /** Resolve a path to a readable (≤ 4-byte) location, or throw with the reason. */
-  #resolveForRead(path: string): ResolvedLocation {
+  /**
+   * Write a global/static variable by the same `symbol` or `symbol.field.subfield` path
+   * {@link readVariable} reads — the address and width come from the ELF, and a
+   * bitfield is merged into its container without disturbing the fields beside it.
+   * Throws if the path can't be resolved or the target is read-only.
+   *
+   * @example
+   *   writeVariable('g_game_vars.score', 1000);
+   *   writeVariable('gPlayerFlags.invincible', 1); // neighbouring bits survive
+   */
+  writeVariable(path: string, value: number): void {
+    const loc = this.#resolveLocation(path, 'writeVariable');
+    this.#writeDecoded(loc.address, loc.size, loc, value, 'writeVariable');
+  }
+
+  /** Resolve a path to a ≤ 4-byte location, or throw with the reason. */
+  #resolveLocation(path: string, api: string): ResolvedLocation {
     if (!this.#debugInfo) {
-      throw new Error(`resolving "${path}" requires debug info; call loadDebugInfo(elfBytes) first`);
+      throw new Error(`${api}: resolving "${path}" requires debug info; call loadDebugInfo(elfBytes) first`);
     }
     const loc = this.#debugInfo.resolveVariable(path);
     if (loc === null) {
@@ -706,12 +732,6 @@ export class ScriptingEngine {
     return loc;
   }
 
-  /** Read + bitfield-decode the value at a resolved location; result is unsigned. */
-  #readResolved(loc: ResolvedLocation): number {
-    const raw = this.#readSized(loc.address, loc.size);
-    return loc.bitOffset === undefined ? raw : ((raw >>> loc.bitOffset) & (2 ** loc.bitWidth! - 1)) >>> 0;
-  }
-
   /**
    * Build a value reader + a human label for a `wait`/`assert` memory address: a raw
    * number reads a single byte; a `symbol`/`symbol.field` path resolves through the
@@ -721,8 +741,11 @@ export class ScriptingEngine {
     if (typeof address === 'number') {
       return { read: () => this.#gba.bus.read8(address), label: `0x${address.toString(16)}` };
     }
-    const loc = this.#resolveForRead(address);
-    return { read: () => this.#readResolved(loc), label: `"${address}" (0x${loc.address.toString(16)})` };
+    const loc = this.#resolveLocation(address, 'wait/assert');
+    return {
+      read: () => this.#readDecoded(loc.address, loc.size, loc, 'wait/assert'),
+      label: `"${address}" (0x${loc.address.toString(16)})`,
+    };
   }
 
   /**
@@ -745,9 +768,9 @@ export class ScriptingEngine {
    *
    * `member` is a {@link MemberLocation} from `structMember()` / `variableMember()`,
    * so the offset, width and bit range all come from the build's own debug info
-   * rather than from a hand-typed constant. The read is byte-assembled, which is what
-   * makes a member at an odd offset (`u8 x[2]` at offset 3 is ordinary) read the bytes
-   * it names instead of the aligned ones next to them.
+   * rather than from a hand-typed constant. Unlike {@link readVariable}, the base is a
+   * plain address, so this reaches an instance the symbol table cannot name: one
+   * behind a pointer, an array element, or anything else placed at run time.
    *
    * @example
    *   const f = di.structMember('PlayerState', 'invincible');
@@ -755,25 +778,49 @@ export class ScriptingEngine {
    */
   readMember(base: number, member: MemberLocation): number {
     const size = requireMemberSize(member, 'readMember');
-    const raw = this.readBytes(base + member.offset, size);
-    return member.bitWidth === undefined ? raw : ((raw >>> member.bitOffset!) & (2 ** member.bitWidth - 1)) >>> 0;
+    return this.#readDecoded(base + member.offset, size, member, 'readMember');
   }
 
   /**
    * Write a DWARF-described struct member, preserving a bitfield's neighbours — the
-   * write counterpart to {@link readMember}, and correct at any alignment for the same
-   * reason. Throws if the target is not writable memory, rather than dropping the
-   * write the way the cartridge bus does.
+   * write counterpart to {@link readMember}, reaching the same run-time instances
+   * {@link writeVariable} cannot name.
    */
   writeMember(base: number, member: MemberLocation, value: number): void {
     const size = requireMemberSize(member, 'writeMember');
-    const address = base + member.offset;
-    this.#requireWritable(address, size, 'writeMember');
+    this.#writeDecoded(base + member.offset, size, member, value, 'writeMember');
+  }
+
+  /**
+   * Read `size` bytes at `address` and extract the bitfield `bits` describes, if any.
+   *
+   * The one place a described location becomes a value. Both entry points reach it —
+   * a symbol path via {@link readVariable}, a base + offset via {@link readMember} —
+   * so the shift/mask exists once, and so does the guarantee that the read is
+   * byte-assembled rather than issued as an aligned load that would round the address
+   * down. `bits` is anything carrying the optional `bitOffset`/`bitWidth` pair; a
+   * plain member carries neither and reads whole.
+   */
+  #readDecoded(address: number, size: number, bits: BitfieldSpan, api: string): number {
+    this.#requireReadable(address, size, api);
+    const raw = this.#readSized(address, size);
+    return bits.bitWidth === undefined ? raw : ((raw >>> bits.bitOffset!) & (2 ** bits.bitWidth - 1)) >>> 0;
+  }
+
+  /**
+   * Store `value` into `size` bytes at `address`, merging rather than replacing when
+   * `bits` describes a bitfield — the write counterpart to {@link #readDecoded}, and
+   * the only place the read-modify-write lives. Byte-assembled for the same reason:
+   * an aligned store would rewrite the container next door, which corrupts the guest
+   * instead of merely misreading it.
+   */
+  #writeDecoded(address: number, size: number, bits: BitfieldSpan, value: number, api: string): void {
+    this.#requireWritable(address, size, api);
     let toStore = value >>> 0;
-    if (member.bitWidth !== undefined) {
-      const mask = ((2 ** member.bitWidth - 1) << member.bitOffset!) >>> 0;
+    if (bits.bitWidth !== undefined) {
+      const mask = ((2 ** bits.bitWidth - 1) << bits.bitOffset!) >>> 0;
       const current = this.#readSized(address, size);
-      toStore = (((current & ~mask) >>> 0) | (((value << member.bitOffset!) >>> 0) & mask)) >>> 0;
+      toStore = (((current & ~mask) >>> 0) | (((value << bits.bitOffset!) >>> 0) & mask)) >>> 0;
     }
     const bus = this.#gba.bus;
     for (let i = 0; i < size; i++) {

@@ -242,17 +242,31 @@ readBytes(0x03002923, 2); // the two bytes at 0x...23 and 0x...24
 
 Throws if any byte of the span is undecoded, or if the span runs off the end of its region.
 
-### `readMember(base, member)` / `writeMember(base, member, value)` — DWARF Struct Members
+### `readVariable(path)` / `writeVariable(path, value)` — Named Globals
 
-Read or write a struct member described by the build's own debug info, bitfields decoded, correct at any alignment. `member` is a `MemberLocation` from `structMember()` / `variableMember()`, so the offset, width and bit range come from the ELF rather than from a hand-typed constant — rename the field in C and the lookup fails loudly instead of reading the wrong bytes.
+Read or write a global by a `symbol` or `symbol.field.subfield` path. The address comes from the symbol table and the width and bit range from the variable's DWARF type, so the right bytes are read and a bitfield is decoded — or, on write, merged into its container without disturbing the fields beside it.
+
+```javascript
+readVariable('g_game_vars.score');
+readVariable('gPlayerFlags.invincible'); // a bitfield, decoded
+writeVariable('g_game_vars.score', 1000);
+writeVariable('gPlayerFlags.invincible', 1); // neighbouring bits survive
+```
+
+Throws if debug info isn't loaded, the path can't be resolved, the field is wider than 4 bytes, or the target is read-only.
+
+### `readMember(base, member)` / `writeMember(base, member, value)` — Struct Members at a Runtime Address
+
+The same read and write, addressed by a base plus a `MemberLocation` from `structMember()` / `variableMember()` rather than by name. Use these when the instance has no symbol of its own — one reached through a pointer, an array element, or anything placed at run time, none of which a `readVariable` path can express.
 
 ```javascript
 const f = di.structMember('PlayerState', 'invincible');
-readMember(structBase, f); // already shifted and masked
-writeMember(structBase, f, 1); // preserves the field's neighbours
+const base = read32(symbolToAddress('gPlayerPtr'));
+readMember(base, f); // already shifted and masked
+writeMember(base, f, 1); // preserves the field's neighbours
 ```
 
-`writeMember` throws if the target is ROM or BIOS, rather than letting the bus discard the write and leave you reading back the old value.
+The offset, width and bit range come from the ELF rather than from a hand-typed constant, so renaming the field in C makes the lookup fail loudly instead of reading the wrong bytes.
 
 ### `disassemble(address, count?, mode?)` — Instruction Disassembly
 
