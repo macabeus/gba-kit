@@ -225,3 +225,39 @@ describe('ScriptingEngine debug info', () => {
     expect(() => noInfo.assert({ memory: { address: 'g_counter', equals: 0 } })).toThrow(/requires debug info/);
   });
 });
+
+describe('write extent guard', () => {
+  it('refuses a write that runs off the end of a named object', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+
+    const probe = engine.symbolToAddress('g_probe')!;
+    const extent = engine.symbolExtent('g_probe')!;
+    // A span starting inside the object and ending past it lands in whatever follows,
+    // which is a different object nobody named.
+    expect(() => engine.writeBytes(probe + extent.size - 2, 4, 0)).toThrow(/runs past the end of "g_probe"/);
+
+    // Positive controls: the same width wholly inside is fine, and so is the very last
+    // byte — an off-by-one in the bound would reject one of these.
+    expect(() => engine.writeBytes(probe + extent.size - 4, 4, 0)).not.toThrow();
+    expect(() => engine.writeBytes(probe + extent.size - 1, 1, 0)).not.toThrow();
+  });
+
+  it('stays silent where it has no bound to apply', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+    // Unnamed memory, and memory past a symbol whose range was only inferred, must
+    // stay writable — a guard that refuses ordinary writes is worse than none.
+    expect(() => engine.write32(0x02000000, 0)).not.toThrow();
+    expect(() => engine.write16(0x03000f00, 0)).not.toThrow();
+  });
+
+  it('reports where an extent came from', () => {
+    const engine = new ScriptingEngine(new Gba(), stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+    expect(engine.symbolExtent('g_probe')).toEqual({ size: 32, source: expect.stringMatching(/^(st_size|dwarf)$/) });
+    expect(engine.symbolExtent('no_such_symbol')).toBeNull();
+  });
+});

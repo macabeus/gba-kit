@@ -72,10 +72,14 @@ export class SymbolIndex {
       symbols.filter((s) => s.type === STT_FUNC),
       sections,
     );
-    // Functions + data objects, for addressToSymbol (so a PC landing in a global
-    // resolves to that STT_OBJECT, not just functions).
+    // Functions + data, for addressToSymbol (so an address landing in a global
+    // resolves to it, not just to functions). Linker-defined absolutes are included
+    // because in a decomp they ARE the data globals: an ldscript `gFoo = 0x03000000;`
+    // is NOTYPE/SHN_ABS, and excluding them left addressToSymbol unable to name a
+    // single global in such an ELF. They carry no st_size, so their extent is
+    // inferred and reported as such — see `exact`.
     this.#all = buildRanges(
-      symbols.filter((s) => s.type === STT_FUNC || s.type === STT_OBJECT),
+      symbols.filter((s) => s.type === STT_FUNC || s.type === STT_OBJECT || s.type === STT_NOTYPE),
       sections,
     );
   }

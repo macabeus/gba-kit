@@ -119,6 +119,10 @@ export class HeadlessRuntime {
       getRegisters: () => engine.getRegisters(),
       getMemory: (address: number, length: number) => engine.getMemory(address, length),
       read16: (address: number) => engine.read16(address),
+      write8: (address: number, value: number) => engine.write8(address, value),
+      write16: (address: number, value: number) => engine.write16(address, value),
+      write32: (address: number, value: number) => engine.write32(address, value),
+      writeBytes: (address: number, size: number, value: number) => engine.writeBytes(address, size, value),
       read32: (address: number) => engine.read32(address),
       readBytes: (address: number, size: number) => engine.readBytes(address, size),
       readVariable: (path: string) => engine.readVariable(path),
@@ -154,6 +158,7 @@ export class HeadlessRuntime {
       pcToSource: (pc: number) => engine.pcToSource(pc),
       pcToFunction: (pc: number) => engine.pcToFunction(pc),
       addressToSymbol: (addr: number) => engine.addressToSymbol(addr),
+      symbolExtent: (name: string) => engine.symbolExtent(name),
       symbolToAddress: (name: string) => engine.symbolToAddress(name),
 
       // Save states

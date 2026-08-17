@@ -476,6 +476,36 @@ export class TypeIndex {
     return this.#memberPath(this.#resolveStructType(variable.attrs.get(DW_AT_type)), path);
   }
 
+  /**
+   * Subscript a global/static *variable* that is itself an array, e.g.
+   * `variableIndex('gLayers', [4])` → the byte offset of element 4 and its size.
+   * Indices are bounds-checked against the DWARF extent and throw when past the end.
+   * Returns null when the variable has no DWARF DIE.
+   */
+  variableIndex(varName: string, indices: number[]): { offset: number; size: number | null } | null {
+    const variable = this.#variableByName.get(varName);
+    if (!variable) {
+      return null;
+    }
+    const step = this.#subscript(variable.attrs.get(DW_AT_type), { name: varName, indices }, variable);
+    return { offset: step.offset, size: step.size };
+  }
+
+  /** The element type of an array-typed variable, for descending a path after a subscript. */
+  variableElementStruct(varName: string): Die | null {
+    const variable = this.#variableByName.get(varName);
+    if (!variable) {
+      return null;
+    }
+    const arrayDie = this.#stripTypedefs(variable.attrs.get(DW_AT_type));
+    return arrayDie?.tag === DW_TAG_array_type ? this.#resolveStructType(arrayDie.attrs.get(DW_AT_type)) : null;
+  }
+
+  /** Resolve a member path against a struct DIE the caller already holds. */
+  memberPathOf(structDie: Die | null, path: string | string[]): MemberLocation | null {
+    return this.#memberPath(structDie, path);
+  }
+
   /** Byte size of a global/static variable's type, or null if unknown. */
   variableSize(varName: string): number | null {
     const variable = this.#variableByName.get(varName);
@@ -630,8 +660,8 @@ export class TypeIndex {
 
   /** Walk `path` from a struct/union DIE, accumulating member byte offsets. */
   #memberPath(structDie: Die | null, path: string | string[]): MemberLocation | null {
-    const segments = Array.isArray(path) ? path : path.split('.');
-    if (segments.length === 0) {
+    const segments = parsePath(path);
+    if (segments === null || segments.length === 0) {
       return null;
     }
     let die: Die | null = structDie;
@@ -640,9 +670,23 @@ export class TypeIndex {
       if (!die) {
         return null;
       }
-      const found = this.#findMember(die, segments[i]);
+      const seg = segments[i]!;
+      const found = this.#findMember(die, seg.name);
       if (!found) {
         return null;
+      }
+      const memberType = found.member.attrs.get(DW_AT_type);
+      if (seg.indices.length > 0) {
+        // A subscripted member: step into the array by whole elements. The bound
+        // comes from the same DWARF that gave the stride, so an index past the end
+        // is refused here rather than silently addressing the next object along.
+        const step = this.#subscript(memberType, seg);
+        baseOffset += found.baseOffset + memberOffset(found.member) + step.offset;
+        if (i + 1 === segments.length) {
+          return { offset: baseOffset, size: step.size };
+        }
+        die = this.#resolveStructType(step.elemType);
+        continue;
       }
       if (i + 1 === segments.length) {
         const layout = this.#memberLayout(found.member);
@@ -650,9 +694,66 @@ export class TypeIndex {
       }
       // Intermediate segment: descend into its (possibly anonymous-wrapped) type.
       baseOffset += found.baseOffset + memberOffset(found.member);
-      die = this.#resolveStructType(found.member.attrs.get(DW_AT_type));
+      die = this.#resolveStructType(memberType);
     }
     return null;
+  }
+
+  /**
+   * Byte offset of `seg`'s subscripts within an array-typed reference, plus the
+   * element's size and type reference.
+   *
+   * Every index is checked against that dimension's declared extent, and one past the
+   * end **throws**. Returning a location instead would hand back an address inside
+   * whatever object follows the array — which reads as data and writes as corruption,
+   * with nothing to distinguish either from the real thing. An extent the DWARF does
+   * not state (a flexible or unsized `extern` array) cannot be checked, and is
+   * reported in the message when a later dimension fails.
+   */
+  #subscript(
+    typeRef: AttrValue | undefined,
+    seg: PathSegment,
+    /**
+     * The declaring DIE, when the array is a *variable* rather than a struct member.
+     * GCC 2.95 spells an unsized `extern T x[]` as extent 1, so an unnormalized bound
+     * would reject every index above 0 on an array that has no stated bound at all.
+     */
+    declaringVariable?: Die,
+  ): { offset: number; size: number | null; elemType: AttrValue | undefined } {
+    const arrayDie = this.#stripTypedefs(typeRef);
+    if (!arrayDie || arrayDie.tag !== DW_TAG_array_type) {
+      throw new Error(`"${seg.name}" is not an array, so it cannot be subscripted`);
+    }
+    const elemType = arrayDie.attrs.get(DW_AT_type);
+    const elemSize = this.#typeRefSize(elemType);
+    const dims = (declaringVariable ? declaredDims(declaringVariable, arrayDie) : arrayDims(arrayDie)) ?? [];
+    if (seg.indices.length > dims.length) {
+      throw new Error(
+        `"${seg.name}" has ${dims.length} dimension(s), but ${seg.indices.length} subscript(s) were given`,
+      );
+    }
+    // Row-major: a subscript steps over every dimension inside it.
+    let offset = 0;
+    for (let d = 0; d < seg.indices.length; d++) {
+      const index = seg.indices[d]!;
+      const extent = dims[d];
+      if (extent !== null && extent !== undefined && index >= extent) {
+        throw new Error(`"${seg.name}" has ${extent} element(s) in dimension ${d}, so index ${index} is past the end`);
+      }
+      let stride = elemSize;
+      for (let inner = d + 1; inner < dims.length; inner++) {
+        const innerExtent = dims[inner];
+        stride = stride === null || innerExtent === null || innerExtent === undefined ? null : stride * innerExtent;
+      }
+      if (stride === null) {
+        throw new Error(`"${seg.name}" has no known element stride, so it cannot be subscripted`);
+      }
+      offset += index * stride;
+    }
+    // Fully subscripted reaches an element; partly subscripted reaches a sub-array,
+    // whose size the caller cannot express as a scalar.
+    const size = seg.indices.length === dims.length ? elemSize : null;
+    return { offset, size, elemType };
   }
 
   /**
@@ -937,6 +1038,52 @@ function memberOffset(member: Die): number {
     return new Cursor(value, 1).uleb();
   }
   return 0;
+}
+
+/** One `name` or `name[i]` / `name[i][j]` step of a member path. */
+export interface PathSegment {
+  name: string;
+  /** Subscripts applied to this segment, outermost first; empty for a plain member. */
+  indices: number[];
+}
+
+/**
+ * Split `a.b[2].c` into segments. Returns null when the text is not a well-formed
+ * path, so a caller cannot mistake a typo for a missing field: `a[` and `a[x]` are
+ * rejected rather than read as a member literally named `a[`.
+ *
+ * An array input keeps the existing element-per-segment form, and each element may
+ * itself carry subscripts.
+ */
+export function parsePath(path: string | string[]): PathSegment[] | null {
+  const parts = Array.isArray(path) ? path : path.split('.');
+  const segments: PathSegment[] = [];
+  for (const part of parts) {
+    const open = part.indexOf('[');
+    if (open === -1) {
+      if (part.includes(']')) {
+        return null;
+      }
+      segments.push({ name: part, indices: [] });
+      continue;
+    }
+    const name = part.slice(0, open);
+    const indices: number[] = [];
+    let rest = part.slice(open);
+    while (rest.length > 0) {
+      const m = /^\[(\d+)\]/.exec(rest);
+      if (!m) {
+        return null;
+      }
+      indices.push(Number(m[1]));
+      rest = rest.slice(m[0].length);
+    }
+    if (name === '') {
+      return null;
+    }
+    segments.push({ name, indices });
+  }
+  return segments;
 }
 
 /**

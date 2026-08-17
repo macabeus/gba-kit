@@ -242,18 +242,57 @@ readBytes(0x03002923, 2); // the two bytes at 0x...23 and 0x...24
 
 Throws if any byte of the span is undecoded, or if the span runs off the end of its region.
 
+### `write8` / `write16` / `write32` / `writeBytes(address, size, value)` — Memory Writes
+
+The write counterparts to the reads above, with the same guards: `write16` and `write32` throw on a misaligned address, all of them throw on space the bus decodes to nothing or that is read-only, and `writeBytes` stores 1–4 bytes at any alignment.
+
+```javascript
+write32(0x03001000, 0xdeadbeef);
+writeBytes(0x03001003, 2, 0xabcd); // two bytes at an odd address
+
+write16(0x03001001, 0); // throws: not 2-byte aligned
+write32(0x08000000, 0); // throws: ROM is read-only
+```
+
+Alignment matters more on the write side. The bus rounds the address down, so a misaligned store does not merely write the wrong place — it overwrites the value _next door_. A read at the wrong address returns a number you can still sanity-check; a write at the wrong address silently changes the state you are observing.
+
 ### `readVariable(path)` / `writeVariable(path, value)` — Named Globals
 
-Read or write a global by a `symbol` or `symbol.field.subfield` path. The address comes from the symbol table and the width and bit range from the variable's DWARF type, so the right bytes are read and a bitfield is decoded — or, on write, merged into its container without disturbing the fields beside it.
+Read or write a global by a `symbol`, `symbol.field.subfield` or subscripted path. The address comes from the symbol table and the width and bit range from the variable's DWARF type, so the right bytes are read and a bitfield is decoded — or, on write, merged into its container without disturbing the fields beside it.
 
 ```javascript
 readVariable('g_game_vars.score');
 readVariable('gPlayerFlags.invincible'); // a bitfield, decoded
+readVariable('gLayers[2].width'); // an array element
+readVariable('gGrid[1][3]'); // every dimension subscripted
 writeVariable('g_game_vars.score', 1000);
 writeVariable('gPlayerFlags.invincible', 1); // neighbouring bits survive
 ```
 
+**Subscripts are bounds-checked** against the DWARF extent, and an index past the end throws:
+
+```javascript
+readVariable('gLayers[4].width');
+// throws: "gLayers" has 4 element(s) in dimension 0, so index 4 is past the end
+```
+
+That check is the difference between a mistake and a wrong result. Element 4 of a 4-element array is a real address — it is whatever object the linker placed next — so without the bound it reads as plausible data and writes as corruption of something you never named. A dimension the DWARF leaves unstated (`extern T x[][4]`) cannot be checked and is not.
+
 Throws if debug info isn't loaded, the path can't be resolved, the field is wider than 4 bytes, or the target is read-only.
+
+### `symbolExtent(name)` — How Big Is That Object
+
+Returns `{ size, source }` — the byte extent of a named object and where it is known from, `'st_size'` or `'dwarf'` — or `null` when nothing states it. In a decomp the answer is almost always `dwarf`: an ldscript global (`gFoo = 0x03000000;`) is `SHN_ABS`/`NOTYPE` and carries no `st_size` at all.
+
+This is the bound the write guards apply. A write that starts inside an object with a known extent and runs past its end is refused, naming what it would have run into:
+
+```javascript
+writeBytes(gLayersAddr + 110, 4, 0);
+// throws: writing 4 bytes at 0x300349e runs past the end of "gLayers"
+//         (112 bytes, from dwarf), into "gLevelStatePtr".
+```
+
+Only a span that _crosses_ a boundary is catchable this way. An address computed past an array's end lands wholly inside its neighbour, and from an address alone that is indistinguishable from a deliberate write to that neighbour — use a subscripted `writeVariable` path, which is checkable.
 
 ### `readMember(base, member)` / `writeMember(base, member, value)` — Struct Members at a Runtime Address
 
