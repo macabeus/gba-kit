@@ -149,6 +149,8 @@ export class HeadlessRuntime {
       filterMemory: (addresses: number[], options: Parameters<ScriptingEngine['filterMemory']>[1]) =>
         engine.filterMemory(addresses, options),
       watchMemory: (options: Parameters<ScriptingEngine['watchMemory']>[0]) => engine.watchMemory(options),
+      watchExecution: (target: number | string, options?: Parameters<ScriptingEngine['watchExecution']>[1]) =>
+        engine.watchExecution(target, options),
       watchSymbol: (name: string, options?: Parameters<ScriptingEngine['watchSymbol']>[1]) =>
         engine.watchSymbol(name, options),
       clearWatchpoints: () => engine.clearWatchpoints(),

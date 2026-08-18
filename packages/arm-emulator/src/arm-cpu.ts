@@ -201,6 +201,15 @@ export class ArmCpu {
   /** Optional debug hooks */
   #hooks?: DebugHooks;
 
+  /**
+   * Execution watchpoints by instruction address. Composable and independent of
+   * {@link setDebugHooks}, which is a single slot one owner replaces wholesale — an
+   * analysis tool must be able to watch a PC without evicting a debugger's hooks.
+   */
+  readonly #execWatch = new Map<number, ((address: number) => void)[]>();
+  /** Fast path: skip the lookup entirely on the common no-watchpoint case. */
+  #execWatchActive = false;
+
   /** Platform-specific SWI handler */
   #swiHandler?: SwiHandler;
 
@@ -426,6 +435,50 @@ export class ArmCpu {
     this.#hooks = hooks;
   }
 
+  /**
+   * Call `onExecute` every time the instruction at `address` is about to run, and
+   * return a disposer. Several watchpoints may share an address, and registering one
+   * does not disturb {@link setDebugHooks}.
+   *
+   * This is the only way to observe execution soundly. Sampling the PC between frames
+   * sees whatever the CPU happens to be doing at a frame boundary — on a game that
+   * idles in a BIOS wait loop, that is one address out of the thousands executed, so
+   * every other address reads as "never reached".
+   */
+  addExecWatchpoint(address: number, onExecute: (address: number) => void): () => void {
+    const key = address >>> 0;
+    const list = this.#execWatch.get(key) ?? [];
+    list.push(onExecute);
+    this.#execWatch.set(key, list);
+    this.#execWatchActive = true;
+    return () => {
+      const current = this.#execWatch.get(key);
+      if (!current) {
+        return;
+      }
+      const i = current.indexOf(onExecute);
+      if (i >= 0) {
+        current.splice(i, 1);
+      }
+      if (current.length === 0) {
+        this.#execWatch.delete(key);
+      }
+      this.#execWatchActive = this.#execWatch.size > 0;
+    };
+  }
+
+  /** Fire any execution watchpoints registered at `address`. */
+  #fireExecWatch(address: number): void {
+    const list = this.#execWatch.get(address);
+    if (!list) {
+      return;
+    }
+    // Copy: a callback may dispose itself (a one-shot wait is exactly that).
+    for (const cb of list.slice()) {
+      cb(address);
+    }
+  }
+
   /** Register a stub for an external function call */
   registerStub(symbolName: string): number {
     const addr = this.#nextStub;
@@ -616,6 +669,10 @@ export class ArmCpu {
     const pc = this.registers[PC]!;
     const instrAddr = pc & ~1;
     const instr = this.memory.read16(instrAddr);
+
+    if (this.#execWatchActive) {
+      this.#fireExecWatch(instrAddr);
+    }
 
     if (this.#hooks?.onInstructionPre) {
       const action = this.#hooks.onInstructionPre(instrAddr, instr);
@@ -1233,6 +1290,10 @@ export class ArmCpu {
     const pc = this.registers[PC]!;
     const instrAddr = pc & ~3;
     const instr = this.memory.read32(instrAddr);
+
+    if (this.#execWatchActive) {
+      this.#fireExecWatch(instrAddr);
+    }
 
     if (this.#hooks?.onInstructionPre) {
       const action = this.#hooks.onInstructionPre(instrAddr, instr);

@@ -89,16 +89,14 @@ await wait({
 });
 ```
 
-**Wait for the program counter to reach an address:**
+**Wait for an instruction to execute:**
 
 ```javascript
-await wait({
-  pc: 0x08001234,
-  timeout: 600,
-});
+await wait({ execution: 0x08001234, timeout: 600 });
+await wait({ execution: 'UpdatePlayer' }); // a symbol, when debug info is loaded
 ```
 
-Throws an error if the condition isn't met within the timeout.
+Throws if the instruction doesn't execute within the timeout.
 
 ### `press(buttons, options?)` — Button Input
 
@@ -228,9 +226,7 @@ read16(0x03002923); // throws: not 2-byte aligned; the hardware would read 0x030
 read32(0x01000000); // throws: nothing is mapped there
 ```
 
-The hardware would answer both: it rounds `read16(0x03002923)` down to `0x03002922`, and reads undecoded space as `0`. Either way the number is indistinguishable from the one you asked for, so these refuse instead. Use `readBytes` to read at any alignment.
-
-A RAM mirror is not an error — `0x02F00000` reads the same byte as `0x02000000`, and neither throws.
+A RAM mirror is not an error — `0x02F00000` reads the same byte as `0x02000000`. Use `readBytes` to read at any alignment.
 
 ### `readBytes(address, size)` — Unaligned Memory Reads
 
@@ -274,13 +270,13 @@ readVariable('gLayers[4].width');
 // throws: "gLayers" has 4 element(s) in dimension 0, so index 4 is past the end
 ```
 
-Element 4 of a 4-element array is a real address — whatever the linker placed next — so without the bound it reads as plausible data and writes as corruption. A dimension the DWARF leaves unstated (`extern T x[][4]`) is not checked.
+A dimension the DWARF leaves unstated (`extern T x[][4]`) is not checked.
 
 Throws if debug info isn't loaded, the path can't be resolved, the field is wider than 4 bytes, or the target is read-only.
 
 ### `symbolExtent(name)` — How Big Is That Object
 
-Returns `{ size, source }` — a named object's byte extent and where it came from — or `null` when nothing states it. A global defined in C is sized by the assembler (`'st_size'`); one placed by the linker (`gFoo = 0x03000000;`) has no size of its own, so its extent comes from the type of a C `extern` declaration (`'dwarf'`). With neither, there is no extent.
+Returns `{ size, source }` — a named object's byte extent, and whether it came from `'st_size'` or the DWARF type — or `null` when nothing states it.
 
 This is the bound the write guards apply. A write starting inside a known extent and running past its end is refused:
 
@@ -290,11 +286,11 @@ writeBytes(gLayersAddr + 110, 4, 0);
 //         (112 bytes, from dwarf), into "gLevelStatePtr".
 ```
 
-Only a span that _crosses_ a boundary is catchable this way. An address computed past an array's end lands wholly inside its neighbour, which is indistinguishable from a deliberate write there — use a subscripted `writeVariable` path instead.
+Only a span that _crosses_ a boundary is caught. An address computed past an array's end lands wholly inside its neighbour — use a subscripted `writeVariable` path, which is bounds-checked.
 
 ### `readMember(base, member)` / `writeMember(base, member, value)` — Struct Members at a Runtime Address
 
-The same read and write, addressed by a base plus a `MemberLocation` from `structMember()` / `variableMember()` rather than by name. Use these when the instance has no symbol of its own — one reached through a pointer, an array element, or anything placed at run time, none of which a `readVariable` path can express.
+The same read and write, addressed by a base plus a `MemberLocation` from `structMember()` / `variableMember()` rather than by name. Use these when the instance has no symbol of its own — one reached through a pointer, an array element, or anything placed at run time.
 
 ```javascript
 const f = di.structMember('PlayerState', 'invincible');
@@ -379,8 +375,11 @@ searchMemory({ value: 3, region: 'both' }); // Both (default)
 
 Registers a write watchpoint over a memory range. Every time a write **commits** to the range, a hit is appended to the returned handle's `hits` array, recording **which code performed the write** — a CPU instruction, or a DMA channel.
 
+`address` is a raw address, or a symbol name when debug info is loaded — a symbol watches the whole object.
+
 ```javascript
 const w = watchMemory({ address: 0x03005220 }); // watch 1 byte
+const g = watchMemory({ address: 'gPlayerState' }); // watch all of it
 await press('right', { hold: 30 }); // make the value change
 w.stop(); // remove the watchpoint
 for (const h of w.hits) {
@@ -396,7 +395,23 @@ Each hit has: `pc`, `instructionAddress`, `address`, `value`, `size`, `thumb`, a
 
 - `length` — watch a multi-byte range (default 1).
 - `filter(hit)` — record only matching hits, so you can watch a wide region without the `hits` array exploding.
-- `maxHits` — cap recorded hits (keeps the first N).
+- `maxHits` — cap recorded hits (keeps the first N); the handle's `dropped` counts the rest.
+
+### `watchExecution(target, options?)` — Execution Watchpoint (find _whether_ code runs)
+
+The execution counterpart to `watchMemory`. `target` is an address, or a symbol name when debug info is loaded.
+
+```javascript
+const w = watchExecution('UpdatePlayer');
+await wait({ frames: 60 });
+w.stop();
+console.log(w.count); // exact number of executions; 0 means it did not run
+for (const h of w.hits) console.log(h.callerLocation); // who called it
+```
+
+The handle carries `hits` (recorded, subject to `maxHits`), `count` (every execution seen, always exact), `dropped`, and `stop()`. A numeric `target` may carry the Thumb bit; it is cleared. Each hit has `address`, `lr` — the caller's return address — `thumb`, and `callerLocation` when debug info covers the caller.
+
+Counted from the CPU's instruction step, so `count === 0` means the code did not run.
 
 ```javascript
 watchMemory({

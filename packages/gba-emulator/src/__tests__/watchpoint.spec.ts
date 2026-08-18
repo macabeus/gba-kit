@@ -1,8 +1,14 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { Gba } from '../gba.js';
 import { ScriptingEngine, type ScriptingHost } from '../scripting.js';
 import { GbaSystemBus, type WatchpointWrite } from '../system-bus.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const AGBCC_ELF = join(here, '..', '..', '..', 'debug-info', 'test-projects', 'agbcc-min', 'build', 'min.elf');
 
 const stubHost: ScriptingHost = {
   writeScreenshot: async () => {},
@@ -216,5 +222,198 @@ describe('ScriptingEngine watchMemory', () => {
     expect(a.hits).toHaveLength(0);
     expect(b.hits).toHaveLength(0);
     expect(busCount).toBe(1); // foreign watchpoint untouched
+  });
+});
+
+describe('ScriptingEngine watchMemory maxHits', () => {
+  it('reports the writes it dropped, so a full array is not read as the whole story', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchMemory({ address: 0x03000000, length: 4, maxHits: 2 });
+    for (let i = 0; i < 10; i++) {
+      gba.bus.write8(0x03000000, i);
+    }
+    w.stop();
+    expect(w.hits).toHaveLength(2);
+    expect(w.dropped).toBe(8);
+  });
+
+  it('reports zero drops when nothing was capped', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchMemory({ address: 0x03000000, length: 4 });
+    for (let i = 0; i < 10; i++) {
+      gba.bus.write8(0x03000000, i);
+    }
+    w.stop();
+    expect(w.hits).toHaveLength(10);
+    expect(w.dropped).toBe(0);
+  });
+});
+
+// ─── Execution watchpoints (scripting engine) ────────────────────────
+
+describe('ScriptingEngine watchExecution', () => {
+  const BASE = 0x02000000;
+
+  /** A Gba whose CPU loops over three Thumb instructions at BASE. */
+  function loopingGba(): Gba {
+    const gba = new Gba();
+    // nop; nop; b -4 (see arm-emulator/src/__tests__/exec-watchpoint.spec.ts).
+    [0x46c0, 0x46c0, 0xe7fc].forEach((instr, i) => {
+      gba.bus.write16(BASE + i * 2, instr);
+    });
+    gba.armCpu.registers[15] = BASE;
+    gba.armCpu.setT(true);
+    return gba;
+  }
+
+  function step(gba: Gba, n: number): void {
+    for (let i = 0; i < n; i++) {
+      gba.armCpu.step();
+    }
+  }
+
+  it('counts every execution, and zero means it did not run', () => {
+    const gba = loopingGba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const ran = engine.watchExecution(BASE);
+    const never = engine.watchExecution(BASE + 0x100);
+    step(gba, 30);
+    ran.stop();
+    never.stop();
+    expect(ran.count).toBe(10);
+    expect(ran.hits).toHaveLength(10);
+    expect(ran.dropped).toBe(0);
+    // The zero is only meaningful because the count above is not zero.
+    expect(never.count).toBe(0);
+  });
+
+  it('keeps the count exact under maxHits and says what it dropped', () => {
+    const gba = loopingGba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchExecution(BASE, { maxHits: 3 });
+    step(gba, 30);
+    w.stop();
+    expect(w.hits).toHaveLength(3);
+    expect(w.count).toBe(10); // the cap bounds memory, not the finding
+    expect(w.dropped).toBe(7);
+    expect(w.hits.length + w.dropped).toBe(w.count);
+  });
+
+  it('records the caller’s return address', () => {
+    const gba = loopingGba();
+    gba.armCpu.registers[14] = 0x08001234;
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchExecution(BASE);
+    step(gba, 3);
+    w.stop();
+    expect(w.hits[0]).toMatchObject({ address: BASE, lr: 0x08001234, thumb: true });
+  });
+
+  it('stops recording after stop()', () => {
+    const gba = loopingGba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchExecution(BASE);
+    step(gba, 15);
+    const atStop = w.count;
+    w.stop();
+    step(gba, 15);
+    expect(atStop).toBeGreaterThan(0);
+    expect(w.count).toBe(atStop);
+  });
+
+  it('needs debug info to accept a symbol name', () => {
+    const engine = new ScriptingEngine(loopingGba(), stubHost);
+    expect(() => engine.watchExecution('SomeFunction')).toThrow(/requires debug info/);
+  });
+});
+
+describe('addressing code and data by number or name', () => {
+  const BASE = 0x02000000;
+
+  it('clears the Thumb bit on a numeric code address', () => {
+    // A Thumb function POINTER carries bit 0 set — read32 of a callback table returns
+    // exactly that. Left set, the watchpoint address is odd and never matches, so the
+    // function reads as never executed.
+    const gba = new Gba();
+    [0x46c0, 0x46c0, 0xe7fc].forEach((instr, i) => gba.bus.write16(BASE + i * 2, instr));
+    gba.armCpu.registers[15] = BASE;
+    gba.armCpu.setT(true);
+    const engine = new ScriptingEngine(gba, stubHost);
+
+    const even = engine.watchExecution(BASE);
+    const asPointer = engine.watchExecution(BASE | 1);
+    for (let i = 0; i < 30; i++) {
+      gba.armCpu.step();
+    }
+    even.stop();
+    asPointer.stop();
+    expect(even.count).toBe(10);
+    expect(asPointer.count).toBe(10); // the same instruction, addressed as a pointer
+  });
+
+  it('watchMemory takes a symbol and watches the whole object', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+    const probe = engine.symbolToAddress('g_probe')!;
+    const extent = engine.symbolExtent('g_probe')!;
+
+    expect(extent.size).toBeGreaterThan(1); // otherwise this proves nothing
+
+    const w = engine.watchMemory({ address: 'g_probe' }); // no explicit length
+    gba.bus.write8(probe, 1); // first byte
+    gba.bus.write8(probe + extent.size - 1, 2); // last byte — only caught if the
+    gba.bus.write8(probe + extent.size, 3); // default length is the whole object
+    w.stop();
+    expect(w.hits.map((h) => h.address)).toEqual([probe, probe + extent.size - 1]);
+  });
+
+  it('refuses an unknown symbol rather than watching nothing', () => {
+    const engine = new ScriptingEngine(new Gba(), stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+    expect(() => engine.watchMemory({ address: 'no_such_global' })).toThrow(/unknown symbol/);
+  });
+
+  it('needs debug info before it can take a name', () => {
+    const engine = new ScriptingEngine(new Gba(), stubHost);
+    expect(() => engine.watchMemory({ address: 'g_probe' })).toThrow(/requires debug info/);
+  });
+});
+
+describe('wait({ execution })', () => {
+  const BASE = 0x02000000;
+
+  function loopingEngine(): { gba: Gba; engine: ScriptingEngine } {
+    const gba = new Gba();
+    [0x46c0, 0x46c0, 0xe7fc].forEach((instr, i) => gba.bus.write16(BASE + i * 2, instr));
+    gba.armCpu.registers[15] = BASE;
+    gba.armCpu.setT(true);
+    const engine = new ScriptingEngine(gba, stubHost);
+    return { gba, engine };
+  }
+
+  it('resolves when the instruction executes', async () => {
+    const { engine } = loopingEngine();
+    await expect(engine.wait({ execution: BASE, timeout: 5 })).resolves.toBeUndefined();
+  });
+
+  it('times out on an instruction that never executes, naming it', async () => {
+    const { engine } = loopingEngine();
+    await expect(engine.wait({ execution: BASE + 0x100, timeout: 2 })).rejects.toThrow(
+      /wait\(\{ execution \}\) timed out after 2 frames waiting for 0x2000100 to execute/,
+    );
+  });
+});
+
+describe('wait() with an unrecognised condition', () => {
+  it('throws instead of silently waiting for nothing', async () => {
+    const engine = new ScriptingEngine(new Gba(), stubHost);
+    // Scripts are untyped JS at run time, so a stale or misspelled key arrives here.
+    await expect(engine.wait({ pc: 0x08000000 } as never)).rejects.toThrow(/unknown condition.*expected one of/s);
+    await expect(engine.wait({} as never)).rejects.toThrow(/unknown condition/);
+    // Positive control: a valid condition is unaffected.
+    await expect(engine.wait({ frames: 1 })).resolves.toBeUndefined();
   });
 });

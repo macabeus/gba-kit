@@ -108,8 +108,13 @@ interface WaitMemory {
   timeout?: number;
 }
 
-interface WaitPC {
-  pc: number;
+interface WaitExecution {
+  /**
+   * Wait until this instruction executes — an address, or a symbol name when debug
+   * info is loaded. The counterpart to {@link ScriptingEngine.watchExecution}, which
+   * records the same event rather than waiting for it.
+   */
+  execution: number | string;
   timeout?: number;
 }
 
@@ -124,7 +129,7 @@ interface WaitPixel {
   timeout?: number;
 }
 
-type WaitCondition = WaitFrames | WaitMemory | WaitPC | WaitPixel;
+type WaitCondition = WaitFrames | WaitMemory | WaitExecution | WaitPixel;
 
 // ─── Memory Snapshot Types ───────────────────────────────────────────
 
@@ -198,6 +203,17 @@ export interface WatchHit {
    * (e.g. INCLUDE_ASM stubs, library code).
    */
   location?: SourceLocation;
+}
+
+/** One execution of a watched instruction, recorded by `watchExecution`. */
+export interface ExecHit {
+  /** The watched instruction address. */
+  address: number;
+  /** Link register at entry — the caller's return address, when the watch is a function entry. */
+  lr: number;
+  thumb: boolean;
+  /** The caller's C `file:line`, when debug info covers it. */
+  callerLocation?: SourceLocation;
 }
 
 // ─── Scripting Engine ────────────────────────────────────────────────
@@ -337,15 +353,30 @@ export class ScriptingEngine {
       throw new Error(`wait({ memory }) timed out after ${timeout} frames at ${probe.label}`);
     }
 
-    if ('pc' in condition) {
-      const targetPC = condition.pc;
-      for (let i = 0; i < timeout; i++) {
-        this.#runFrame();
-        if (this.#gba.armCpu.registers[15] === targetPC) {
-          return;
+    if ('execution' in condition) {
+      const target = condition.execution;
+      // Watched at the CPU's own instruction step, not sampled between frames. A
+      // sample sees only what the CPU happens to be doing at a frame boundary — for a
+      // game that idles in a BIOS wait loop that is a single address, so everything
+      // else reads as never reached however often it actually runs.
+      const address = this.#resolveCodeAddress(target, 'wait({ execution })');
+      let reached = false;
+      const dispose = this.#gba.armCpu.addExecWatchpoint(address, () => {
+        reached = true;
+      });
+      try {
+        for (let i = 0; i < timeout; i++) {
+          this.#runFrame();
+          if (reached) {
+            return;
+          }
         }
+      } finally {
+        dispose();
       }
-      throw new Error(`wait({ pc }) timed out after ${timeout} frames waiting for PC=0x${condition.pc.toString(16)}`);
+      const label =
+        typeof target === 'string' ? `"${target}" (0x${address.toString(16)})` : `0x${address.toString(16)}`;
+      throw new Error(`wait({ execution }) timed out after ${timeout} frames waiting for ${label} to execute`);
     }
 
     if ('pixel' in condition) {
@@ -362,6 +393,13 @@ export class ScriptingEngine {
         `wait({ pixel }) timed out after ${timeout} frames at (${x}, ${y}) waiting for rgb(${r}, ${g}, ${b})`,
       );
     }
+
+    // Scripts run as untyped JS, so an unknown key reaches here at run time. Falling
+    // out of the function would wait for nothing and continue as if the condition had
+    // been met.
+    throw new Error(
+      `wait: unknown condition ${JSON.stringify(Object.keys(condition))} — expected one of frames, memory, execution, pixel`,
+    );
   }
 
   // ─── Input ───────────────────────────────────────────────────────
@@ -526,7 +564,11 @@ export class ScriptingEngine {
    *   w.stop();
    */
   watchMemory(options: {
-    address: number;
+    /**
+     * A raw address, or — when debug info is loaded — a symbol name, in which case
+     * `length` defaults to the whole object rather than one byte.
+     */
+    address: number | string;
     length?: number;
     /**
      * Keep a hit only when this returns true — watch a wide region but record only
@@ -540,17 +582,26 @@ export class ScriptingEngine {
     maxHits?: number;
   }): {
     hits: WatchHit[];
+    /**
+     * Writes that matched but were not recorded because `maxHits` was reached. A cap
+     * that reports nothing leaves `hits.length === maxHits` meaning either "that is
+     * all of them" or "that is the first few", which are different findings.
+     */
+    dropped: number;
     stop: () => void;
   } {
-    const length = options.length ?? 1;
+    const target = this.#resolveDataLocation(options.address, 'watchMemory');
+    const length = options.length ?? target.length;
     const filter = options.filter;
     const maxHits = options.maxHits;
     const hits: WatchHit[] = [];
+    const handle = { hits, dropped: 0, stop: () => {} };
     const busDispose = this.#gba.bus.addWriteWatchpoint(
-      options.address,
+      target.address,
       length,
       ({ address, value, size, dmaChannel, dmaOrigin }) => {
         if (maxHits !== undefined && hits.length >= maxHits) {
+          handle.dropped++;
           return;
         }
         // DMA: the captured trigger instruction; CPU: the live PC + CPSR.
@@ -583,20 +634,20 @@ export class ScriptingEngine {
         hits.push(hit);
       },
     );
-    const stop = (): void => {
+    handle.stop = (): void => {
       if (this.#watchDisposers.delete(busDispose)) {
         busDispose();
       }
     };
     this.#watchDisposers.add(busDispose);
-    return { hits, stop };
+    return handle;
   }
 
   /**
-   * Watch a named global by symbol (requires debug info). Resolves the symbol to
-   * its address, then behaves like `watchMemory`. The watch length defaults to the
-   * symbol's own size (st_size) so a multi-byte global is watched in full; pass
-   * `length` to override. Throws if no debug info is loaded or the symbol is unknown.
+   * Watch a named global by symbol (requires debug info) — `watchMemory` with a
+   * symbol name, kept for readability at the call site. The length defaults to the
+   * whole object, so a multi-byte global is watched in full; pass `length` to
+   * override. Throws if no debug info is loaded or the symbol is unknown.
    *
    * @example
    *   const w = watchSymbol('gPlayerState'); // covers the whole global
@@ -605,16 +656,130 @@ export class ScriptingEngine {
   watchSymbol(
     name: string,
     options?: { length?: number; filter?: (hit: WatchHit) => boolean; maxHits?: number },
-  ): { hits: WatchHit[]; stop: () => void } {
+  ): { hits: WatchHit[]; dropped: number; stop: () => void } {
     if (!this.#debugInfo) {
       throw new Error('watchSymbol requires debug info; call loadDebugInfo(elfBytes) first');
     }
-    const address = this.#debugInfo.symbolToAddress(name);
-    if (address === null) {
-      throw new Error(`watchSymbol: unknown symbol "${name}"`);
+    return this.watchMemory({ address: name, ...options });
+  }
+
+  /**
+   * Record every execution of the instruction at `target` — a raw address, or a
+   * symbol name when debug info is loaded. The execution counterpart to
+   * {@link watchMemory}, and the way to answer "does this code ever run".
+   *
+   * Each hit carries the caller's return address, so a body that runs from several
+   * places says which. Counting is exact: the watchpoint fires from the CPU's own
+   * instruction step, not from a sample.
+   *
+   * @example
+   *   const w = watchExecution('UpdatePlayer');
+   *   await wait({ frames: 60 });
+   *   w.stop();
+   *   console.log(w.hits.length); // 0 means it really did not run
+   */
+  watchExecution(
+    target: number | string,
+    options?: {
+      /** Keep a hit only when this returns true. A throw is treated as `false`. */
+      filter?: (hit: ExecHit) => boolean;
+      /** Cap recorded hits; `dropped` counts the rest, and `count` stays exact. */
+      maxHits?: number;
+    },
+  ): {
+    hits: ExecHit[];
+    /** Every execution seen, whether recorded or not — unaffected by `maxHits`. */
+    count: number;
+    /** Executions that matched but were not recorded because `maxHits` was reached. */
+    dropped: number;
+    stop: () => void;
+  } {
+    const address = this.#resolveCodeAddress(target, 'watchExecution');
+    const maxHits = options?.maxHits;
+    const filter = options?.filter;
+    const hits: ExecHit[] = [];
+    const handle = { hits, count: 0, dropped: 0, stop: () => {} };
+    const cpu = this.#gba.armCpu;
+    const dispose = cpu.addExecWatchpoint(address, () => {
+      handle.count++;
+      // Straight off the CPU, not via the optional `cpuCpsr` hook: that is wired by
+      // the runtime, so an engine constructed directly would report ARM for
+      // everything.
+      const hit: ExecHit = { address, lr: cpu.registers[14]! >>> 0, thumb: (cpu.cpsr & 0x20) !== 0 };
+      const loc = this.#debugInfo?.pcToSource(hit.lr & ~1);
+      if (loc) {
+        hit.callerLocation = loc;
+      }
+      if (filter) {
+        let keep = false;
+        try {
+          keep = filter(hit);
+        } catch {
+          keep = false; // a throwing filter must not abort emulation
+        }
+        if (!keep) {
+          return;
+        }
+      }
+      if (maxHits !== undefined && hits.length >= maxHits) {
+        handle.dropped++;
+        return;
+      }
+      hits.push(hit);
+    });
+    handle.stop = (): void => {
+      if (this.#watchDisposers.delete(dispose)) {
+        dispose();
+      }
+    };
+    this.#watchDisposers.add(dispose);
+    return handle;
+  }
+
+  /**
+   * An address for code: a number, or a symbol resolved through debug info.
+   *
+   * Bit 0 is cleared either way. On ARM it is a state marker, never part of an
+   * instruction address — a Thumb function POINTER carries it set, which is exactly
+   * what `read32` returns from a callback table. Clearing it recovers the address the
+   * value denotes; leaving it set on the numeric arm alone made the same function
+   * count 420 executions when named and 0 when passed as the pointer that reaches it.
+   */
+  #resolveCodeAddress(target: number | string, api: string): number {
+    if (typeof target === 'number') {
+      return (target & ~1) >>> 0;
     }
-    const length = options?.length ?? this.#debugInfo.symbolSize(name) ?? 1;
-    return this.watchMemory({ address, length, filter: options?.filter, maxHits: options?.maxHits });
+    if (!this.#debugInfo) {
+      throw new Error(`${api}: resolving "${target}" requires debug info; call loadDebugInfo(elfBytes) first`);
+    }
+    const address = this.#debugInfo.symbolToAddress(target);
+    if (address === null) {
+      throw new Error(`${api}: unknown symbol "${target}"`);
+    }
+    return (address & ~1) >>> 0;
+  }
+
+  /**
+   * Address + default watch length for a data location named by number or symbol.
+   *
+   * A symbol names an OBJECT, so the whole of it is watched unless a length is given.
+   * The extent comes from {@link DebugInfo.symbolExtent} rather than `st_size` alone,
+   * because a linker-placed global has no `st_size` — in a decomp that is every data
+   * global, and defaulting to 1 byte silently watched the first byte of a 112-byte
+   * array.
+   */
+  #resolveDataLocation(target: number | string, api: string): { address: number; length: number } {
+    if (typeof target === 'number') {
+      return { address: target >>> 0, length: 1 };
+    }
+    if (!this.#debugInfo) {
+      throw new Error(`${api}: resolving "${target}" requires debug info; call loadDebugInfo(elfBytes) first`);
+    }
+    const address = this.#debugInfo.symbolToAddress(target);
+    if (address === null) {
+      throw new Error(`${api}: unknown symbol "${target}"`);
+    }
+    return { address, length: this.#debugInfo.symbolExtent(target)?.size ?? 1 };
   }
 
   /** Remove the data watchpoints created via this engine's `watchMemory`. */
