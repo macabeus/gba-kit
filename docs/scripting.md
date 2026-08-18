@@ -89,14 +89,16 @@ await wait({
 });
 ```
 
-**Wait for the program counter to reach an instruction:**
+**Wait for an instruction to execute:**
 
 ```javascript
-await wait({ pc: 0x08001234, timeout: 600 });
-await wait({ pc: 'UpdatePlayer' }); // a symbol, when debug info is loaded
+await wait({ execution: 0x08001234, timeout: 600 });
+await wait({ execution: 'UpdatePlayer' }); // a symbol, when debug info is loaded
 ```
 
-Watched at the CPU's instruction step, so it sees every pass. Throws if the instruction isn't reached within the timeout — which means it really did not execute.
+Watched at the CPU's instruction step, so it sees every pass. Throws if the instruction doesn't execute within the timeout — which means it really did not run.
+
+`wait({ pc })` is a deprecated alias. `pc` is the program counter, which is pipeline-ahead of the instruction it is executing, so a `WatchHit`'s `pc` passed here watches the _next_ instruction.
 
 ### `press(buttons, options?)` — Button Input
 

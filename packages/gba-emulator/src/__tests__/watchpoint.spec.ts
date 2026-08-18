@@ -381,3 +381,42 @@ describe('addressing code and data by number or name', () => {
     expect(() => engine.watchMemory({ address: 'g_probe' })).toThrow(/requires debug info/);
   });
 });
+
+describe('wait({ execution })', () => {
+  const BASE = 0x02000000;
+
+  function loopingEngine(log?: (m: string) => void): { gba: Gba; engine: ScriptingEngine } {
+    const gba = new Gba();
+    [0x46c0, 0x46c0, 0xe7fc].forEach((instr, i) => gba.bus.write16(BASE + i * 2, instr));
+    gba.armCpu.registers[15] = BASE;
+    gba.armCpu.setT(true);
+    const engine = new ScriptingEngine(gba, log ? { ...stubHost, log } : stubHost);
+    return { gba, engine };
+  }
+
+  it('resolves when the instruction executes', async () => {
+    const { engine } = loopingEngine();
+    await expect(engine.wait({ execution: BASE, timeout: 5 })).resolves.toBeUndefined();
+  });
+
+  it('times out on an instruction that never executes, naming it', async () => {
+    const { engine } = loopingEngine();
+    await expect(engine.wait({ execution: BASE + 0x100, timeout: 2 })).rejects.toThrow(
+      /wait\(\{ execution \}\) timed out after 2 frames waiting for 0x2000100 to execute/,
+    );
+  });
+
+  it('still accepts the deprecated pc, and says so', async () => {
+    const logs: string[] = [];
+    const { engine } = loopingEngine((m) => logs.push(m));
+    await expect(engine.wait({ pc: BASE, timeout: 5 })).resolves.toBeUndefined();
+    expect(logs.join('\n')).toMatch(/wait\(\{ pc \}\) is deprecated/);
+  });
+
+  it('does not warn on the current spelling', async () => {
+    const logs: string[] = [];
+    const { engine } = loopingEngine((m) => logs.push(m));
+    await engine.wait({ execution: BASE, timeout: 5 });
+    expect(logs).toEqual([]);
+  });
+});

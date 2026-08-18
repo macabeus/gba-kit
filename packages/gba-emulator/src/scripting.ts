@@ -108,8 +108,24 @@ interface WaitMemory {
   timeout?: number;
 }
 
+interface WaitExecution {
+  /**
+   * Wait until this instruction executes — an address, or a symbol name when debug
+   * info is loaded. The counterpart to {@link ScriptingEngine.watchExecution}, which
+   * records the same event instead of waiting for it.
+   */
+  execution: number | string;
+  timeout?: number;
+}
+
 interface WaitPC {
-  /** An instruction address, or a symbol name when debug info is loaded. */
+  /**
+   * @deprecated Use `execution`. `pc` names the program counter, which in this API is
+   * pipeline-ahead of the instruction it is executing (see {@link WatchHit.pc}) — so
+   * the field was named after the one value it does not take. Passing a `WatchHit`'s
+   * `pc` watches the NEXT instruction, which reads as a plausible count or as zero
+   * depending on whether that instruction is reachable.
+   */
   pc: number | string;
   timeout?: number;
 }
@@ -125,7 +141,7 @@ interface WaitPixel {
   timeout?: number;
 }
 
-type WaitCondition = WaitFrames | WaitMemory | WaitPC | WaitPixel;
+type WaitCondition = WaitFrames | WaitMemory | WaitExecution | WaitPC | WaitPixel;
 
 // ─── Memory Snapshot Types ───────────────────────────────────────────
 
@@ -349,12 +365,20 @@ export class ScriptingEngine {
       throw new Error(`wait({ memory }) timed out after ${timeout} frames at ${probe.label}`);
     }
 
-    if ('pc' in condition) {
+    if ('execution' in condition || 'pc' in condition) {
+      const deprecated = !('execution' in condition);
+      if (deprecated) {
+        this.#host.log(
+          'wait({ pc }) is deprecated — use wait({ execution }). `pc` is the pipeline-ahead register value, not the instruction address.',
+        );
+      }
+      const target = 'execution' in condition ? condition.execution : condition.pc;
+      const api = deprecated ? 'wait({ pc })' : 'wait({ execution })';
       // Watched at the CPU's own instruction step, not sampled between frames. A
       // sample sees only what the CPU happens to be doing at a frame boundary — for a
       // game that idles in a BIOS wait loop that is a single address, so everything
       // else reads as never reached however often it actually runs.
-      const address = this.#resolveCodeAddress(condition.pc, 'wait({ pc })');
+      const address = this.#resolveCodeAddress(target, api);
       let reached = false;
       const dispose = this.#gba.armCpu.addExecWatchpoint(address, () => {
         reached = true;
@@ -370,10 +394,8 @@ export class ScriptingEngine {
         dispose();
       }
       const label =
-        typeof condition.pc === 'string'
-          ? `"${condition.pc}" (0x${address.toString(16)})`
-          : `PC=0x${address.toString(16)}`;
-      throw new Error(`wait({ pc }) timed out after ${timeout} frames waiting for ${label}`);
+        typeof target === 'string' ? `"${target}" (0x${address.toString(16)})` : `0x${address.toString(16)}`;
+      throw new Error(`${api} timed out after ${timeout} frames waiting for ${label} to execute`);
     }
 
     if ('pixel' in condition) {
