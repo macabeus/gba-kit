@@ -406,12 +406,13 @@ const w = watchExecution('UpdatePlayer');
 await wait({ frames: 60 });
 w.stop();
 console.log(w.count); // exact number of executions; 0 means it did not run
-for (const h of w.hits) console.log(h.callerLocation); // who called it
 ```
 
-The handle carries `hits` (recorded, subject to `maxHits`), `count` (every execution seen, always exact), `dropped`, and `stop()`. A numeric `target` may carry the Thumb bit; it is cleared. Each hit has `address`, `lr` — the caller's return address — `thumb`, and `callerLocation` when debug info covers the caller.
+The handle carries `hits` (recorded, subject to `maxHits`), `count` (every execution seen, always exact), `dropped`, and `stop()`. A numeric `target` may carry the Thumb bit; it is cleared. Each hit has `address`, `thumb`, `lr`, and `callerLocation` when debug info covers `lr`.
 
 Counted from the CPU's instruction step, so `count === 0` means the code did not run.
+
+`lr` is the link register as the instruction executed, raw — a Thumb `bl` leaves bit 0 set, so the address is `lr & ~1`. It is the caller's return address only when `target` was reached by a `bl`/`blx`. An address fallen into from the instruction above, branched to, or entered by a tail call carries whatever the last unrelated call left there, and `callerLocation` resolves that same value — so both name a caller that never called it. Confirm the instruction ending at `lr & ~1` is a call to `address` before reading either as one.
 
 ```javascript
 watchMemory({
