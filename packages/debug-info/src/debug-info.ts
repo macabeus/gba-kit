@@ -93,12 +93,16 @@ export class DebugInfo {
    * How many bytes the object named `name` occupies, and where that is known from —
    * or `null` when nothing states it.
    *
-   * `st_size` is the symbol table's own answer. `dwarf` is the size of the variable's
-   * declared type, which is the only answer available in a decomp: an ldscript global
-   * (`gFoo = 0x03000000;`) is `SHN_ABS`/`NOTYPE` and carries no `st_size` at all, so
-   * every data extent comes from the type. `source` is reported for the same reason
-   * {@link addressToSymbol} reports `exact` — a caller bounding a write should be able
-   * to see whether a bound exists before relying on one.
+   * Which source answers depends on how the symbol was declared, not on the project:
+   * a global DEFINED in C is `STT_OBJECT` and the assembler sizes it, giving
+   * `st_size`; one PLACED by the linker (`gFoo = 0x03000000;`) is `SHN_ABS`/`NOTYPE`
+   * with no size, so its extent can only come from the type of a C `extern`
+   * declaration — `dwarf`. With neither, there is no extent to report. Decomps hit
+   * the second case constantly, because a fixed RAM address cannot be a C definition.
+   *
+   * `source` is reported for the same reason {@link addressToSymbol} reports `exact`:
+   * a caller bounding a write should be able to see whether a bound exists at all
+   * before relying on one.
    */
   symbolExtent(name: string): { size: number; source: 'st_size' | 'dwarf' } | null {
     const st = this.symbolSize(name);

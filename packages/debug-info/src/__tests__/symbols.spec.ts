@@ -104,18 +104,3 @@ describe('SymbolIndex', () => {
     expect(lone.symbolToAddress('gAbs')).toBe(0x03001234);
   });
 });
-
-describe('SymbolIndex with linker-defined globals', () => {
-  it('resolves an ldscript global, which is how a decomp names its data', () => {
-    // `gFoo = 0x03000000;` in an ldscript is NOTYPE/SHN_ABS with no st_size. Excluding
-    // those left addressToSymbol unable to name a single global in such an ELF.
-    const idx = new SymbolIndex([
-      { name: 'gState', address: 0x03000000, size: 0, type: STT_NOTYPE },
-      { name: 'gNext', address: 0x03000040, size: 0, type: STT_NOTYPE },
-    ]);
-    expect(idx.addressToSymbol(0x03000004)).toEqual({ name: 'gState', offset: 4, exact: false });
-    expect(idx.addressToSymbol(0x03000040)).toEqual({ name: 'gNext', offset: 0, exact: false });
-    // Still not a function, so PC lookup must not claim it.
-    expect(idx.pcToFunction(0x03000004)).toBeNull();
-  });
-});

@@ -1026,3 +1026,89 @@ describe('DebugInfo on ppc-min/build/main.o (RELA-relocated DWARF)', () => {
     }
   });
 });
+
+/**
+ * Subscripted variable paths, across every toolchain and both byte orders.
+ *
+ * The bound is the point. An index past the end resolves to an address inside
+ * whatever object the linker placed next — plausible as data, corrupting as a write,
+ * and indistinguishable from the real thing once it is just an address. So each case
+ * pins the in-bounds address AND the refusal, and the last valid index is asserted
+ * alongside the first invalid one so an off-by-one in the bound cannot pass.
+ */
+describe.each([...ARM_PROJECTS, ...BE_PROJECTS])('subscripted paths — $label', ({ dir }) => {
+  const di = DebugInfo.fromElf(new Uint8Array(readFileSync(join(dir, 'build', 'min.elf'))));
+
+  it('resolves an element of an array global', () => {
+    // const short g_rom_table[3] — 2-byte elements.
+    const base = di.symbolToAddress('g_rom_table')!;
+    expect(di.resolveVariable('g_rom_table[0]')).toEqual({ address: base, size: 2 });
+    expect(di.resolveVariable('g_rom_table[1]')).toEqual({ address: base + 2, size: 2 });
+    expect(di.resolveVariable('g_rom_table[2]')).toEqual({ address: base + 4, size: 2 });
+  });
+
+  it('refuses an index past the end of an array global', () => {
+    expect(() => di.resolveVariable('g_rom_table[3]')).toThrow(
+      /"g_rom_table" has 3 element\(s\) in dimension 0, so index 3 is past the end/,
+    );
+    expect(() => di.resolveVariable('g_rom_table[99]')).toThrow(/past the end/);
+  });
+
+  it('resolves an element of an array MEMBER, and bounds it', () => {
+    // struct Probe { … char name[6]; … } at offset 10.
+    const probe = di.symbolToAddress('g_probe')!;
+    expect(di.resolveVariable('g_probe.name[0]')).toEqual({ address: probe + 10, size: 1 });
+    expect(di.resolveVariable('g_probe.name[5]')).toEqual({ address: probe + 15, size: 1 });
+    expect(() => di.resolveVariable('g_probe.name[6]')).toThrow(
+      /"name" has 6 element\(s\) in dimension 0, so index 6 is past the end/,
+    );
+  });
+
+  it('refuses to subscript something that is not an array', () => {
+    expect(() => di.resolveVariable('g_probe[0]')).toThrow(/is not an array/);
+  });
+
+  it('treats malformed subscript text as unresolvable, not as a field name', () => {
+    // Reading "g_rom_table[" as a member of that literal name would turn a typo into
+    // "no such field", which is indistinguishable from a renamed field.
+    for (const bad of ['g_rom_table[', 'g_rom_table[x]', 'g_rom_table]', 'g_rom_table[1']) {
+      expect(di.resolveVariable(bad)).toBeNull();
+    }
+  });
+
+  it('reports a C-defined global’s extent from st_size', () => {
+    // Defined in this translation unit, so the assembler sized the symbol itself.
+    expect(di.symbolExtent('g_rom_table')).toEqual({ size: 6, source: 'st_size' });
+    expect(di.symbolExtent('g_probe')).toEqual({ size: 32, source: 'st_size' });
+    expect(di.symbolExtent('no_such_symbol')).toBeNull();
+  });
+});
+
+/**
+ * Globals the LINKER places rather than C defines (`gAbsGlobal = 0x03001234;` in the
+ * ldscript). They are SHN_ABS/NOTYPE with no st_size, and only the ARM projects carry
+ * one. Excluding them from the address index left addressToSymbol unable to name a
+ * linker-placed global at all — the norm in a decomp, where fixed RAM addresses cannot
+ * be C definitions.
+ */
+describe.each(ARM_PROJECTS)('linker-placed globals — $label', ({ dir }) => {
+  const di = DebugInfo.fromElf(new Uint8Array(readFileSync(join(dir, 'build', 'min.elf'))));
+
+  it('resolves an address to the ldscript-placed symbol', () => {
+    const addr = di.symbolToAddress('gAbsGlobal')!;
+    expect(addr).toBe(0x03001234);
+    // `exact: false` — the symbol states no size, so any extent is inferred.
+    expect(di.addressToSymbol(addr)).toEqual({ name: 'gAbsGlobal', offset: 0, exact: false });
+  });
+
+  it('reports no extent when nothing states one', () => {
+    // Placed by the ldscript and never declared with a type, so neither st_size nor
+    // DWARF says how big it is. Guessing would give the write guards a bound to
+    // enforce that no one ever wrote down.
+    expect(di.symbolExtent('gAbsGlobal')).toBeNull();
+  });
+
+  it('does not claim it as a function', () => {
+    expect(di.pcToFunction(0x03001234)).toBeNull();
+  });
+});
