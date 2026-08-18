@@ -6,18 +6,17 @@
 
 Observe execution instead of sampling it
 
-`wait({ pc })` compared the PC once per frame. A frame is ~280,896 cycles, so it saw
-only whatever the CPU was doing at the boundary — on a game that idles in a BIOS wait
-loop, one address out of the thousands executed. Everything else timed out, which reads
-as "never reached" however often it actually ran.
-
 - `ArmCpu.addExecWatchpoint(address, cb)` — new: fires from the instruction step and
-  returns a disposer. Composable, and independent of `setDebugHooks`, which is a single
-  slot one owner replaces wholesale.
-- `wait({ pc })` uses it, and accepts a symbol name as well as an address.
+  returns a disposer. Composable, and independent of `setDebugHooks`.
+- `wait({ execution })` replaces `wait({ pc })`, which compared the PC once per frame
+  and so reported code that ran constantly as never reached. Takes an address or a
+  symbol name.
 - `watchExecution(target, options?)` — new: the execution counterpart to
-  `watchMemory`. Reports `count` (exact), `hits` (with the caller's `lr` and source
+  `watchMemory`, reporting `count`, `hits` (with the caller's `lr` and source
   location), `dropped` and `stop()`.
-- `watchMemory` reports `dropped`. A cap that reported nothing left
-  `hits.length === maxHits` meaning either "that is all of them" or "that is the first
-  few" — different findings.
+- `watchMemory` reports `dropped`, so a capped `hits` array is not read as the whole
+  story.
+
+`wait()` also throws on an unrecognised condition, which previously returned immediately.
+
+**Breaking:** `wait({ pc })` is now `wait({ execution })`.

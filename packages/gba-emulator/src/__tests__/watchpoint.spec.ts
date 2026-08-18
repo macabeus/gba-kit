@@ -385,12 +385,12 @@ describe('addressing code and data by number or name', () => {
 describe('wait({ execution })', () => {
   const BASE = 0x02000000;
 
-  function loopingEngine(log?: (m: string) => void): { gba: Gba; engine: ScriptingEngine } {
+  function loopingEngine(): { gba: Gba; engine: ScriptingEngine } {
     const gba = new Gba();
     [0x46c0, 0x46c0, 0xe7fc].forEach((instr, i) => gba.bus.write16(BASE + i * 2, instr));
     gba.armCpu.registers[15] = BASE;
     gba.armCpu.setT(true);
-    const engine = new ScriptingEngine(gba, log ? { ...stubHost, log } : stubHost);
+    const engine = new ScriptingEngine(gba, stubHost);
     return { gba, engine };
   }
 
@@ -405,18 +405,15 @@ describe('wait({ execution })', () => {
       /wait\(\{ execution \}\) timed out after 2 frames waiting for 0x2000100 to execute/,
     );
   });
+});
 
-  it('still accepts the deprecated pc, and says so', async () => {
-    const logs: string[] = [];
-    const { engine } = loopingEngine((m) => logs.push(m));
-    await expect(engine.wait({ pc: BASE, timeout: 5 })).resolves.toBeUndefined();
-    expect(logs.join('\n')).toMatch(/wait\(\{ pc \}\) is deprecated/);
-  });
-
-  it('does not warn on the current spelling', async () => {
-    const logs: string[] = [];
-    const { engine } = loopingEngine((m) => logs.push(m));
-    await engine.wait({ execution: BASE, timeout: 5 });
-    expect(logs).toEqual([]);
+describe('wait() with an unrecognised condition', () => {
+  it('throws instead of silently waiting for nothing', async () => {
+    const engine = new ScriptingEngine(new Gba(), stubHost);
+    // Scripts are untyped JS at run time, so a stale or misspelled key arrives here.
+    await expect(engine.wait({ pc: 0x08000000 } as never)).rejects.toThrow(/unknown condition.*expected one of/s);
+    await expect(engine.wait({} as never)).rejects.toThrow(/unknown condition/);
+    // Positive control: a valid condition is unaffected.
+    await expect(engine.wait({ frames: 1 })).resolves.toBeUndefined();
   });
 });
