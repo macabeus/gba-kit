@@ -89,16 +89,14 @@ await wait({
 });
 ```
 
-**Wait for the program counter to reach an address:**
+**Wait for the program counter to reach an instruction:**
 
 ```javascript
-await wait({
-  pc: 0x08001234,
-  timeout: 600,
-});
+await wait({ pc: 0x08001234, timeout: 600 });
+await wait({ pc: 'UpdatePlayer' }); // a symbol, when debug info is loaded
 ```
 
-Throws an error if the condition isn't met within the timeout.
+Watched at the CPU's instruction step, so it sees every pass. Throws if the instruction isn't reached within the timeout — which means it really did not execute.
 
 ### `press(buttons, options?)` — Button Input
 
@@ -396,7 +394,23 @@ Each hit has: `pc`, `instructionAddress`, `address`, `value`, `size`, `thumb`, a
 
 - `length` — watch a multi-byte range (default 1).
 - `filter(hit)` — record only matching hits, so you can watch a wide region without the `hits` array exploding.
-- `maxHits` — cap recorded hits (keeps the first N).
+- `maxHits` — cap recorded hits (keeps the first N). The handle's `dropped` counts the rest, so a full `hits` array is never mistaken for the whole story.
+
+### `watchExecution(target, options?)` — Execution Watchpoint (find _whether_ code runs)
+
+The execution counterpart to `watchMemory`. `target` is an address, or a symbol name when debug info is loaded.
+
+```javascript
+const w = watchExecution('UpdatePlayer');
+await wait({ frames: 60 });
+w.stop();
+console.log(w.count); // exact number of executions; 0 means it did not run
+for (const h of w.hits) console.log(h.callerLocation); // who called it
+```
+
+The handle carries `hits` (recorded, subject to `maxHits`), `count` (every execution seen, always exact), `dropped`, and `stop()`. Each hit has `address`, `lr` — the caller's return address — `thumb`, and `callerLocation` when debug info covers the caller.
+
+Counted from the CPU's instruction step rather than sampled, so `count === 0` is evidence the code did not run.
 
 ```javascript
 watchMemory({

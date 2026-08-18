@@ -218,3 +218,107 @@ describe('ScriptingEngine watchMemory', () => {
     expect(busCount).toBe(1); // foreign watchpoint untouched
   });
 });
+
+describe('ScriptingEngine watchMemory maxHits', () => {
+  it('reports the writes it dropped, so a full array is not read as the whole story', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchMemory({ address: 0x03000000, length: 4, maxHits: 2 });
+    for (let i = 0; i < 10; i++) {
+      gba.bus.write8(0x03000000, i);
+    }
+    w.stop();
+    expect(w.hits).toHaveLength(2);
+    expect(w.dropped).toBe(8);
+  });
+
+  it('reports zero drops when nothing was capped', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchMemory({ address: 0x03000000, length: 4 });
+    for (let i = 0; i < 10; i++) {
+      gba.bus.write8(0x03000000, i);
+    }
+    w.stop();
+    expect(w.hits).toHaveLength(10);
+    expect(w.dropped).toBe(0);
+  });
+});
+
+// ─── Execution watchpoints (scripting engine) ────────────────────────
+
+describe('ScriptingEngine watchExecution', () => {
+  const BASE = 0x02000000;
+
+  /** A Gba whose CPU loops over three Thumb instructions at BASE. */
+  function loopingGba(): Gba {
+    const gba = new Gba();
+    // nop; nop; b -4 (see arm-emulator/src/__tests__/exec-watchpoint.spec.ts).
+    [0x46c0, 0x46c0, 0xe7fc].forEach((instr, i) => {
+      gba.bus.write16(BASE + i * 2, instr);
+    });
+    gba.armCpu.registers[15] = BASE;
+    gba.armCpu.setT(true);
+    return gba;
+  }
+
+  function step(gba: Gba, n: number): void {
+    for (let i = 0; i < n; i++) {
+      gba.armCpu.step();
+    }
+  }
+
+  it('counts every execution, and zero means it did not run', () => {
+    const gba = loopingGba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const ran = engine.watchExecution(BASE);
+    const never = engine.watchExecution(BASE + 0x100);
+    step(gba, 30);
+    ran.stop();
+    never.stop();
+    expect(ran.count).toBe(10);
+    expect(ran.hits).toHaveLength(10);
+    expect(ran.dropped).toBe(0);
+    // The zero is only meaningful because the count above is not zero.
+    expect(never.count).toBe(0);
+  });
+
+  it('keeps the count exact under maxHits and says what it dropped', () => {
+    const gba = loopingGba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchExecution(BASE, { maxHits: 3 });
+    step(gba, 30);
+    w.stop();
+    expect(w.hits).toHaveLength(3);
+    expect(w.count).toBe(10); // the cap bounds memory, not the finding
+    expect(w.dropped).toBe(7);
+    expect(w.hits.length + w.dropped).toBe(w.count);
+  });
+
+  it('records the caller’s return address', () => {
+    const gba = loopingGba();
+    gba.armCpu.registers[14] = 0x08001234;
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchExecution(BASE);
+    step(gba, 3);
+    w.stop();
+    expect(w.hits[0]).toMatchObject({ address: BASE, lr: 0x08001234, thumb: true });
+  });
+
+  it('stops recording after stop()', () => {
+    const gba = loopingGba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchExecution(BASE);
+    step(gba, 15);
+    const atStop = w.count;
+    w.stop();
+    step(gba, 15);
+    expect(atStop).toBeGreaterThan(0);
+    expect(w.count).toBe(atStop);
+  });
+
+  it('needs debug info to accept a symbol name', () => {
+    const engine = new ScriptingEngine(loopingGba(), stubHost);
+    expect(() => engine.watchExecution('SomeFunction')).toThrow(/requires debug info/);
+  });
+});

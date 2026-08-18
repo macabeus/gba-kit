@@ -109,7 +109,8 @@ interface WaitMemory {
 }
 
 interface WaitPC {
-  pc: number;
+  /** An instruction address, or a symbol name when debug info is loaded. */
+  pc: number | string;
   timeout?: number;
 }
 
@@ -198,6 +199,17 @@ export interface WatchHit {
    * (e.g. INCLUDE_ASM stubs, library code).
    */
   location?: SourceLocation;
+}
+
+/** One execution of a watched instruction, recorded by `watchExecution`. */
+export interface ExecHit {
+  /** The watched instruction address. */
+  address: number;
+  /** Link register at entry — the caller's return address, when the watch is a function entry. */
+  lr: number;
+  thumb: boolean;
+  /** The caller's C `file:line`, when debug info covers it. */
+  callerLocation?: SourceLocation;
 }
 
 // ─── Scripting Engine ────────────────────────────────────────────────
@@ -338,14 +350,30 @@ export class ScriptingEngine {
     }
 
     if ('pc' in condition) {
-      const targetPC = condition.pc;
-      for (let i = 0; i < timeout; i++) {
-        this.#runFrame();
-        if (this.#gba.armCpu.registers[15] === targetPC) {
-          return;
+      // Watched at the CPU's own instruction step, not sampled between frames. A
+      // sample sees only what the CPU happens to be doing at a frame boundary — for a
+      // game that idles in a BIOS wait loop that is a single address, so everything
+      // else reads as never reached however often it actually runs.
+      const address = this.#resolveCodeAddress(condition.pc, 'wait({ pc })');
+      let reached = false;
+      const dispose = this.#gba.armCpu.addExecWatchpoint(address, () => {
+        reached = true;
+      });
+      try {
+        for (let i = 0; i < timeout; i++) {
+          this.#runFrame();
+          if (reached) {
+            return;
+          }
         }
+      } finally {
+        dispose();
       }
-      throw new Error(`wait({ pc }) timed out after ${timeout} frames waiting for PC=0x${condition.pc.toString(16)}`);
+      const label =
+        typeof condition.pc === 'string'
+          ? `"${condition.pc}" (0x${address.toString(16)})`
+          : `PC=0x${address.toString(16)}`;
+      throw new Error(`wait({ pc }) timed out after ${timeout} frames waiting for ${label}`);
     }
 
     if ('pixel' in condition) {
@@ -540,17 +568,25 @@ export class ScriptingEngine {
     maxHits?: number;
   }): {
     hits: WatchHit[];
+    /**
+     * Writes that matched but were not recorded because `maxHits` was reached. A cap
+     * that reports nothing leaves `hits.length === maxHits` meaning either "that is
+     * all of them" or "that is the first few", which are different findings.
+     */
+    dropped: number;
     stop: () => void;
   } {
     const length = options.length ?? 1;
     const filter = options.filter;
     const maxHits = options.maxHits;
     const hits: WatchHit[] = [];
+    const handle = { hits, dropped: 0, stop: () => {} };
     const busDispose = this.#gba.bus.addWriteWatchpoint(
       options.address,
       length,
       ({ address, value, size, dmaChannel, dmaOrigin }) => {
         if (maxHits !== undefined && hits.length >= maxHits) {
+          handle.dropped++;
           return;
         }
         // DMA: the captured trigger instruction; CPU: the live PC + CPSR.
@@ -583,13 +619,13 @@ export class ScriptingEngine {
         hits.push(hit);
       },
     );
-    const stop = (): void => {
+    handle.stop = (): void => {
       if (this.#watchDisposers.delete(busDispose)) {
         busDispose();
       }
     };
     this.#watchDisposers.add(busDispose);
-    return { hits, stop };
+    return handle;
   }
 
   /**
@@ -615,6 +651,95 @@ export class ScriptingEngine {
     }
     const length = options?.length ?? this.#debugInfo.symbolSize(name) ?? 1;
     return this.watchMemory({ address, length, filter: options?.filter, maxHits: options?.maxHits });
+  }
+
+  /**
+   * Record every execution of the instruction at `target` — a raw address, or a
+   * symbol name when debug info is loaded. The execution counterpart to
+   * {@link watchMemory}, and the way to answer "does this code ever run".
+   *
+   * Each hit carries the caller's return address, so a body that runs from several
+   * places says which. Counting is exact: the watchpoint fires from the CPU's own
+   * instruction step, not from a sample.
+   *
+   * @example
+   *   const w = watchExecution('UpdatePlayer');
+   *   await wait({ frames: 60 });
+   *   w.stop();
+   *   console.log(w.hits.length); // 0 means it really did not run
+   */
+  watchExecution(
+    target: number | string,
+    options?: {
+      /** Keep a hit only when this returns true. A throw is treated as `false`. */
+      filter?: (hit: ExecHit) => boolean;
+      /** Cap recorded hits; `dropped` counts the rest, and `count` stays exact. */
+      maxHits?: number;
+    },
+  ): {
+    hits: ExecHit[];
+    /** Every execution seen, whether recorded or not — unaffected by `maxHits`. */
+    count: number;
+    /** Executions that matched but were not recorded because `maxHits` was reached. */
+    dropped: number;
+    stop: () => void;
+  } {
+    const address = this.#resolveCodeAddress(target, 'watchExecution');
+    const maxHits = options?.maxHits;
+    const filter = options?.filter;
+    const hits: ExecHit[] = [];
+    const handle = { hits, count: 0, dropped: 0, stop: () => {} };
+    const cpu = this.#gba.armCpu;
+    const dispose = cpu.addExecWatchpoint(address, () => {
+      handle.count++;
+      // Straight off the CPU, not via the optional `cpuCpsr` hook: that is wired by
+      // the runtime, so an engine constructed directly would report ARM for
+      // everything.
+      const hit: ExecHit = { address, lr: cpu.registers[14]! >>> 0, thumb: (cpu.cpsr & 0x20) !== 0 };
+      const loc = this.#debugInfo?.pcToSource(hit.lr & ~1);
+      if (loc) {
+        hit.callerLocation = loc;
+      }
+      if (filter) {
+        let keep = false;
+        try {
+          keep = filter(hit);
+        } catch {
+          keep = false; // a throwing filter must not abort emulation
+        }
+        if (!keep) {
+          return;
+        }
+      }
+      if (maxHits !== undefined && hits.length >= maxHits) {
+        handle.dropped++;
+        return;
+      }
+      hits.push(hit);
+    });
+    handle.stop = (): void => {
+      if (this.#watchDisposers.delete(dispose)) {
+        dispose();
+      }
+    };
+    this.#watchDisposers.add(dispose);
+    return handle;
+  }
+
+  /** An address for code: a number as given, or a symbol resolved through debug info. */
+  #resolveCodeAddress(target: number | string, api: string): number {
+    if (typeof target === 'number') {
+      return target >>> 0;
+    }
+    if (!this.#debugInfo) {
+      throw new Error(`${api}: resolving "${target}" requires debug info; call loadDebugInfo(elfBytes) first`);
+    }
+    const address = this.#debugInfo.symbolToAddress(target);
+    if (address === null) {
+      throw new Error(`${api}: unknown symbol "${target}"`);
+    }
+    // Thumb function symbols carry the low bit; instructions are addressed even.
+    return (address & ~1) >>> 0;
   }
 
   /** Remove the data watchpoints created via this engine's `watchMemory`. */
