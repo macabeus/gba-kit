@@ -17,4 +17,6 @@ export {
   type MemberLocation,
   type FunctionSignature,
   type TypeFacts,
+  type PathSegment,
+  parsePath,
 } from './types.js';

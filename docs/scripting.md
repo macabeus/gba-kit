@@ -228,13 +228,13 @@ read16(0x03002923); // throws: not 2-byte aligned; the hardware would read 0x030
 read32(0x01000000); // throws: nothing is mapped there
 ```
 
-They throw because the hardware's answer would be to a different question. A GBA forces `LDRH` to an even address, so `read16(0x03002923)` reads the halfword at `0x03002922` — a number indistinguishable from the one you asked for. An undecoded address is the same trap wearing a `0`. Use `readBytes` to read at any alignment.
+The hardware would answer both: it rounds `read16(0x03002923)` down to `0x03002922`, and reads undecoded space as `0`. Either way the number is indistinguishable from the one you asked for, so these refuse instead. Use `readBytes` to read at any alignment.
 
-A RAM mirror is not an error: the RAM regions mirror their store across a 16 MB window, so `0x02F00000` reads the same byte as `0x02000000` and neither throws.
+A RAM mirror is not an error — `0x02F00000` reads the same byte as `0x02000000`, and neither throws.
 
 ### `readBytes(address, size)` — Unaligned Memory Reads
 
-Read 1–4 bytes as an unsigned little-endian integer at **any** alignment. Assembled byte by byte, so an odd address means what it says — a `u8 x[2]` at offset 3 of a struct is ordinary, and reaching it is not an error.
+Read 1–4 bytes as an unsigned little-endian integer at **any** alignment, assembled byte by byte.
 
 ```javascript
 readBytes(0x03002923, 2); // the two bytes at 0x...23 and 0x...24
@@ -242,18 +242,55 @@ readBytes(0x03002923, 2); // the two bytes at 0x...23 and 0x...24
 
 Throws if any byte of the span is undecoded, or if the span runs off the end of its region.
 
+### `write8` / `write16` / `write32` / `writeBytes(address, size, value)` — Memory Writes
+
+The write counterparts, with the same guards: `write16` / `write32` throw on a misaligned address, all of them throw on undecoded or read-only space, and `writeBytes` stores 1–4 bytes at any alignment.
+
+```javascript
+write32(0x03001000, 0xdeadbeef);
+writeBytes(0x03001003, 2, 0xabcd); // two bytes at an odd address
+
+write16(0x03001001, 0); // throws: not 2-byte aligned
+write32(0x08000000, 0); // throws: ROM is read-only
+```
+
 ### `readVariable(path)` / `writeVariable(path, value)` — Named Globals
 
-Read or write a global by a `symbol` or `symbol.field.subfield` path. The address comes from the symbol table and the width and bit range from the variable's DWARF type, so the right bytes are read and a bitfield is decoded — or, on write, merged into its container without disturbing the fields beside it.
+Read or write a global by a `symbol`, `symbol.field.subfield` or subscripted path. The address comes from the symbol table and the width and bit range from the DWARF type, so a bitfield is decoded on read and merged into its container on write.
 
 ```javascript
 readVariable('g_game_vars.score');
 readVariable('gPlayerFlags.invincible'); // a bitfield, decoded
+readVariable('gLayers[2].width'); // an array element
+readVariable('gGrid[1][3]'); // every dimension subscripted
 writeVariable('g_game_vars.score', 1000);
 writeVariable('gPlayerFlags.invincible', 1); // neighbouring bits survive
 ```
 
+Subscripts are bounds-checked against the DWARF extent:
+
+```javascript
+readVariable('gLayers[4].width');
+// throws: "gLayers" has 4 element(s) in dimension 0, so index 4 is past the end
+```
+
+Element 4 of a 4-element array is a real address — whatever the linker placed next — so without the bound it reads as plausible data and writes as corruption. A dimension the DWARF leaves unstated (`extern T x[][4]`) is not checked.
+
 Throws if debug info isn't loaded, the path can't be resolved, the field is wider than 4 bytes, or the target is read-only.
+
+### `symbolExtent(name)` — How Big Is That Object
+
+Returns `{ size, source }` — a named object's byte extent and where it came from — or `null` when nothing states it. A global defined in C is sized by the assembler (`'st_size'`); one placed by the linker (`gFoo = 0x03000000;`) has no size of its own, so its extent comes from the type of a C `extern` declaration (`'dwarf'`). With neither, there is no extent.
+
+This is the bound the write guards apply. A write starting inside a known extent and running past its end is refused:
+
+```javascript
+writeBytes(gLayersAddr + 110, 4, 0);
+// throws: writing 4 bytes at 0x300349e runs past the end of "gLayers"
+//         (112 bytes, from dwarf), into "gLevelStatePtr".
+```
+
+Only a span that _crosses_ a boundary is catchable this way. An address computed past an array's end lands wholly inside its neighbour, which is indistinguishable from a deliberate write there — use a subscripted `writeVariable` path instead.
 
 ### `readMember(base, member)` / `writeMember(base, member, value)` — Struct Members at a Runtime Address
 

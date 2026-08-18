@@ -221,3 +221,44 @@ describe('readMember / writeMember', () => {
     expect(engine.getMemory(BASE + 5, 1)).toHaveLength(1); // positive control
   });
 });
+
+describe('guarded writes', () => {
+  it('writes at every width and reads back what it stored', () => {
+    const engine = engineWithBytes(BASE, BYTES);
+    engine.write8(BASE, 0x99);
+    engine.write16(BASE + 2, 0xbeef);
+    engine.write32(BASE + 4, 0xdeadbeef);
+    expect(engine.readBytes(BASE, 1)).toBe(0x99);
+    expect(engine.read16(BASE + 2)).toBe(0xbeef);
+    expect(engine.read32(BASE + 4)).toBe(0xdeadbeef);
+  });
+
+  it('refuses a misaligned store rather than rewriting the neighbour', () => {
+    const engine = engineWithBytes(BASE, BYTES);
+    // The bus rounds the address down, so this would overwrite BASE+2..3 — a write at
+    // the wrong address changes the state under observation, unlike a wrong read.
+    expect(() => engine.write16(BASE + 3, 0xffff)).toThrow(/not 2-byte aligned/);
+    expect(() => engine.write32(BASE + 1, 0xffffffff)).toThrow(/not 4-byte aligned/);
+    // The message must name the WRITE alternative, not the read one.
+    expect(() => engine.write16(BASE + 3, 0)).toThrow(/writeBytes\(address, 2, value\)/);
+    // Positive control: the same store lands correctly through the honest API.
+    engine.writeBytes(BASE + 3, 2, 0xabcd);
+    expect(engine.readBytes(BASE + 3, 2)).toBe(0xabcd);
+    expect(engine.readBytes(BASE + 2, 1)).toBe(0x33); // the neighbour survived
+  });
+
+  it('refuses a store the bus would discard or that lands nowhere', () => {
+    const gba = new Gba();
+    gba.loadRom(new Uint8Array(0x100).fill(0x5a));
+    const engine = new ScriptingEngine(gba, stubHost);
+    expect(() => engine.write32(0x08000000, 0)).toThrow(/is in ROM, which is read-only/);
+    expect(() => engine.write8(0x01000000, 0)).toThrow(/nothing is mapped/);
+    expect(() => engine.write8(0x03000000, 1)).not.toThrow(); // positive control
+  });
+
+  it('rejects a width it cannot represent', () => {
+    const engine = engineWithBytes(BASE, BYTES);
+    expect(() => engine.writeBytes(BASE, 0, 0)).toThrow(/size must be 1\.\.4/);
+    expect(() => engine.writeBytes(BASE, 8, 0)).toThrow(/size must be 1\.\.4/);
+  });
+});

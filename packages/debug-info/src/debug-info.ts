@@ -6,7 +6,7 @@ import { LineTable, parseDebugLine } from './debug-line.js';
 import { type MacroDefinition, parseDebugMacinfo } from './debug-macro.js';
 import { ElfFile } from './elf.js';
 import { type FunctionEntry, SymbolIndex } from './symbols.js';
-import { type MemberLocation, type StructType, TypeIndex } from './types.js';
+import { type MemberLocation, type StructType, TypeIndex, parsePath } from './types.js';
 
 export interface SourceLocation {
   file: string;
@@ -90,6 +90,30 @@ export class DebugInfo {
   }
 
   /**
+   * How many bytes the object named `name` occupies, and where that is known from —
+   * or `null` when nothing states it.
+   *
+   * Which source answers depends on how the symbol was declared, not on the project:
+   * a global DEFINED in C is `STT_OBJECT` and the assembler sizes it, giving
+   * `st_size`; one PLACED by the linker (`gFoo = 0x03000000;`) is `SHN_ABS`/`NOTYPE`
+   * with no size, so its extent can only come from the type of a C `extern`
+   * declaration — `dwarf`. With neither, there is no extent to report. Decomps hit
+   * the second case constantly, because a fixed RAM address cannot be a C definition.
+   *
+   * `source` is reported for the same reason {@link addressToSymbol} reports `exact`:
+   * a caller bounding a write should be able to see whether a bound exists at all
+   * before relying on one.
+   */
+  symbolExtent(name: string): { size: number; source: 'st_size' | 'dwarf' } | null {
+    const st = this.symbolSize(name);
+    if (st !== null) {
+      return { size: st, source: 'st_size' };
+    }
+    const dwarf = this.types.variableSize(name);
+    return dwarf !== null ? { size: dwarf, source: 'dwarf' } : null;
+  }
+
+  /**
    * The layout of a struct/union by name — its size and members with byte
    * offsets. Accepts the struct tag or a typedef alias of an (often anonymous)
    * struct. Returns null if the type isn't in the DWARF.
@@ -129,19 +153,49 @@ export class DebugInfo {
    */
   resolveVariable(path: string): ResolvedLocation | null {
     const dot = path.indexOf('.');
-    const symbol = dot === -1 ? path : path.slice(0, dot);
-    const address = this.symbolToAddress(symbol);
+    const root = dot === -1 ? path : path.slice(0, dot);
+    const rest = dot === -1 ? '' : path.slice(dot + 1);
+    const rootSeg = parsePath(root)?.[0];
+    if (!rootSeg) {
+      return null;
+    }
+    const address = this.symbolToAddress(rootSeg.name);
     if (address === null) {
       return null;
     }
-    if (dot === -1) {
-      return { address, size: this.symbolSize(symbol) ?? this.types.variableSize(symbol) ?? 4 };
+
+    // A subscripted root (`gLayers[4]` / `gLayers[4].field`) steps into the array
+    // first; the index is bounds-checked against the DWARF extent, which is what
+    // stops a computed element address from landing in the next object along.
+    let base = address;
+    let member: MemberLocation | null = null;
+    if (rootSeg.indices.length > 0) {
+      const step = this.types.variableIndex(rootSeg.name, rootSeg.indices);
+      if (!step) {
+        return null;
+      }
+      base += step.offset;
+      if (rest === '') {
+        if (step.size === null) {
+          // Reached a row of a multi-dimensional array, not an element. Saying
+          // "cannot resolve" here would blame the name; the name is fine.
+          throw new Error(
+            `"${path}" names a sub-array, not a value — subscript every dimension, or read it with getMemory`,
+          );
+        }
+        return { address: base, size: step.size };
+      }
+      member = this.types.memberPathOf(this.types.variableElementStruct(rootSeg.name), rest);
+    } else if (rest === '') {
+      return { address, size: this.symbolSize(rootSeg.name) ?? this.types.variableSize(rootSeg.name) ?? 4 };
+    } else {
+      member = this.variableMember(rootSeg.name, rest);
     }
-    const member = this.variableMember(symbol, path.slice(dot + 1));
+
     if (!member || member.size === null) {
       return null;
     }
-    const resolved: ResolvedLocation = { address: address + member.offset, size: member.size };
+    const resolved: ResolvedLocation = { address: base + member.offset, size: member.size };
     if (member.bitOffset !== undefined) {
       resolved.bitOffset = member.bitOffset;
       resolved.bitWidth = member.bitWidth;

@@ -51,6 +51,13 @@ interface BitfieldSpan {
   bitWidth?: number;
 }
 
+/** Throw unless `size` is a width a JS number can carry exactly. */
+function requireByteWidth(size: number, api: string): void {
+  if (!Number.isInteger(size) || size < 1 || size > 4) {
+    throw new Error(`${api}: size must be 1..4, got ${size}`);
+  }
+}
+
 /**
  * A member's byte width, or a throw naming the member that lacks one. `size` is null
  * for an incomplete type or a flexible array — cases where there is no span to read,
@@ -257,8 +264,17 @@ export class ScriptingEngine {
   }
 
   /** Nearest preceding symbol to `addr` as `{ name, offset }`, or null. */
-  addressToSymbol(addr: number): { name: string; offset: number } | null {
+  addressToSymbol(addr: number): { name: string; offset: number; exact: boolean } | null {
     return this.#debugInfo?.addressToSymbol(addr) ?? null;
+  }
+
+  /**
+   * How many bytes a named object occupies and where that is known from, or null when
+   * nothing states it — the bound the write guards apply. See
+   * {@link DebugInfo.symbolExtent}.
+   */
+  symbolExtent(name: string): { size: number; source: 'st_size' | 'dwarf' } | null {
+    return this.#debugInfo?.symbolExtent(name) ?? null;
   }
 
   /** Address of a named symbol (function or global), or null. */
@@ -647,22 +663,60 @@ export class ScriptingEngine {
    * is unbacked.
    */
   readBytes(address: number, size: number): number {
-    if (!Number.isInteger(size) || size < 1 || size > 4) {
-      throw new Error(`readBytes: size must be 1..4, got ${size}`);
-    }
+    requireByteWidth(size, 'readBytes');
     this.#requireReadable(address, size, 'readBytes');
     return this.#readSized(address, size);
   }
 
-  /** Throw unless `size` bytes at `address` are aligned for a hardware load of that width. */
-  #requireAligned(address: number, size: number, api: string): void {
+  /** Write a byte. **Throws** if the target is not writable memory. */
+  write8(address: number, value: number): void {
+    this.#requireWritable(address, 1, 'write8');
+    this.#gba.bus.write8(address, value & 0xff);
+  }
+
+  /**
+   * Write a halfword. **Throws** on an odd address, and if the target is not writable.
+   *
+   * The bus forces the store to an even address, so an odd one does not merely write
+   * the wrong place — it overwrites the halfword *next door*. A read at the wrong
+   * address returns a number you can still sanity-check; a write at the wrong address
+   * silently changes the state under observation.
+   */
+  write16(address: number, value: number): void {
+    this.#requireWritable(address, 2, 'write16');
+    this.#requireAligned(address, 2, 'write16', 'write');
+    this.#gba.bus.write16(address, value & 0xffff);
+  }
+
+  /** Write a word. **Throws** on a misaligned address — see {@link write16}. */
+  write32(address: number, value: number): void {
+    this.#requireWritable(address, 4, 'write32');
+    this.#requireAligned(address, 4, 'write32', 'write');
+    this.#gba.bus.write32(address, value >>> 0);
+  }
+
+  /**
+   * Write 1–4 bytes little-endian at **any** alignment, byte by byte — the counterpart
+   * to {@link readBytes}, and the way to store a value the hardware's aligned stores
+   * cannot address without disturbing its neighbour.
+   */
+  writeBytes(address: number, size: number, value: number): void {
+    requireByteWidth(size, 'writeBytes');
+    this.#requireWritable(address, size, 'writeBytes');
+    this.#writeSized(address, size, value);
+  }
+
+  /** Throw unless `address` is aligned for a hardware access of `size` bytes. */
+  #requireAligned(address: number, size: number, api: string, verb: 'read' | 'write' = 'read'): void {
     if ((address & (size - 1)) === 0) {
       return;
     }
+    const rounded = (address & ~(size - 1)) >>> 0;
+    const alternative = verb === 'read' ? `readBytes(address, ${size})` : `writeBytes(address, ${size}, value)`;
     throw new Error(
       `${api}: address 0x${(address >>> 0).toString(16)} is not ${size}-byte aligned. ` +
-        `The hardware would silently read 0x${(address & ~(size - 1)).toString(16)} instead. ` +
-        `Use readBytes(address, ${size}) to read ${size} bytes at this address.`,
+        `The hardware would silently ${verb} 0x${rounded.toString(16)} instead. ` +
+        `Use ${alternative} to ${verb} ${size} bytes at this address.`,
     );
   }
 
@@ -822,9 +876,18 @@ export class ScriptingEngine {
       const current = this.#readSized(address, size);
       toStore = (((current & ~mask) >>> 0) | (((value << bits.bitOffset!) >>> 0) & mask)) >>> 0;
     }
+    this.#writeSized(address, size, toStore);
+  }
+
+  /**
+   * Store an unsigned little-endian integer of `size` (1–4) bytes one byte at a time,
+   * so it lands where it is addressed. The bus's write16/write32 round the address
+   * down, which rewrites the neighbouring container rather than the intended one.
+   */
+  #writeSized(address: number, size: number, value: number): void {
     const bus = this.#gba.bus;
     for (let i = 0; i < size; i++) {
-      bus.write8(address + i, (toStore >>> (8 * i)) & 0xff);
+      bus.write8(address + i, (value >>> (8 * i)) & 0xff);
     }
   }
 
@@ -838,6 +901,46 @@ export class ScriptingEngine {
           `The bus discards such a write silently, so the value you read back would be the old one.`,
       );
     }
+    this.#requireWithinSymbol(address, size, api);
+  }
+
+  /**
+   * Throw when a write starts inside a named object whose extent is known and runs
+   * past its end — it would land in whatever follows, which is another object.
+   *
+   * Only a span that CROSSES a boundary is catchable. An address computed past an
+   * array's end lands wholly inside its neighbour and is indistinguishable, from an
+   * address alone, from a deliberate write to that neighbour; expressing the index
+   * (`writeVariable('arr[4]', …)`) is what makes that case checkable. Silent when no
+   * debug info is loaded or the object's extent is unstated.
+   */
+  #requireWithinSymbol(address: number, size: number, api: string): void {
+    const di = this.#debugInfo;
+    if (!di || size <= 1) {
+      return;
+    }
+    const sym = di.addressToSymbol(address);
+    if (!sym) {
+      return;
+    }
+    const extent = di.symbolExtent(sym.name);
+    if (extent === null) {
+      return;
+    }
+    // `sym.offset >= extent.size` means the address is not inside that object at all —
+    // it sits in the gap after it, and only matched because a symbol with no st_size
+    // has its range inferred out to the next one. Nothing is being overrun, and
+    // refusing here would reject every ordinary write into unnamed memory.
+    if (sym.offset >= extent.size || sym.offset + size <= extent.size) {
+      return;
+    }
+    const end = address - sym.offset + extent.size;
+    const next = di.addressToSymbol(end);
+    const into = next && next.name !== sym.name ? `, into "${next.name}"` : '';
+    throw new Error(
+      `${api}: writing ${size} bytes at 0x${(address >>> 0).toString(16)} runs past the end of ` +
+        `"${sym.name}" (${extent.size} bytes, from ${extent.source})${into}.`,
+    );
   }
 
   disassemble(
