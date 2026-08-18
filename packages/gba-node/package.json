@@ -1,6 +1,6 @@
 {
   "name": "@gba-kit/gba-node",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Headless Node.js runtime for scripted GBA emulation",
   "author": "macabeus",
   "type": "module",
