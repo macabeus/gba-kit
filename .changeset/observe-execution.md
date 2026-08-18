@@ -12,8 +12,8 @@ Observe execution instead of sampling it
   and so reported code that ran constantly as never reached. Takes an address or a
   symbol name.
 - `watchExecution(target, options?)` — new: the execution counterpart to
-  `watchMemory`, reporting `count`, `hits` (with the caller's `lr` and source
-  location), `dropped` and `stop()`.
+  `watchMemory`, reporting `count`, `hits` (each with `lr` and its source location),
+  `dropped` and `stop()`. `lr` names a caller only for an address a `bl` reached.
 - `watchMemory` reports `dropped`, so a capped `hits` array is not read as the whole
   story.
 

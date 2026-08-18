@@ -209,10 +209,24 @@ export interface WatchHit {
 export interface ExecHit {
   /** The watched instruction address. */
   address: number;
-  /** Link register at entry — the caller's return address, when the watch is a function entry. */
+  /**
+   * The link register as the instruction executed — a fact about the CPU, not
+   * about the watched address. Raw, so a Thumb `bl` leaves bit 0 set and the
+   * address is `lr & ~1`.
+   *
+   * It is the caller's return address only when the watched address was reached
+   * by a `bl`/`blx`; one fallen into from the instruction above, branched to, or
+   * entered by a tail call carries whatever the last unrelated call left behind.
+   * Confirm the instruction ending at `lr & ~1` is a call to
+   * {@link ExecHit.address} before reading it as a caller.
+   */
   lr: number;
   thumb: boolean;
-  /** The caller's C `file:line`, when debug info covers it. */
+  /**
+   * {@link ExecHit.lr} resolved through the line table, when debug info covers it.
+   * It inherits `lr`'s caveat, and a plausible `file:line` is what makes that
+   * worth checking.
+   */
   callerLocation?: SourceLocation;
 }
 
@@ -668,9 +682,9 @@ export class ScriptingEngine {
    * symbol name when debug info is loaded. The execution counterpart to
    * {@link watchMemory}, and the way to answer "does this code ever run".
    *
-   * Each hit carries the caller's return address, so a body that runs from several
-   * places says which. Counting is exact: the watchpoint fires from the CPU's own
-   * instruction step, not from a sample.
+   * Counting is exact: the watchpoint fires from the CPU's own instruction step,
+   * not from a sample. Each hit also carries `lr`, which names the caller only for
+   * an address a `bl` reached — see {@link ExecHit.lr}.
    *
    * @example
    *   const w = watchExecution('UpdatePlayer');

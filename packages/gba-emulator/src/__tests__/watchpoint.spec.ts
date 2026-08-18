@@ -301,7 +301,42 @@ describe('ScriptingEngine watchExecution', () => {
     expect(w.hits.length + w.dropped).toBe(w.count);
   });
 
-  it('records the caller’s return address', () => {
+  // A CPU whose first instruction calls the second: `bl callee; b .` with the
+  // callee at BASE+8 returning via `bx lr`.
+  function callingGba(): { gba: Gba; callee: number; ret: number } {
+    const gba = new Gba();
+    const callee = BASE + 8;
+    // Thumb BL is a halfword pair; offset is relative to (bl address + 4).
+    const off = callee - (BASE + 4);
+    gba.bus.write16(BASE, 0xf000 | ((off >> 12) & 0x7ff));
+    gba.bus.write16(BASE + 2, 0xf800 | ((off >> 1) & 0x7ff));
+    gba.bus.write16(BASE + 4, 0xe7fe); // b . — park here after the callee returns
+    gba.bus.write16(callee, 0x4770); // bx lr
+    gba.armCpu.registers[15] = BASE;
+    gba.armCpu.setT(true);
+    return { gba, callee, ret: BASE + 4 };
+  }
+
+  it('reports lr as the return address when a bl reached the address', () => {
+    const { gba, callee, ret } = callingGba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    const w = engine.watchExecution(callee);
+    step(gba, 4);
+    w.stop();
+    expect(w.count).toBe(1);
+    // Raw, so a Thumb `bl` leaves bit 0 set: the return address is `lr & ~1`.
+    expect(w.hits[0]).toMatchObject({ address: callee, lr: ret | 1, thumb: true });
+    // What makes `lr` a caller here: the instruction ending at it is the bl.
+    const at = (w.hits[0]!.lr & ~1) - 4;
+    expect(gba.bus.read16(at) & 0xf800).toBe(0xf000);
+    expect(gba.bus.read16(at + 2) & 0xf800).toBe(0xf800);
+  });
+
+  it('reports a STALE lr for an address no bl reached', () => {
+    // The counterpart, and the reason `lr` is documented as a fact about the CPU
+    // rather than about the watched address: nothing calls BASE in this loop, so
+    // the reported lr is whatever an unrelated earlier call left behind. Read as
+    // “who called it” it names a caller that does not exist.
     const gba = loopingGba();
     gba.armCpu.registers[14] = 0x08001234;
     const engine = new ScriptingEngine(gba, stubHost);
@@ -309,6 +344,8 @@ describe('ScriptingEngine watchExecution', () => {
     step(gba, 3);
     w.stop();
     expect(w.hits[0]).toMatchObject({ address: BASE, lr: 0x08001234, thumb: true });
+    // Nothing in the program even encodes a bl, so the value cannot be a return.
+    expect(gba.bus.read16(0x08001234 - 4) & 0xf800).not.toBe(0xf000);
   });
 
   it('stops recording after stop()', () => {
