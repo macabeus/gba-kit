@@ -1,8 +1,14 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { Gba } from '../gba.js';
 import { ScriptingEngine, type ScriptingHost } from '../scripting.js';
 import { GbaSystemBus, type WatchpointWrite } from '../system-bus.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const AGBCC_ELF = join(here, '..', '..', '..', 'debug-info', 'test-projects', 'agbcc-min', 'build', 'min.elf');
 
 const stubHost: ScriptingHost = {
   writeScreenshot: async () => {},
@@ -320,5 +326,58 @@ describe('ScriptingEngine watchExecution', () => {
   it('needs debug info to accept a symbol name', () => {
     const engine = new ScriptingEngine(loopingGba(), stubHost);
     expect(() => engine.watchExecution('SomeFunction')).toThrow(/requires debug info/);
+  });
+});
+
+describe('addressing code and data by number or name', () => {
+  const BASE = 0x02000000;
+
+  it('clears the Thumb bit on a numeric code address', () => {
+    // A Thumb function POINTER carries bit 0 set — read32 of a callback table returns
+    // exactly that. Left set, the watchpoint address is odd and never matches, so the
+    // function reads as never executed.
+    const gba = new Gba();
+    [0x46c0, 0x46c0, 0xe7fc].forEach((instr, i) => gba.bus.write16(BASE + i * 2, instr));
+    gba.armCpu.registers[15] = BASE;
+    gba.armCpu.setT(true);
+    const engine = new ScriptingEngine(gba, stubHost);
+
+    const even = engine.watchExecution(BASE);
+    const asPointer = engine.watchExecution(BASE | 1);
+    for (let i = 0; i < 30; i++) {
+      gba.armCpu.step();
+    }
+    even.stop();
+    asPointer.stop();
+    expect(even.count).toBe(10);
+    expect(asPointer.count).toBe(10); // the same instruction, addressed as a pointer
+  });
+
+  it('watchMemory takes a symbol and watches the whole object', () => {
+    const gba = new Gba();
+    const engine = new ScriptingEngine(gba, stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+    const probe = engine.symbolToAddress('g_probe')!;
+    const extent = engine.symbolExtent('g_probe')!;
+
+    expect(extent.size).toBeGreaterThan(1); // otherwise this proves nothing
+
+    const w = engine.watchMemory({ address: 'g_probe' }); // no explicit length
+    gba.bus.write8(probe, 1); // first byte
+    gba.bus.write8(probe + extent.size - 1, 2); // last byte — only caught if the
+    gba.bus.write8(probe + extent.size, 3); // default length is the whole object
+    w.stop();
+    expect(w.hits.map((h) => h.address)).toEqual([probe, probe + extent.size - 1]);
+  });
+
+  it('refuses an unknown symbol rather than watching nothing', () => {
+    const engine = new ScriptingEngine(new Gba(), stubHost);
+    engine.loadDebugInfo(new Uint8Array(readFileSync(AGBCC_ELF)));
+    expect(() => engine.watchMemory({ address: 'no_such_global' })).toThrow(/unknown symbol/);
+  });
+
+  it('needs debug info before it can take a name', () => {
+    const engine = new ScriptingEngine(new Gba(), stubHost);
+    expect(() => engine.watchMemory({ address: 'g_probe' })).toThrow(/requires debug info/);
   });
 });

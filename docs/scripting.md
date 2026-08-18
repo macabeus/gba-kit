@@ -377,8 +377,11 @@ searchMemory({ value: 3, region: 'both' }); // Both (default)
 
 Registers a write watchpoint over a memory range. Every time a write **commits** to the range, a hit is appended to the returned handle's `hits` array, recording **which code performed the write** — a CPU instruction, or a DMA channel.
 
+`address` is a raw address, or a symbol name when debug info is loaded — in which case the watch covers the whole object rather than one byte.
+
 ```javascript
 const w = watchMemory({ address: 0x03005220 }); // watch 1 byte
+const g = watchMemory({ address: 'gPlayerState' }); // watch all of it
 await press('right', { hold: 30 }); // make the value change
 w.stop(); // remove the watchpoint
 for (const h of w.hits) {
@@ -408,7 +411,7 @@ console.log(w.count); // exact number of executions; 0 means it did not run
 for (const h of w.hits) console.log(h.callerLocation); // who called it
 ```
 
-The handle carries `hits` (recorded, subject to `maxHits`), `count` (every execution seen, always exact), `dropped`, and `stop()`. Each hit has `address`, `lr` — the caller's return address — `thumb`, and `callerLocation` when debug info covers the caller.
+The handle carries `hits` (recorded, subject to `maxHits`), `count` (every execution seen, always exact), `dropped`, and `stop()`. A numeric `target` may carry the Thumb bit — a function pointer read out of a callback table does — and it is cleared, so the pointer and the symbol name reach the same instruction. Each hit has `address`, `lr` — the caller's return address — `thumb`, and `callerLocation` when debug info covers the caller.
 
 Counted from the CPU's instruction step rather than sampled, so `count === 0` is evidence the code did not run.
 

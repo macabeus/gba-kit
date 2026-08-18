@@ -554,7 +554,11 @@ export class ScriptingEngine {
    *   w.stop();
    */
   watchMemory(options: {
-    address: number;
+    /**
+     * A raw address, or — when debug info is loaded — a symbol name, in which case
+     * `length` defaults to the whole object rather than one byte.
+     */
+    address: number | string;
     length?: number;
     /**
      * Keep a hit only when this returns true — watch a wide region but record only
@@ -576,13 +580,14 @@ export class ScriptingEngine {
     dropped: number;
     stop: () => void;
   } {
-    const length = options.length ?? 1;
+    const target = this.#resolveDataLocation(options.address, 'watchMemory');
+    const length = options.length ?? target.length;
     const filter = options.filter;
     const maxHits = options.maxHits;
     const hits: WatchHit[] = [];
     const handle = { hits, dropped: 0, stop: () => {} };
     const busDispose = this.#gba.bus.addWriteWatchpoint(
-      options.address,
+      target.address,
       length,
       ({ address, value, size, dmaChannel, dmaOrigin }) => {
         if (maxHits !== undefined && hits.length >= maxHits) {
@@ -629,10 +634,10 @@ export class ScriptingEngine {
   }
 
   /**
-   * Watch a named global by symbol (requires debug info). Resolves the symbol to
-   * its address, then behaves like `watchMemory`. The watch length defaults to the
-   * symbol's own size (st_size) so a multi-byte global is watched in full; pass
-   * `length` to override. Throws if no debug info is loaded or the symbol is unknown.
+   * Watch a named global by symbol (requires debug info) — `watchMemory` with a
+   * symbol name, kept for readability at the call site. The length defaults to the
+   * whole object, so a multi-byte global is watched in full; pass `length` to
+   * override. Throws if no debug info is loaded or the symbol is unknown.
    *
    * @example
    *   const w = watchSymbol('gPlayerState'); // covers the whole global
@@ -641,16 +646,11 @@ export class ScriptingEngine {
   watchSymbol(
     name: string,
     options?: { length?: number; filter?: (hit: WatchHit) => boolean; maxHits?: number },
-  ): { hits: WatchHit[]; stop: () => void } {
+  ): { hits: WatchHit[]; dropped: number; stop: () => void } {
     if (!this.#debugInfo) {
       throw new Error('watchSymbol requires debug info; call loadDebugInfo(elfBytes) first');
     }
-    const address = this.#debugInfo.symbolToAddress(name);
-    if (address === null) {
-      throw new Error(`watchSymbol: unknown symbol "${name}"`);
-    }
-    const length = options?.length ?? this.#debugInfo.symbolSize(name) ?? 1;
-    return this.watchMemory({ address, length, filter: options?.filter, maxHits: options?.maxHits });
+    return this.watchMemory({ address: name, ...options });
   }
 
   /**
@@ -726,10 +726,18 @@ export class ScriptingEngine {
     return handle;
   }
 
-  /** An address for code: a number as given, or a symbol resolved through debug info. */
+  /**
+   * An address for code: a number, or a symbol resolved through debug info.
+   *
+   * Bit 0 is cleared either way. On ARM it is a state marker, never part of an
+   * instruction address — a Thumb function POINTER carries it set, which is exactly
+   * what `read32` returns from a callback table. Clearing it recovers the address the
+   * value denotes; leaving it set on the numeric arm alone made the same function
+   * count 420 executions when named and 0 when passed as the pointer that reaches it.
+   */
   #resolveCodeAddress(target: number | string, api: string): number {
     if (typeof target === 'number') {
-      return target >>> 0;
+      return (target & ~1) >>> 0;
     }
     if (!this.#debugInfo) {
       throw new Error(`${api}: resolving "${target}" requires debug info; call loadDebugInfo(elfBytes) first`);
@@ -738,8 +746,30 @@ export class ScriptingEngine {
     if (address === null) {
       throw new Error(`${api}: unknown symbol "${target}"`);
     }
-    // Thumb function symbols carry the low bit; instructions are addressed even.
     return (address & ~1) >>> 0;
+  }
+
+  /**
+   * Address + default watch length for a data location named by number or symbol.
+   *
+   * A symbol names an OBJECT, so the whole of it is watched unless a length is given.
+   * The extent comes from {@link DebugInfo.symbolExtent} rather than `st_size` alone,
+   * because a linker-placed global has no `st_size` — in a decomp that is every data
+   * global, and defaulting to 1 byte silently watched the first byte of a 112-byte
+   * array.
+   */
+  #resolveDataLocation(target: number | string, api: string): { address: number; length: number } {
+    if (typeof target === 'number') {
+      return { address: target >>> 0, length: 1 };
+    }
+    if (!this.#debugInfo) {
+      throw new Error(`${api}: resolving "${target}" requires debug info; call loadDebugInfo(elfBytes) first`);
+    }
+    const address = this.#debugInfo.symbolToAddress(target);
+    if (address === null) {
+      throw new Error(`${api}: unknown symbol "${target}"`);
+    }
+    return { address, length: this.#debugInfo.symbolExtent(target)?.size ?? 1 };
   }
 
   /** Remove the data watchpoints created via this engine's `watchMemory`. */
