@@ -9,10 +9,12 @@ import {
   type ReplayDebugState,
   type ReplayMode,
   type ScriptMeta,
+  type ScriptParseError,
   type ScriptWithMapping,
   deleteScript,
   listScriptsByRom,
   loadScriptRecord,
+  parseScript,
   replayVisual,
   saveScript,
   serializeToScript,
@@ -54,7 +56,10 @@ export function ScriptRecorderPanel({
   const [replayMode, setReplayMode] = useState<ReplayMode>('from-start');
   const [replayDebug, setReplayDebug] = useState<ReplayDebugState | null>(null);
   const [copied, setCopied] = useState(false);
+  const [loadedFileName, setLoadedFileName] = useState<string | null>(null);
+  const [parseErrors, setParseErrors] = useState<ScriptParseError[] | null>(null);
   const replayCancelRef = useRef<(() => void) | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const saveCountRef = useRef(0);
 
   // Compute ROM hash
@@ -93,8 +98,54 @@ export function ScriptRecorderPanel({
     setSnapshot(snap);
     setScriptMapping(null);
     setSegments(null);
+    setLoadedFileName(null);
+    setParseErrors(null);
     onStartRecording();
   }, [emulator, onStartRecording]);
+
+  /**
+   * Load a script from disk and make it replayable. The file's own text is
+   * what gets shown — parseScript reports the line each segment came from, so
+   * replay can still highlight it without normalising the user's formatting.
+   *
+   * A loaded script carries no snapshot, so it replays from the current state.
+   */
+  const handleLoadFile = useCallback(async (file: File) => {
+    const text = await file.text();
+    const result = parseScript(text);
+
+    if (!result.ok) {
+      setParseErrors(result.errors);
+      setScriptMapping(null);
+      setSegments(null);
+      setLoadedFileName(file.name);
+      return;
+    }
+
+    setParseErrors(null);
+    setLoadedFileName(file.name);
+    setSnapshot(null);
+    setReplayMode('from-current');
+    setReplayDebug(null);
+    setSegments(result.segments);
+    setScriptMapping({
+      text,
+      lines: text.split('\n'),
+      segmentToLine: result.segmentLines,
+    });
+  }, []);
+
+  const handleFileChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (file) {
+        handleLoadFile(file);
+      }
+      // Reset so picking the same file again still fires a change event.
+      event.target.value = '';
+    },
+    [handleLoadFile],
+  );
 
   const handleStopRecording = useCallback(() => {
     onStopRecording();
@@ -108,6 +159,8 @@ export function ScriptRecorderPanel({
     setSegments(null);
     setSnapshot(null);
     setReplayDebug(null);
+    setLoadedFileName(null);
+    setParseErrors(null);
   }, []);
 
   const handleCopy = useCallback(() => {
@@ -224,6 +277,35 @@ export function ScriptRecorderPanel({
               </button>
             )}
 
+            {!isRecording && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".mjs,.js,.txt,text/javascript,text/plain"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isReplaying}
+                  title="Load a script file and replay it"
+                  className="flex items-center gap-2 px-4 py-2 bg-slate-700/50 text-slate-300 border border-slate-600 rounded-lg font-medium hover:bg-slate-600/50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0-12l-4 4m4-4l4 4"
+                    />
+                  </svg>
+                  Load
+                </button>
+              </>
+            )}
+
             {isRecording && (
               <div className="text-sm text-slate-400 flex items-center gap-3">
                 <span>{formatTime(recorder.totalFrames)}</span>
@@ -257,6 +339,24 @@ export function ScriptRecorderPanel({
         </div>
       </div>
 
+      {/* Parse errors from a loaded file */}
+      {parseErrors && (
+        <div className="bg-red-500/10 rounded-lg border border-red-500/30">
+          <div className="px-3 py-2 border-b border-red-500/30">
+            <div className="text-red-300 text-[10px] uppercase tracking-wider">
+              Could not load {loadedFileName ?? 'script'}
+            </div>
+          </div>
+          <div className="p-3 flex flex-col gap-1">
+            {parseErrors.map((err) => (
+              <div key={`${err.line}-${err.message}`} className="text-xs text-red-200/90 font-mono">
+                <span className="text-red-400">line {err.line}:</span> {err.message}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Live Preview (during recording) */}
       {isRecording && livePreview && (
         <div className="bg-slate-800/50 rounded-lg border border-slate-700">
@@ -271,8 +371,10 @@ export function ScriptRecorderPanel({
       {isStopped && !isRecording && scriptMapping && (
         <div className="bg-slate-800/50 rounded-lg border border-slate-700">
           <div className="px-3 py-2 border-b border-slate-700 flex items-center justify-between">
-            <div className="text-slate-500 text-[10px] uppercase tracking-wider">Recorded Script</div>
-            <div className="text-xs text-slate-500">{segments?.length ?? 0} segments</div>
+            <div className="text-slate-500 text-[10px] uppercase tracking-wider truncate">
+              {loadedFileName ? `Loaded — ${loadedFileName}` : 'Recorded Script'}
+            </div>
+            <div className="text-xs text-slate-500 shrink-0 ml-2">{segments?.length ?? 0} segments</div>
           </div>
           <ScriptEditorView value={scriptMapping.text} highlightLine={highlightedLine} />
           <div className="px-3 py-2 border-t border-slate-700 flex items-center gap-2">
@@ -293,7 +395,9 @@ export function ScriptRecorderPanel({
             <button
               type="button"
               onClick={handleSave}
-              className="px-3 py-1.5 text-xs bg-sky-500/20 text-sky-300 border border-sky-500/30 rounded hover:bg-sky-500/30 transition-all"
+              disabled={!snapshot}
+              title={snapshot ? undefined : 'A loaded script has no snapshot to save with it'}
+              className="px-3 py-1.5 text-xs bg-sky-500/20 text-sky-300 border border-sky-500/30 rounded hover:bg-sky-500/30 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             >
               Save
             </button>
@@ -309,12 +413,18 @@ export function ScriptRecorderPanel({
           </div>
           <div className="p-3">
             <div className="flex flex-col gap-2 mb-3">
-              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer">
+              <label
+                className={`flex items-center gap-2 text-sm ${
+                  snapshot ? 'text-slate-300 cursor-pointer' : 'text-slate-500 cursor-not-allowed'
+                }`}
+                title={snapshot ? undefined : 'Only a recorded script carries the state it started from'}
+              >
                 <input
                   type="radio"
                   name="replayMode"
                   checked={replayMode === 'from-start'}
                   onChange={() => setReplayMode('from-start')}
+                  disabled={!snapshot}
                   className="accent-sky-500"
                 />
                 From recording start
