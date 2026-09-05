@@ -488,6 +488,45 @@ export function compileExpression(text: string, hints: ExprHints = {}): Compiled
   return node.signed ? (env) => f(env) | 0 : f;
 }
 
+/**
+ * Split a console line into the place to write and the value to write there, or null
+ * when the line is an expression to evaluate. The `=` that separates them is the first
+ * one that is not part of `==`, `!=`, `<=` or `>=`, so `a == b` is a comparison and
+ * `a = b == c` writes the comparison's result. A compound operator (`+=`) is refused by
+ * name rather than left to fail as the unreadable target `a +`.
+ */
+export function splitAssignment(line: string): { target: string; value: string } | null {
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (c === "'") {
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted || c !== '=') {
+      continue;
+    }
+    if (line[i + 1] === '=') {
+      i++; // ==
+      continue;
+    }
+    const before = line[i - 1] ?? '';
+    if (before === '!' || before === '<' || before === '>') {
+      continue;
+    }
+    if (before !== '' && '+-*/%&|^'.includes(before)) {
+      throw new Error(`'${before}=' is not supported; write the whole value, as in 'x = x ${before} 1'`);
+    }
+    const target = line.slice(0, i).trim();
+    const value = line.slice(i + 1).trim();
+    if (target === '' || value === '') {
+      throw new Error(`an assignment needs a place and a value, as in 'g_player.pos.x = 10'`);
+    }
+    return { target, value };
+  }
+  return null;
+}
+
 /** `value` as an expression result reads: decimal, with the hex word for anything past a digit. */
 export function formatNumber(value: number): string {
   return `${value} (0x${(value >>> 0).toString(16)})`;

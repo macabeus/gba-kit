@@ -34,7 +34,7 @@ export {
   type DataBreakpointSpec,
   type EventBreakpointKind,
 } from './breakpoints.js';
-export { type CompiledExpr, type ExprEnv, type ExprHints } from './expression.js';
+export { splitAssignment, type CompiledExpr, type ExprEnv, type ExprHints } from './expression.js';
 export { type RewindOptions } from './rewind.js';
 export { type SnapshotDelta } from './delta.js';
 export { type EventEntry, type TimeStamp, type TraceEntry } from './rings.js';

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { applySnapshotDelta, decodeDelta, deltaSnapshot, encodeDelta } from '../delta.js';
-import { type ExprEnv, compileExpression, compileHitCondition, compileLogMessage } from '../expression.js';
+import {
+  type ExprEnv,
+  compileExpression,
+  compileHitCondition,
+  compileLogMessage,
+  splitAssignment,
+} from '../expression.js';
 import { ManualHost } from '../host.js';
 import { LabelStore } from '../labels.js';
 import { LOG, TILES, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
@@ -100,6 +106,22 @@ describe('expression grammar', () => {
     expect(ev('gHp > 2 ? 100 : 200')).toBe(100);
     expect(ev('5 % 3')).toBe(2);
     expect(ev('7 / 0')).toBe(0);
+  });
+
+  it('tells an assignment apart from a comparison', () => {
+    expect(splitAssignment('gUnk_03005220.dreamStones = 10')).toEqual({
+      target: 'gUnk_03005220.dreamStones',
+      value: '10',
+    });
+    expect(splitAssignment('gEntityInfo[3].id=2')).toEqual({ target: 'gEntityInfo[3].id', value: '2' });
+    expect(splitAssignment('x = y == 3')).toEqual({ target: 'x', value: 'y == 3' });
+    expect(splitAssignment("c = '='")).toEqual({ target: 'c', value: "'='" });
+    for (const read of ['g_frame == 3', 'a != b', 'a <= b', 'a >= b', 'g_player.pos.x', '[0x03000000]']) {
+      expect(splitAssignment(read)).toBeNull();
+    }
+    expect(() => splitAssignment('x += 1')).toThrow(/'\+=' is not supported/);
+    expect(() => splitAssignment('x = ')).toThrow(/needs a place and a value/);
+    expect(() => splitAssignment('= 10')).toThrow(/needs a place and a value/);
   });
 
   it('rejects malformed input with a message', () => {

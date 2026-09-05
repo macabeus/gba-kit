@@ -994,6 +994,22 @@ export class Session {
     return this.inspector.evaluate(expression, this.#frames(), frameIndex);
   }
 
+  /**
+   * Write through a path, the way a console line like `g_player.pos.x = 10` reads: the
+   * target is resolved exactly as any other expression is, so locals, globals, members
+   * and subscripts all name a place, and the value is an expression too. Returns the
+   * target read back, so a caller reports what the machine now holds rather than what
+   * was asked for.
+   */
+  assign(target: string, value: string, frameIndex = 0): EvaluateResult {
+    const found = this.evaluate(target, frameIndex);
+    if (!found.node.writable) {
+      throw new Error(`cannot write '${target}': ${found.node.type} is not a scalar the debugger can set`);
+    }
+    this.setVariable(found.node, value);
+    return this.evaluate(target, frameIndex);
+  }
+
   /** Write a scalar the variables view showed as writable; returns how it now reads there. */
   setVariable(node: VarNode, text: string): string {
     if (!node.writable) {

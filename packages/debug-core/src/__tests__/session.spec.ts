@@ -370,6 +370,25 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(h.session.setVariable(y, '0xffffffff')).toBe('-1'); // a bit pattern is accepted for a signed target
   });
 
+  it('assigns through a path, the way a console line does', async () => {
+    const h = await boot(variant);
+    h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'update();') }]);
+    h.run();
+    // a struct member, an array element, and a value that is itself an expression
+    expect(h.session.assign('g_player.pos.x', '10').node.value).toBe('10 (0x0000000a)');
+    expect(h.session.evaluate('g_player.pos.x').node.value).toBe('10 (0x0000000a)');
+    expect(h.session.assign('g_samples[2]', 'g_samples[1] + 1').node.value).toBe('6');
+    expect(h.session.assign('g_player.mode', '2').node.value).toBe('MODE_DONE (2)');
+    expect(h.session.assign('g_player.stats.hp', '5').node.value).toBe('5 (4 bits)');
+    // the machine really holds it: the program reads it back on the next frame
+    h.run();
+    expect(h.session.evaluate('g_samples[2]').node.value).toBe('6');
+    // what cannot be written says so, naming what the user typed
+    expect(() => h.session.assign('g_player.pos', '1')).toThrow(/cannot write 'g_player.pos'/);
+    expect(() => h.session.assign('g_nope', '1')).toThrow(/g_nope/);
+    expect(() => h.session.assign('g_player.stats.hp', '99')).toThrow(/out of range for a 4-bit/);
+  });
+
   it('writing a scalar changes the program', async () => {
     const h = await boot(variant);
     h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'update();') }]);

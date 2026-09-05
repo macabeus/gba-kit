@@ -716,6 +716,43 @@ describe('inspection', () => {
     expect((await client.request('evaluate', { expression: 'bonus', frameId: 1 })).success).toBe(true);
   });
 
+  it('writes through an assignment typed in the console, and never through a hover', async () => {
+    const client = await launch({ breakpoints: [{ path: MAIN, lines: [await lineOf(MAIN, 'draw();')] }] });
+    await stopped(client, 'continue', { threadId: 1 });
+
+    const written = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: 'g_player.pos.x = 42',
+      context: 'repl',
+    });
+    expect(written.result).toBe('42 (0x0000002a)');
+    expect(await num(client, 'g_player.pos.x')).toBe(42);
+    // the value the console reports can be expanded under the name of the place written
+    const struct = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: 'g_player.mode = 2',
+      context: 'repl',
+    });
+    expect(struct.result).toBe('MODE_DONE (2)');
+
+    // a hover reads the same text; the machine must not move
+    const hover = await client.request('evaluate', { expression: 'g_player.pos.x = 7', context: 'hover' });
+    expect(hover.success).toBe(false);
+    expect(await num(client, 'g_player.pos.x')).toBe(42);
+
+    // a comparison in the console stays a comparison
+    const compared = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: 'g_player.pos.x == 42',
+      context: 'repl',
+    });
+    expect(compared.result.startsWith('1')).toBe(true);
+    expect(await num(client, 'g_player.pos.x')).toBe(42);
+
+    // what cannot be written is refused where it was asked, not as a notification
+    const refused = await client.request('evaluate', { expression: 'g_player.pos = 1', context: 'repl' });
+    expect(refused.success).toBe(false);
+    expect(refused.message).toMatch(/cannot write 'g_player.pos'/);
+    expect(refused.body?.error?.showUser).toBeFalsy();
+  });
+
   it('evaluates for hover, watch and the console, and expands results', async () => {
     const client = await launch({ breakpoints: [{ path: MAIN, lines: [await lineOf(MAIN, 'draw();')] }] });
     await stopped(client, 'continue', { threadId: 1 });

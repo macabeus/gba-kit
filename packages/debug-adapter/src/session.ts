@@ -22,6 +22,7 @@ import {
   type VarNode,
   hex8,
   regionOf,
+  splitAssignment,
 } from '@gba-kit/debug-core';
 import { createNodeHost, fileExists } from '@gba-kit/debug-core/node';
 import { DebugSession, Event, Handles, InitializedEvent, OutputEvent, TerminatedEvent } from '@vscode/debugadapter';
@@ -262,6 +263,8 @@ export class GbaDebugSession extends DebugSession {
   #audioOff: (() => void) | null = null;
   /** whether the stream's client asked for audio (a restart's session subscribes again) */
   #audioWanted = false;
+  /** whether the client asked to be told when what it holds has gone stale */
+  #clientTakesInvalidated = false;
   /** while set, session events queue here so a response can go out first */
   #deferred: DebugProtocol.Event[] | null = null;
   readonly #breakpoints: BreakpointSet = { source: new Map(), functions: [], instructions: [], data: [], events: [] };
@@ -293,7 +296,11 @@ export class GbaDebugSession extends DebugSession {
 
   // ─── lifecycle ─────────────────────────────────────────────────────
 
-  protected override initializeRequest(response: DebugProtocol.InitializeResponse): void {
+  protected override initializeRequest(
+    response: DebugProtocol.InitializeResponse,
+    args?: DebugProtocol.InitializeRequestArguments,
+  ): void {
+    this.#clientTakesInvalidated = args?.supportsInvalidatedEvent === true;
     response.body = {
       supportsConfigurationDoneRequest: true,
       supportsSteppingGranularity: true,
@@ -481,6 +488,18 @@ export class GbaDebugSession extends DebugSession {
     } else {
       this.sendEvent(event);
     }
+  }
+
+  /**
+   * Tell the client that what it is holding no longer describes the machine, so the
+   * variables it shows are re-fetched. Only clients that asked for the event get it;
+   * the rest re-read on their own schedule.
+   */
+  #invalidateVariables(): void {
+    if (this.#clientTakesInvalidated) {
+      this.#emit(new Event('invalidated', { areas: ['variables'], threadId: THREAD_ID }));
+    }
+    this.#emit(new Event('gba-kit/state', this.#stateBody()));
   }
 
   #log(text: string, category: 'console' | 'stderr' = 'console'): void {
@@ -1080,8 +1099,17 @@ export class GbaDebugSession extends DebugSession {
       () => {
         // an editor's hover sends whatever is under the mouse, an empty string included
         const expression = typeof args.expression === 'string' ? args.expression.trim() : '';
-        const { node, address } = session.evaluate(expression, args.frameId ?? 0);
-        const prefix = /^[A-Za-z_][\w.[\]]*$/.test(expression) ? expression : null;
+        // Only what the user typed into the console may write: a hover over `a = b` in
+        // the source must read, never store.
+        const assignment = args.context === 'repl' ? splitAssignment(expression) : null;
+        const { node, address } = assignment
+          ? session.assign(assignment.target, assignment.value, args.frameId ?? 0)
+          : session.evaluate(expression, args.frameId ?? 0);
+        if (assignment) {
+          this.#invalidateVariables();
+        }
+        const named = assignment ? assignment.target : expression;
+        const prefix = /^[A-Za-z_][\w.[\]]*$/.test(named) ? named : null;
         response.body = {
           result: node.value,
           type: node.type,
