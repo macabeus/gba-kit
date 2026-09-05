@@ -118,6 +118,27 @@ describe.each([
     expect(unit).not.toBeNull();
     expect(scopes.globals(unit!).map((g) => scopes.name(g))).toContain('g_counter');
   });
+
+  it('finds an enumerator by name, from a tagged enum or a typedef of an anonymous one', () => {
+    const green = scopes.enumeratorByName('COLOR_GREEN')!;
+    expect(green.value).toBe(5);
+    expect(scopes.types.describe(green.type).name).toBe('enum Color');
+    expect(scopes.enumeratorByName('MODE_ON')?.value).toBe(1);
+    expect(scopes.enumeratorByName('COLOR_NOPE')).toBeNull();
+  });
+});
+
+describe('inlined entries by name', () => {
+  // The debug-core fixtures are the ELFs in this repository built with inlining
+  // (-O2): tick and wait_vblank exist only inlined into main there.
+  const elf = join(here, '..', '..', '..', 'debug-core', 'test-fixtures', 'build', 'thumb-O2.elf');
+  const scopes = DebugInfo.fromElf(new Uint8Array(readFileSync(elf))).scopes;
+
+  it('lists where a function that has no symbol of its own is entered inlined', () => {
+    expect(scopes.inlineEntriesByName('tick')).toEqual([0x080001f4]);
+    expect(scopes.inlineEntriesByName('wait_vblank')).toEqual([0x080001f2]);
+    expect(scopes.inlineEntriesByName('no_such_function')).toEqual([]);
+  });
 });
 
 describe('call-frame information', () => {

@@ -300,25 +300,6 @@ export class GbaSystemBus implements MemoryBus {
   // ─── Memory Map Classification ────────────────────────────────────
 
   /**
-   * The region this bus decodes `address` to, or `null` when it decodes nothing.
-   *
-   * The `read*` methods below are the HARDWARE interface: they answer every address,
-   * because the console does — an undecoded one reads as open bus, which on real
-   * silicon is a value, not a fault. That is correct for the CPU and wrong for a
-   * human or an agent, who gets a plausible number back from a question that had no
-   * answer. Debug-facing callers use this first so they can refuse instead
-   * (see `ScriptingEngine.read16`/`read32`/`readBytes`).
-   *
-   * "Decoded" is the test, not "distinct". The RAM regions mirror a small store
-   * across their whole 16 MB window, and a read from a mirror is a real read — so
-   * this reports the region rather than claiming the address is a mistake. What it
-   * does catch is space nothing answers for: the holes in the BIOS and I/O regions,
-   * region 0x01, everything from 0x10 up, and an offset past the end of the
-   * cartridge actually loaded.
-   *
-   * Side-effect free — unlike a read, which can advance the EEPROM serial state.
-   */
-  /**
    * Debugger read: `length` bytes starting at `address`, taken from the backing
    * arrays without any of the bus's side effects (an EEPROM read through the bus
    * clocks its serial protocol; this never does). `readable` counts the leading
@@ -423,6 +404,25 @@ export class GbaSystemBus implements MemoryBus {
     return written;
   }
 
+  /**
+   * The region this bus decodes `address` to, or `null` when it decodes nothing.
+   *
+   * The `read*` methods below are the HARDWARE interface: they answer every address,
+   * because the console does — an undecoded one reads as open bus, which on real
+   * silicon is a value, not a fault. That is correct for the CPU and wrong for a
+   * human or an agent, who gets a plausible number back from a question that had no
+   * answer. Debug-facing callers use this first so they can refuse instead
+   * (see `ScriptingEngine.read16`/`read32`/`readBytes`).
+   *
+   * "Decoded" is the test, not "distinct". The RAM regions mirror a small store
+   * across their whole 16 MB window, and a read from a mirror is a real read — so
+   * this reports the region rather than claiming the address is a mistake. What it
+   * does catch is space nothing answers for: the holes in the BIOS and I/O regions,
+   * region 0x01, everything from 0x10 up, and an offset past the end of the
+   * cartridge actually loaded.
+   *
+   * Side-effect free — unlike a read, which can advance the EEPROM serial state.
+   */
   describeAddress(address: number): { region: string } | null {
     const addr = address >>> 0;
     const offset = addr & 0x00ffffff;

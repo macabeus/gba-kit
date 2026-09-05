@@ -16,10 +16,12 @@ export interface InputRecording {
 }
 
 const BUTTON_NAMES = ['a', 'b', 'select', 'start', 'right', 'left', 'up', 'down', 'r', 'l'] as const;
+/** how many buttons the GBA has: bits 0–9 of a mask, in `BUTTON_NAMES` order */
+export const BUTTON_COUNT = BUTTON_NAMES.length;
 
 export function buttonsToNames(mask: number): string[] {
   const out: string[] = [];
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < BUTTON_COUNT; i++) {
     if (mask & (1 << i)) {
       out.push(BUTTON_NAMES[i]!);
     }

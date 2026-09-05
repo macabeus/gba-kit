@@ -7,16 +7,14 @@
  */
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
+import { arrayFrom, arrayKind, viewBytes } from './typed-arrays.js';
+
 /** A typed-array field of the snapshot, addressed by path. */
 type ArrayPath = string[];
 
 function walk(obj: unknown, path: ArrayPath, out: Array<{ path: ArrayPath; array: Uint8Array }>): void {
-  if (obj instanceof Uint8Array) {
-    out.push({ path, array: obj });
-    return;
-  }
-  if (obj instanceof Uint32Array || obj instanceof Int8Array || obj instanceof Float32Array) {
-    out.push({ path, array: new Uint8Array(obj.buffer, obj.byteOffset, obj.byteLength) });
+  if (arrayKind(obj) !== null) {
+    out.push({ path, array: viewBytes(obj as ArrayBufferView) });
     return;
   }
   if (Array.isArray(obj)) {
@@ -58,7 +56,7 @@ export function encodeDelta(base: Uint8Array, next: Uint8Array): Uint8Array {
       zeros++;
       i++;
     }
-    let start = i;
+    const start = i;
     while (i < next.length && base[i] !== next[i]) {
       i++;
     }
@@ -68,10 +66,10 @@ export function encodeDelta(base: Uint8Array, next: Uint8Array): Uint8Array {
       while (i + gap < next.length && gap < 8 && base[i + gap] === next[i + gap]) {
         gap++;
       }
-      if (i + gap >= next.length || gap >= 8 || base[i + gap] === next[i + gap]) {
-        break;
+      if (i + gap >= next.length || gap >= 8) {
+        break; // the run of equal bytes reaches the end, or is long enough to be its own zero run
       }
-      i += gap;
+      i += gap; // the gap scan stopped on a difference: the literal continues through it
       while (i < next.length && base[i] !== next[i]) {
         i++;
       }
@@ -83,7 +81,6 @@ export function encodeDelta(base: Uint8Array, next: Uint8Array): Uint8Array {
     chunks.push(zeros, literal.length);
     literals.push(literal);
     total += 8 + literal.length;
-    start = i;
   }
   const out = new Uint8Array(total);
   const view = new DataView(out.buffer);
@@ -145,7 +142,7 @@ export function applySnapshotDelta(base: GbaSnapshot, delta: SnapshotDelta): Gba
 /** A copy of the snapshot without its typed arrays (they come from the deltas). */
 function stripArrays(snap: GbaSnapshot): GbaSnapshot {
   const clone = (v: unknown): unknown => {
-    if (v instanceof Uint8Array || v instanceof Uint32Array || v instanceof Int8Array || v instanceof Float32Array) {
+    if (arrayKind(v) !== null) {
       return null;
     }
     if (Array.isArray(v)) {
@@ -177,14 +174,5 @@ function setPath(obj: unknown, path: ArrayPath, bytes: Uint8Array, like: unknown
     cur = cur[p] as Record<string, unknown>;
   }
   const key = path[path.length - 1]!;
-  const copy = bytes.slice();
-  if (like instanceof Uint32Array) {
-    cur[key] = new Uint32Array(copy.buffer, 0, copy.byteLength >> 2);
-  } else if (like instanceof Int8Array) {
-    cur[key] = new Int8Array(copy.buffer, 0, copy.byteLength);
-  } else if (like instanceof Float32Array) {
-    cur[key] = new Float32Array(copy.buffer, 0, copy.byteLength >> 2);
-  } else {
-    cur[key] = copy;
-  }
+  cur[key] = arrayFrom(arrayKind(like) ?? 'u8', bytes);
 }

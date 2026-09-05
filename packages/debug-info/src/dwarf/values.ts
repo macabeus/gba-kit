@@ -7,9 +7,10 @@
  * The formatter's one rule: a value it cannot establish is shown as unavailable,
  * never as a plausible number.
  */
+import { Cursor } from '../reader.js';
 import type { DwarfEntry } from '../types.js';
 import { DW_AT, DW_ATE, DW_OP, DW_TAG } from './constants.js';
-import { EntryIndex, attrNum } from './entries.js';
+import { EntryIndex, attrFlag, attrNum } from './entries.js';
 
 export type TypeKind =
   | 'int'
@@ -46,7 +47,10 @@ export interface TypeDesc {
   /** array length; null when the DWARF leaves it unstated (`extern T x[]`) */
   count?: number | null;
   members?: MemberDesc[];
+  /** enum: constant → name, the constant in the enum's own storage domain (see `signed`) */
   enumerators?: Map<number, string>;
+  /** enum: whether its storage is read as signed (an enumerator below zero, or the compiler says so) */
+  signed?: boolean;
 }
 
 const VOID: TypeDesc = { kind: 'void', name: 'void', size: 0 };
@@ -69,6 +73,49 @@ export class TypeResolver {
     this.#cache.set(entry.offset, desc);
     Object.assign(desc, this.#build(entry));
     return desc;
+  }
+
+  /**
+   * The type of `variable` as declared. A declaration's unsized array (`extern T
+   * x[]`) is what it says: GCC 2.95 encodes it as upper bound 0, which the type
+   * alone cannot tell from a genuine `T x[1]`; only the declaration flag can. The
+   * memoized description is left alone — it is right for a definition.
+   */
+  describeDeclared(variable: DwarfEntry): TypeDesc {
+    const typeEntry = this.index.typeOf(variable);
+    const type = this.describe(typeEntry);
+    if (!attrFlag(variable, DW_AT.declaration) || type.kind !== 'array' || type.count !== 1 || !typeEntry) {
+      return type;
+    }
+    const array = this.#strip(typeEntry);
+    const outer = array?.children.find((d) => d.tag === DW_TAG.subrange_type);
+    if (!outer || attrNum(outer, DW_AT.count) !== undefined || attrNum(outer, DW_AT.upper_bound) !== 0) {
+      return type;
+    }
+    const at = type.name.indexOf('[1]');
+    return {
+      ...type,
+      name: at < 0 ? `${type.name}[]` : `${type.name.slice(0, at)}[]${type.name.slice(at + 3)}`,
+      size: 0,
+      count: null,
+    };
+  }
+
+  /** `entry` with typedefs and cv-qualifiers peeled off. */
+  #strip(entry: DwarfEntry): DwarfEntry | undefined {
+    let e: DwarfEntry | undefined = entry;
+    for (let depth = 0; e && depth < 8; depth++) {
+      if (
+        e.tag !== DW_TAG.typedef &&
+        e.tag !== DW_TAG.const_type &&
+        e.tag !== DW_TAG.volatile_type &&
+        e.tag !== DW_TAG.restrict_type
+      ) {
+        return e;
+      }
+      e = this.index.typeOf(e);
+    }
+    return e;
   }
 
   #build(entry: DwarfEntry): TypeDesc {
@@ -134,17 +181,37 @@ export class TypeResolver {
         return { kind, name: name ? `${kind} ${name}` : `${kind} {…}`, size, members };
       }
       case DW_TAG.enumeration_type: {
-        const enumerators = new Map<number, string>();
+        const storage = size || 4;
+        const raw: Array<[number, string]> = [];
         for (const e of entry.children) {
           if (e.tag === DW_TAG.enumerator) {
             const v = attrNum(e, DW_AT.const_value);
             const n = this.index.name(e);
             if (v !== undefined && n) {
-              enumerators.set(v, n);
+              raw.push([v, n]);
             }
           }
         }
-        return { kind: 'enum', name: name ? `enum ${name}` : 'enum {…}', size: size || 4, enumerators };
+        // GCC 14 states the storage's signedness (an encoding, or an underlying type).
+        // agbcc states neither and writes a negative constant as its unsigned word
+        // (data4 0xffffffff for -1), so there an enumerator with the top bit of the
+        // storage set is read as negative: both spellings land on the same key.
+        const enc = attrNum(entry, DW_AT.encoding);
+        const underlying = this.describe(this.index.typeOf(entry));
+        const topBit = 2 ** (Math.min(storage, 4) * 8 - 1);
+        const signed =
+          enc !== undefined
+            ? enc === DW_ATE.signed || enc === DW_ATE.signed_char
+            : underlying.kind === 'int' || underlying.kind === 'char'
+              ? true
+              : underlying.kind === 'uint' || underlying.kind === 'uchar' || underlying.kind === 'bool'
+                ? false
+                : raw.some(([v]) => v < 0 || v >= topBit);
+        const enumerators = new Map<number, string>();
+        for (const [v, n] of raw) {
+          enumerators.set(inDomain(v, storage, signed), n);
+        }
+        return { kind: 'enum', name: name ? `enum ${name}` : 'enum {…}', size: storage, enumerators, signed };
       }
       case DW_TAG.array_type: {
         const elem = this.describe(this.index.typeOf(entry));
@@ -187,23 +254,21 @@ export class TypeResolver {
   }
 }
 
+/** `v` reduced to a `size`-byte word and read in the given signedness. */
+function inDomain(v: number, size: number, signed: boolean): number {
+  const width = Math.min(size, 4) * 8;
+  const mod = 2 ** width;
+  const u = ((v % mod) + mod) % mod;
+  return signed && u >= mod / 2 ? u - mod : u;
+}
+
 function memberOffset(m: DwarfEntry): number {
   const a = m.attrs.get(DW_AT.data_member_location);
   if (typeof a === 'number') {
     return a;
   }
   if (a instanceof Uint8Array && a[0] === DW_OP.plus_uconst) {
-    let result = 0;
-    let shift = 0;
-    for (let i = 1; i < a.length; i++) {
-      const b = a[i]!;
-      result += (b & 0x7f) * 2 ** shift;
-      shift += 7;
-      if ((b & 0x80) === 0) {
-        break;
-      }
-    }
-    return result;
+    return new Cursor(a, 1).uleb();
   }
   return 0;
 }
@@ -219,13 +284,34 @@ export interface VarNode {
   address?: number;
   /** expandable children (struct members, array elements, a pointee), computed on demand */
   children?: () => VarNode[];
+  /** array: the element at `index`, null when out of range (an unsized array has no upper bound) */
+  element?: (index: number) => VarNode | null;
   /** a scalar in memory: what to write back */
-  writable?: { address: number; size: number; kind: TypeKind };
+  writable?: WritableScalar;
+  /**
+   * The value as a number, for a scalar of at most 32 bits: an expression reads it
+   * through this rather than through the text. `signed` says how the word is read.
+   */
+  scalar?: { value: number; signed: boolean };
+}
+
+/** Where and how a scalar shown in the tree is written back. */
+export interface WritableScalar {
+  address: number;
+  size: number;
+  kind: TypeKind;
+  /** enum: the names a write may use */
+  enumerators?: Map<number, string>;
+  /** bitfield: the bits of the `size` bytes at `address` that belong to this member */
+  bitOffset?: number;
+  bitSize?: number;
 }
 
 export interface ValueReader {
   /** `size` bytes at `address`, or null when any of them is unreadable. */
   read(address: number, size: number): Uint8Array | null;
+  /** What names a code address (a function pointer's target), when the program knows. */
+  symbolize?(address: number): string | null;
 }
 
 export function toInt(bytes: Uint8Array, signed: boolean): number {
@@ -239,9 +325,61 @@ export function toInt(bytes: Uint8Array, signed: boolean): number {
   return v;
 }
 
-function hex(v: number, size: number): string {
-  return '0x' + (v >>> 0).toString(16).padStart(Math.min(size, 4) * 2, '0');
+/** The little-endian integer in `bytes` at full precision, any width. */
+export function toBigInt(bytes: Uint8Array, signed: boolean): bigint {
+  let v = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    v = (v << 8n) | BigInt(bytes[i]!);
+  }
+  if (signed && bytes.length > 0 && bytes[bytes.length - 1]! & 0x80) {
+    v -= 1n << BigInt(bytes.length * 8);
+  }
+  return v;
 }
+
+/** `v` as a hex word of the value's own width (two's complement at that width for a negative). */
+function hex(v: number, size: number): string {
+  const bytes = Math.min(size, 4);
+  const mod = 2 ** (bytes * 8);
+  const u = ((v % mod) + mod) % mod;
+  return '0x' + u.toString(16).padStart(bytes * 2, '0');
+}
+
+/** The bytes as a hex word, any width. */
+function hexBytes(bytes: Uint8Array): string {
+  return (
+    '0x' +
+    toBigInt(bytes, false)
+      .toString(16)
+      .padStart(bytes.length * 2, '0')
+  );
+}
+
+/**
+ * `bytes` as a C string literal: printable ASCII verbatim, the usual escapes by
+ * name, every other byte as `\xNN` — so a Latin-1 byte or a control character is
+ * shown as the byte it is, on one line.
+ */
+export function quoteBytes(bytes: Uint8Array): string {
+  const named: Record<number, string> = { 0: '\\0', 9: '\\t', 10: '\\n', 13: '\\r', 34: '\\"', 92: '\\\\' };
+  let out = '';
+  for (const b of bytes) {
+    out += named[b] ?? (b >= 32 && b < 127 ? String.fromCharCode(b) : `\\x${b.toString(16).padStart(2, '0')}`);
+  }
+  return `"${out}"`;
+}
+
+/** `'A'`, `'\n'`, `'\xe9'`: a char's glyph. */
+function charLiteral(byte: number): string {
+  return quoteBytes(new Uint8Array([byte]))
+    .replace(/^"/, "'")
+    .replace(/"$/, "'")
+    .replace(/\\"/, '"');
+}
+
+/** How many elements of an unsized array are shown in its value / its children. */
+const UNSIZED_PREVIEW = 6;
+const UNSIZED_CHILDREN = 64;
 
 /** Build the tree node for a value of `type` held in `bytes` (or at `address` for lazy reads). */
 export function formatValue(
@@ -252,31 +390,47 @@ export function formatValue(
   reader: ValueReader,
 ): VarNode {
   const node: VarNode = { name, value: '', type: type.name, address };
+  if (type.kind === 'array' && type.count === null) {
+    return unsizedArray(node, type, address, reader);
+  }
   if (!bytes) {
     node.value = address !== undefined ? `<unreadable at ${hex(address, 4)}>` : '<optimized out>';
     return node;
   }
+  // Children are expanded later, after a write may have changed the bytes: read again when they live in memory.
+  const current = (): Uint8Array => (address === undefined ? bytes : (reader.read(address, bytes.length) ?? bytes));
   switch (type.kind) {
     case 'int':
     case 'uint': {
-      const v = toInt(bytes, type.kind === 'int');
-      node.value = Math.abs(v) > 9 ? `${v} (${hex(v, bytes.length)})` : String(v);
+      const signed = type.kind === 'int';
+      if (bytes.length > 4) {
+        const v = toBigInt(bytes, signed);
+        node.value = `${v} (${hexBytes(bytes)})`;
+      } else {
+        const v = toInt(bytes, signed);
+        node.value = Math.abs(v) > 9 ? `${v} (${hex(v, bytes.length)})` : String(v);
+        node.scalar = { value: v, signed };
+      }
       if (address !== undefined) {
         node.writable = { address, size: bytes.length, kind: type.kind };
       }
       break;
     }
-    case 'bool':
-      node.value = toInt(bytes, false) ? 'true' : 'false';
+    case 'bool': {
+      const v = toInt(bytes, false);
+      node.value = v ? 'true' : 'false';
+      node.scalar = { value: v, signed: false };
       if (address !== undefined) {
         node.writable = { address, size: bytes.length, kind: type.kind };
       }
       break;
+    }
     case 'char':
     case 'uchar': {
-      const v = toInt(bytes, type.kind === 'char');
-      const printable = v >= 32 && v < 127 ? ` '${String.fromCharCode(v)}'` : '';
-      node.value = `${v}${printable}`;
+      const signed = type.kind === 'char';
+      const v = toInt(bytes, signed);
+      node.value = `${v} ${charLiteral(v & 0xff)}`;
+      node.scalar = { value: v, signed };
       if (address !== undefined) {
         node.writable = { address, size: bytes.length, kind: type.kind };
       }
@@ -289,24 +443,32 @@ export function formatValue(
       break;
     }
     case 'enum': {
-      const v = toInt(bytes, false);
+      const signed = type.signed === true;
+      const v = toInt(bytes, signed);
       const label = type.enumerators?.get(v);
       node.value = label ? `${label} (${v})` : `${v} (${hex(v, bytes.length)})`;
+      node.scalar = { value: v, signed };
       if (address !== undefined) {
-        node.writable = { address, size: bytes.length, kind: 'uint' };
+        node.writable = { address, size: bytes.length, kind: signed ? 'int' : 'uint', enumerators: type.enumerators };
       }
       break;
     }
     case 'pointer': {
       const p = toInt(bytes, false) >>> 0;
       node.value = hex(p, 4);
+      node.scalar = { value: p, signed: false };
       const target = type.target;
       if (target && (target.kind === 'char' || target.kind === 'uchar') && p !== 0) {
         const s = reader.read(p, 32);
         if (s) {
           const end = s.indexOf(0);
-          const text = new TextDecoder().decode(s.subarray(0, end < 0 ? s.length : end));
-          node.value += ` "${text}${end < 0 ? '…' : ''}"`;
+          node.value += ` ${quoteBytes(s.subarray(0, end < 0 ? s.length : end))}${end < 0 ? '…' : ''}`;
+        }
+      }
+      if (target?.kind === 'function' && p !== 0) {
+        const sym = reader.symbolize?.((p & ~1) >>> 0);
+        if (sym) {
+          node.value += `  → ${sym}${p & 1 ? ' (Thumb)' : ''}`;
         }
       }
       if (target && target.kind !== 'void' && target.kind !== 'function' && target.kind !== 'unknown' && p !== 0) {
@@ -325,7 +487,10 @@ export function formatValue(
       const members = type.members ?? [];
       const preview = members.slice(0, 4).map((m) => `${m.name}: ${memberNode(m, bytes, address, reader).value}`);
       node.value = `{${preview.join(', ')}${members.length > 4 ? ', …' : ''}}`;
-      node.children = () => members.map((m) => memberNode(m, bytes, address, reader));
+      node.children = () => {
+        const b = current();
+        return members.map((m) => memberNode(m, b, address, reader));
+      };
       break;
     }
     case 'array': {
@@ -333,8 +498,7 @@ export function formatValue(
       const count = type.count ?? (elem.size ? Math.floor(bytes.length / elem.size) : 0);
       if ((elem.kind === 'char' || elem.kind === 'uchar') && count > 0) {
         const end = bytes.indexOf(0);
-        const text = new TextDecoder().decode(bytes.subarray(0, end < 0 ? Math.min(bytes.length, count) : end));
-        node.value = `"${text}"`;
+        node.value = quoteBytes(bytes.subarray(0, end < 0 ? Math.min(bytes.length, count) : end));
       } else {
         const shown = Math.min(count, 6);
         const items: string[] = [];
@@ -352,21 +516,23 @@ export function formatValue(
         node.value = `[${count}] {${items.join(', ')}${count > shown ? ', …' : ''}}`;
       }
       if (elem.size && count > 0) {
+        const element = (b: Uint8Array, i: number): VarNode =>
+          formatValue(
+            `[${i}]`,
+            elem,
+            b.subarray(i * elem.size, (i + 1) * elem.size),
+            address === undefined ? undefined : address + i * elem.size,
+            reader,
+          );
         node.children = () => {
+          const b = current();
           const out: VarNode[] = [];
           for (let i = 0; i < Math.min(count, 256); i++) {
-            out.push(
-              formatValue(
-                `[${i}]`,
-                elem,
-                bytes.subarray(i * elem.size, (i + 1) * elem.size),
-                address === undefined ? undefined : address + i * elem.size,
-                reader,
-              ),
-            );
+            out.push(element(b, i));
           }
           return out;
         };
+        node.element = (i) => (i >= 0 && i < count ? element(current(), i) : null);
       }
       break;
     }
@@ -374,11 +540,47 @@ export function formatValue(
       node.value = address !== undefined ? hex(address, 4) : type.name;
       break;
     case 'void':
-      node.value = bytes.length ? hex(toInt(bytes, false), bytes.length) : 'void';
+      node.value = bytes.length ? hexBytes(bytes) : 'void';
       break;
     default:
-      node.value = bytes.length <= 4 ? hex(toInt(bytes, false), bytes.length) : `<${bytes.length} bytes>`;
+      node.value = bytes.length <= 8 ? hexBytes(bytes) : `<${bytes.length} bytes>`;
   }
+  return node;
+}
+
+/**
+ * An array whose extent the DWARF does not state (`extern T x[]`): the bytes on
+ * hand say nothing about its length, so the value is a bounded preview read
+ * from its address, never a count invented from a buffer size.
+ */
+function unsizedArray(node: VarNode, type: TypeDesc, address: number | undefined, reader: ValueReader): VarNode {
+  const elem = type.target ?? VOID;
+  if (address === undefined || !elem.size) {
+    node.value = '<unsized array>';
+    return node;
+  }
+  const elements = (n: number): VarNode[] => {
+    const out: VarNode[] = [];
+    for (let i = 0; i < n; i++) {
+      const at = address + i * elem.size;
+      const b = reader.read(at, elem.size);
+      if (!b) {
+        break;
+      }
+      out.push(formatValue(`[${i}]`, elem, b, at, reader));
+    }
+    return out;
+  };
+  const preview = elements(UNSIZED_PREVIEW);
+  node.value = `[] {${preview.map((e) => e.value).join(', ')}${preview.length === UNSIZED_PREVIEW ? ', …' : ''}}`;
+  node.children = () => elements(UNSIZED_CHILDREN);
+  node.element = (i) => {
+    if (i < 0) {
+      return null;
+    }
+    const at = address + i * elem.size;
+    return formatValue(`[${i}]`, elem, reader.read(at, elem.size), at, reader);
+  };
   return node;
 }
 
@@ -388,14 +590,29 @@ function memberNode(m: MemberDesc, bytes: Uint8Array, base: number | undefined, 
     const span = Math.ceil(((m.bitOffset % 8) + m.bitSize) / 8);
     const raw = toInt(bytes.subarray(firstByte, firstByte + span), false);
     const value = Math.floor(raw / 2 ** (m.bitOffset % 8)) % 2 ** m.bitSize;
-    const signed = m.type.kind === 'int' || m.type.kind === 'char';
+    const signed =
+      m.type.kind === 'int' || m.type.kind === 'char' || (m.type.kind === 'enum' && m.type.signed === true);
     const v = signed && value >= 2 ** (m.bitSize - 1) ? value - 2 ** m.bitSize : value;
-    return {
+    const label =
+      m.type.kind === 'enum' ? m.type.enumerators?.get(v) : m.type.kind === 'bool' ? (v ? 'true' : 'false') : undefined;
+    const node: VarNode = {
       name: m.name,
-      value: `${v} (${m.bitSize} bits)`,
+      value: `${label ? (m.type.kind === 'enum' ? `${label} (${v})` : label) : v} (${m.bitSize} bits)`,
       type: m.type.name,
       address: base === undefined ? undefined : base + firstByte,
+      scalar: { value: v, signed },
     };
+    if (base !== undefined) {
+      node.writable = {
+        address: base + firstByte,
+        size: span,
+        kind: m.type.kind,
+        bitOffset: m.bitOffset % 8,
+        bitSize: m.bitSize,
+        enumerators: m.type.kind === 'enum' ? m.type.enumerators : undefined,
+      };
+    }
+    return node;
   }
   const size = m.type.size || (m.type.kind === 'pointer' ? 4 : 0);
   const slice = bytes.subarray(m.offset, m.offset + size);

@@ -15,6 +15,12 @@ export interface Host {
 export interface HostFiles {
   /** The file's text, or null when it does not exist. */
   readText(path: string): Promise<string | null>;
+  /**
+   * At most the first `bytes` bytes of the file as text, or null when it does not
+   * exist — for reading a large file's header without the rest (a save state's
+   * metadata precedes its snapshot). Hosts without it are read whole.
+   */
+  readHead?(path: string, bytes: number): Promise<string | null>;
   writeText(path: string, text: string): Promise<void>;
   readBytes(path: string): Promise<Uint8Array | null>;
   writeBytes(path: string, bytes: Uint8Array): Promise<void>;

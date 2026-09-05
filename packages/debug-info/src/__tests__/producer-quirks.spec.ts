@@ -143,6 +143,35 @@ describe('4. an unsized extern array is not [1]', () => {
       const: false,
     });
   });
+
+  it('the value formatter agrees: a declaration’s outer dimension is unsized, a definition’s is not', () => {
+    const scopes = agbcc.scopes;
+    const table = scopes.declarationByName('g_ext_table')!;
+    const grid = scopes.declarationByName('g_ext_grid')!;
+    expect(scopes.types.describeDeclared(table)).toMatchObject({
+      kind: 'array',
+      count: null,
+      name: expect.stringMatching(/short int\[\]$/),
+    });
+    expect(scopes.types.describeDeclared(grid)).toMatchObject({
+      kind: 'array',
+      count: null,
+      name: expect.stringMatching(/short int\[\]\[4\]$/),
+    });
+    expect(scopes.types.describeDeclared(scopes.globalByName('g_one_def')!)).toMatchObject({
+      count: 1,
+      name: 'short int[1]',
+    });
+    const pattern = { read: (a: number, n: number) => new Uint8Array(n).map((_, i) => (a + i) & 0xff) };
+    const node = scopes.castNode('g_ext_table', scopes.index.typeOf(table)!, 0x08001000, pattern, table);
+    expect(node.type).toMatch(/short int\[\]$/);
+    expect(node.value.startsWith('[] {')).toBe(true);
+    expect(node.element!(64)!.address).toBe(0x08001000 + 128);
+    // without the declaration the same type reads as the definition it could be
+    expect(scopes.castNode('g_ext_table', scopes.index.typeOf(table)!, 0x08001000, pattern).type).toMatch(
+      /short int\[1\]$/,
+    );
+  });
 });
 
 describe('5. an array RANK is not its element count', () => {

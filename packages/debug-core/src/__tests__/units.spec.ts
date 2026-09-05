@@ -1,27 +1,41 @@
 import { describe, expect, it } from 'vitest';
 
-import { decodeDelta, encodeDelta } from '../delta.js';
+import { applySnapshotDelta, decodeDelta, deltaSnapshot, encodeDelta } from '../delta.js';
 import { type ExprEnv, compileExpression, compileHitCondition, compileLogMessage } from '../expression.js';
 import { ManualHost } from '../host.js';
 import { LabelStore } from '../labels.js';
+import { LOG, TILES, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
 import { recordingToScript, toSegments } from '../recorder.js';
 import { Ring } from '../rings.js';
-import { base64ToBytes, bytesToBase64 } from '../snapshot-codec.js';
+import { base64ToBytes, bytesToBase64, encodeSaveState } from '../snapshot-codec.js';
 import { SourceMapper } from '../source-map.js';
 
 const env: ExprEnv = {
   reg: (i) => (i === 0 ? 10 : i === 13 ? 0x03007f00 : 0),
   cpsr: () => 0x1f,
-  read: (a, size) => (a === 0x03000000 ? (size === 1 ? 0x12 : size === 2 ? 0x3412 : 0x78563412) : undefined),
-  symbol: (path) => (path === 'gHp' ? 3 : path === 'gState.hp' ? 9 : undefined),
+  read: (a, size) =>
+    a === 0x03000000
+      ? size === 1
+        ? 0x12
+        : size === 2
+          ? 0x3412
+          : 0x78563412
+      : a === 0x03000100
+        ? size === 1
+          ? 0xf0
+          : 0xfff0
+        : undefined,
+  // gSigned is an `int` holding -7, delivered as its 32-bit word
+  symbol: (path) => (path === 'gHp' ? 3 : path === 'gState.hp' ? 9 : path === 'gSigned' ? 0xfffffff9 : undefined),
   symbolAddress: (name) => (name === 'gHp' ? 0x03000000 : undefined),
   frame: () => 42,
   scanline: () => 7,
   cycle: () => 1000,
 };
+const hints = { symbolSigned: (path: string) => (path === 'gSigned' ? true : undefined) };
 
 describe('expression grammar', () => {
-  const ev = (s: string): number => compileExpression(s)(env);
+  const ev = (s: string): number => compileExpression(s, hints)(env);
 
   it('numbers, registers, machine values', () => {
     expect(ev('0x10 + 6')).toBe(22);
@@ -37,7 +51,30 @@ describe('expression grammar', () => {
     expect(ev('{0x03000000}')).toBe(0x3412);
     expect(ev('u32(0x03000000)')).toBe(0x78563412);
     expect(ev('s8(0x03000000)')).toBe(0x12);
+    expect(ev('s8(0x03000100)')).toBe(-16);
+    expect(ev('s16(0x03000100)')).toBe(-16);
+    expect(ev('u8(0x03000100)')).toBe(0xf0);
     expect(() => ev('[0x09000000]')).toThrow(/unreadable/);
+  });
+
+  it('signedness follows C: signed operands compare and divide as signed, mixed ones as unsigned', () => {
+    expect(ev('-1')).toBe(-1);
+    expect(ev('-1 < 0')).toBe(1);
+    expect(ev('-1 == 0xffffffff')).toBe(1);
+    expect(ev('-1 > 0')).toBe(0);
+    expect(ev('s8(0x03000100) < 0')).toBe(1);
+    expect(ev('u8(0x03000100) < 0')).toBe(0);
+    expect(ev('-7 / 2')).toBe(-3);
+    expect(ev('-7 % 2')).toBe(-1);
+    expect(ev('0xffffffff / 2')).toBe(0x7fffffff);
+    expect(ev('gSigned')).toBe(-7);
+    expect(ev('gSigned < 0')).toBe(1);
+    expect(ev('gSigned - 10 < 0')).toBe(1);
+    expect(ev('gHp - 10 < 0')).toBe(0); // unsigned symbol: wraps like a u32
+    expect(ev('gSigned == -7')).toBe(1);
+    expect(ev('-8 >> 1')).toBe(0x7ffffffc); // shifts are on the word
+    expect(ev('gSigned & 0xff')).toBe(0xf9);
+    expect(ev('gHp > 2 ? -1 : -2')).toBe(-1);
   });
 
   it('symbols and paths, address-of', () => {
@@ -50,10 +87,16 @@ describe('expression grammar', () => {
   it('precedence, unary, ternary, shifts and comparisons wrap to u32', () => {
     expect(ev('1 + 2 * 3')).toBe(7);
     expect(ev('(1 + 2) * 3')).toBe(9);
-    expect(ev('-1')).toBe(0xffffffff);
-    expect(ev('~0')).toBe(0xffffffff);
+    expect(ev('~0')).toBe(0xffffffff); // bitwise operators work on the word
     expect(ev('!0')).toBe(1);
     expect(ev('1 << 31 >> 31')).toBe(1);
+    expect(ev('1 << 31')).toBe(0x80000000);
+    // a count of 32 or more shifts everything out, as the hardware does
+    expect(ev('1 << 32')).toBe(0);
+    expect(ev('1 << 40')).toBe(0);
+    expect(ev('0x80000000 >> 32')).toBe(0);
+    expect(ev('0x80000000 >> 100')).toBe(0);
+    expect(ev('1 << (0x10 - 0x20)')).toBe(0);
     expect(ev('gHp > 2 ? 100 : 200')).toBe(100);
     expect(ev('5 % 3')).toBe(2);
     expect(ev('7 / 0')).toBe(0);
@@ -65,15 +108,44 @@ describe('expression grammar', () => {
     expect(() => compileExpression('1 $ 2')).toThrow(/unexpected/);
   });
 
+  it('says what it does not support instead of "unexpected token"', () => {
+    expect(() => compileExpression('gEntityInfo[var_sb].id == 5')).toThrow(/constant subscripts/);
+    expect(() => compileExpression('g_samples[g_frame & 3]')).toThrow(/constant subscripts/);
+    expect(() => compileExpression('p->x')).toThrow(/constant subscripts/);
+    expect(() => compileExpression('*p')).toThrow(/dereference is not supported/);
+    expect(() => compileExpression('g_player . pos')).toThrow(/constant subscripts/);
+    expect(compileExpression('gEntityInfo[3].id == 5')).toBeTypeOf('function');
+  });
+
+  it('bounds literals, length and nesting instead of wrapping or overflowing', () => {
+    expect(() => compileExpression('4294967296')).toThrow(/32 bits/);
+    expect(() => compileExpression('0x100000000')).toThrow(/32 bits/);
+    expect(ev('0xffffffff')).toBe(0xffffffff);
+    expect(() => compileExpression('('.repeat(600) + '1' + ')'.repeat(600))).toThrow(/nested too deeply/);
+    expect(() => compileExpression('x'.repeat(10000))).toThrow(/too long/);
+  });
+
   it('hit conditions and log messages', () => {
     expect(compileHitCondition('3')(3)).toBe(true);
     expect(compileHitCondition('3')(2)).toBe(false);
     expect(compileHitCondition('== 2')(3)).toBe(false);
     expect(compileHitCondition('% 4')(8)).toBe(true);
     expect(() => compileHitCondition('abc')).toThrow();
+    // hits count from 1, so these could never fire
+    expect(() => compileHitCondition('% 0')).toThrow(/never be satisfied/);
+    expect(() => compileHitCondition('== 0')).toThrow(/never be satisfied/);
+    expect(() => compileHitCondition('< 0')).toThrow(/never be satisfied/);
+    expect(() => compileHitCondition('<= 0')).toThrow(/never be satisfied/);
+    expect(compileHitCondition('0')(1)).toBe(true);
+    expect(compileHitCondition('>= 0')(1)).toBe(true);
+    expect(compileHitCondition('> 0')(1)).toBe(true);
     expect(compileLogMessage('hp={gHp} at {frame} {bad +}')(env)).toBe(
       'hp=3 (0x3) at 42 (0x2a) {bad +: unexpected end of expression}',
     );
+    // braces nest: the u16 read of the grammar works inside an interpolation
+    expect(compileLogMessage('v={{0x03000000}} n={[0x03000000]}')(env)).toBe('v=13330 (0x3412) n=18 (0x12)');
+    expect(compileLogMessage('open {gHp')(env)).toBe('open {gHp');
+    expect(compileLogMessage('signed {gSigned}', hints)(env)).toBe('signed -7 (0xfffffff9)');
   });
 });
 
@@ -88,8 +160,59 @@ describe('deltas', () => {
     expect(delta.length).toBeLessThan(64);
     expect(decodeDelta(base, delta)).toEqual(next);
     expect(decodeDelta(base, encodeDelta(base, base))).toEqual(base);
-    const random = base.map(() => Math.floor(Math.random() * 256));
+    // a seeded generator: a failure here reproduces
+    let seed = 0x12345678;
+    const random = base.map(() => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed >>> 24;
+    });
     expect(decodeDelta(base, encodeDelta(base, random))).toEqual(random);
+  });
+
+  it('absorbs a short run of equal bytes into a literal, and starts a new chunk at a long one', () => {
+    const base = new Uint8Array(64);
+    const near = base.slice();
+    near[0] = 1;
+    near[8] = 1; // 7 equal bytes between two changes: one literal chunk of 9
+    const headers = (d: Uint8Array): number[] => {
+      const v = new DataView(d.buffer, d.byteOffset, d.byteLength);
+      const out: number[] = [];
+      for (let o = 0; o + 8 <= d.length; o += 8 + v.getUint32(o + 4, true)) {
+        out.push(v.getUint32(o, true), v.getUint32(o + 4, true));
+      }
+      return out;
+    };
+    expect(headers(encodeDelta(base, near))).toEqual([0, 9, 55, 0]);
+    const far = base.slice();
+    far[0] = 1;
+    far[9] = 1; // 8 equal bytes: a zero run of its own
+    expect(headers(encodeDelta(base, far))).toEqual([0, 1, 8, 1, 54, 0]);
+    for (const next of [near, far]) {
+      expect(decodeDelta(base, encodeDelta(base, next))).toEqual(next);
+    }
+  });
+
+  it('round-trips every typed-array kind of a snapshot and refuses an unlisted one', () => {
+    const shape = (r: number, ram: number, buf: number) => ({
+      cpu: { r: new Uint32Array([1, r]) },
+      ram: new Uint8Array([3, ram]),
+      apu: { buf: new Int8Array([buf]) },
+      ppu: { framebuffer: new Uint32Array(1) },
+    });
+    const like = shape(2, 4, -1);
+    const next = shape(5, 9, -2);
+    const restored = applySnapshotDelta(
+      like as never,
+      deltaSnapshot(like as never, next as never),
+    ) as unknown as typeof next;
+    expect(restored.cpu.r).toBeInstanceOf(Uint32Array);
+    expect(Array.from(restored.cpu.r)).toEqual([1, 5]);
+    expect(Array.from(restored.ram)).toEqual([3, 9]);
+    expect(restored.apu.buf).toBeInstanceOf(Int8Array);
+    expect(Array.from(restored.apu.buf)).toEqual([-2]);
+    const odd = { x: new Uint16Array([3, 4]) };
+    expect(() => deltaSnapshot(odd as never, odd as never)).toThrow(/unsupported typed array Uint16Array/);
+    expect(() => encodeSaveState(odd as never, { romHash: 'h', frame: 0 })).toThrow(/unsupported typed array/);
   });
 });
 
@@ -191,6 +314,34 @@ describe('manual host', () => {
     expect(fired).toEqual(['a', 'a', 'b', 'a']);
     stopA();
     host.tick(30);
-    expect(fired.filter((f) => f === 'a').length).toBe(3);
+    expect(fired).toEqual(['a', 'a', 'b', 'a', 'b']); // b keeps firing after a is stopped
+  });
+});
+
+describe('protocol argument semantics', () => {
+  it('an entry count falls back when unsaid, means none when 0, and never exceeds the cap', () => {
+    expect(entryCount(undefined, LOG.traceDefault)).toBe(LOG.traceDefault);
+    expect(entryCount(null, 7)).toBe(7);
+    expect(entryCount('nope', 7)).toBe(7);
+    expect(entryCount(0, 7)).toBe(0);
+    expect(entryCount(-3, 7)).toBe(0);
+    expect(entryCount(2.9, 7)).toBe(2);
+    expect(entryCount(1e9, 7)).toBe(LOG.max);
+    expect(entryCount(50, 7, 10)).toBe(10);
+  });
+
+  it('a rewind is at least one whole frame', () => {
+    expect(rewindFrameCount(0)).toBe(1);
+    expect(rewindFrameCount(-5)).toBe(1);
+    expect(rewindFrameCount(undefined)).toBe(1);
+    expect(rewindFrameCount(2.7)).toBe(2);
+    expect(rewindFrameCount(60)).toBe(60);
+  });
+
+  it('a tile count defaults, and stays within the reach of a character base', () => {
+    expect(tileCount(undefined)).toBe(TILES.defaultCount);
+    expect(tileCount(0)).toBe(TILES.defaultCount);
+    expect(tileCount(4)).toBe(4);
+    expect(tileCount(99_999)).toBe(TILES.maxCount);
   });
 });

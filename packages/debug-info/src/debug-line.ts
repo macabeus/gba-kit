@@ -1,15 +1,28 @@
 /**
- * DWARF `.debug_line` line-number program parser (DWARF 2/3/4).
+ * DWARF `.debug_line` line-number program parser (DWARF 2–5).
  *
  * Produces a flat, address-sorted table of rows so a runtime PC can be mapped to
  * a source `file:line`. Handles the traditional line-program header (DWARF 2/3/4)
- * emitted by both old (GCC 2.95) and modern (GCC 14 / devkitARM) toolchains.
+ * emitted by both old (GCC 2.95) and modern (GCC 14 / devkitARM) toolchains, and
+ * the DWARF 5 header (directory and file tables described by entry formats, names
+ * in `.debug_line_str`) that a modern assembler emits for a `.s` file even when
+ * the C units next to it are version 3.
  *
  * The section is a concatenation of independent units, so parsing is per-unit and
- * never all-or-nothing: a unit we can't model (DWARF 5, 64-bit DWARF) is skipped
- * by its own `unit_length` and the remaining units still yield rows.
+ * never all-or-nothing: a unit we can't model (a later version, 64-bit DWARF, an
+ * entry format we do not know) is skipped by its own `unit_length` and the
+ * remaining units still yield rows.
  */
+import { DW_FORM } from './dwarf/constants.js';
 import { Cursor } from './reader.js';
+
+/** The string sections a DWARF 5 line header refers to. */
+export interface LineStringSections {
+  /** `.debug_line_str` */
+  lineStr?: Uint8Array;
+  /** `.debug_str` */
+  str?: Uint8Array;
+}
 
 export interface LineRow {
   /** Absolute address (VMA) of the first byte this row covers. */
@@ -43,6 +56,9 @@ const DW_LNS_fixed_advance_pc = 9;
 const DW_LNE_end_sequence = 1;
 const DW_LNE_set_address = 2;
 const DW_LNE_define_file = 3;
+// DWARF 5 entry-format content types
+const DW_LNCT_path = 1;
+const DW_LNCT_directory_index = 2;
 
 /** The lowest reserved value of an initial-length field (0xfffffff0–0xffffffff). */
 const RESERVED_LENGTH = 0xfffffff0;
@@ -50,13 +66,13 @@ const RESERVED_LENGTH = 0xfffffff0;
 const DWARF64_ESCAPE = 0xffffffff;
 
 /** Parse all compilation units in a `.debug_line` section into a sorted table. */
-export function parseDebugLine(section: Uint8Array, littleEndian = true): LineTable {
+export function parseDebugLine(section: Uint8Array, littleEndian = true, strings: LineStringSections = {}): LineTable {
   const rows: LineRow[] = [];
   const c = new Cursor(section, 0, littleEndian);
 
   while (c.remaining >= 4) {
     const unitStart = c.offset;
-    const next = parseUnit(c, rows);
+    const next = parseUnit(c, rows, strings);
     if (next === null || next <= unitStart) {
       // Either the unit told us nothing can be trusted after it, or it made no
       // forward progress. Keep the rows collected so far and stop walking.
@@ -79,7 +95,7 @@ export function parseDebugLine(section: Uint8Array, littleEndian = true): LineTa
  * past this point can be walked (truncated/reserved/64-bit-too-large unit) — the
  * caller keeps every row parsed so far.
  */
-function parseUnit(c: Cursor, rows: LineRow[]): number | null {
+function parseUnit(c: Cursor, rows: LineRow[], strings: LineStringSections): number | null {
   const sectionEnd = c.bytes.length;
   const unitStart = c.offset;
   const unitLength = c.u32();
@@ -111,12 +127,17 @@ function parseUnit(c: Cursor, rows: LineRow[]): number | null {
     return skipUnit(); // No room for version + header_length.
   }
   const version = c.u16();
-  if (version < 2 || version > 4) {
-    // DWARF 5 rewrote this header (address_size/segment_selector_size, and
-    // directory/file tables described by entry formats instead of NUL-terminated
-    // lists), so its bytes cannot be read as a v2–v4 header. Skip the unit rather
-    // than mis-decode it; the other units in the section still parse.
+  if (version < 2 || version > 5) {
+    // A header this parser does not model: skip the unit rather than mis-decode
+    // it; the other units in the section still parse.
     return skipUnit();
+  }
+  if (version >= 5) {
+    if (limit - c.offset < 6) {
+      return skipUnit();
+    }
+    c.u8(); // address_size (the set_address operand is sized by its statement)
+    c.u8(); // segment_selector_size
   }
 
   // The line program starts header_length bytes after the header_length field —
@@ -145,40 +166,11 @@ function parseUnit(c: Cursor, rows: LineRow[]): number | null {
     standardOpcodeLengths.push(c.u8());
   }
 
-  // include_directories: NUL-terminated strings, ended by an empty string.
-  const dirs: string[] = ['']; // index 0 = compilation directory (implicit)
-  while (c.offset < programStart) {
-    const dir = c.cstr();
-    if (dir === '') {
-      break;
-    }
-    dirs.push(dir);
+  const tables = version >= 5 ? readV5Tables(c, programStart, strings) : readLegacyTables(c, programStart);
+  if (!tables) {
+    return skipUnit(); // an entry format we cannot read: the file table is unknowable
   }
-
-  // file_names: { name, dir_index(uleb), mtime(uleb), size(uleb) }, ended by empty name.
-  const files: { name: string; dir: number }[] = [{ name: '', dir: 0 }]; // 1-based; [0] unused
-  while (c.offset < programStart) {
-    const name = c.cstr();
-    if (name === '') {
-      break;
-    }
-    const dir = readUleb(c, programStart);
-    readUleb(c, programStart); // mtime
-    readUleb(c, programStart); // size
-    files.push({ name, dir });
-  }
-
-  const resolveFile = (idx: number): string => {
-    const f = files[idx];
-    if (!f) {
-      return `<file ${idx}>`;
-    }
-    if (f.name.startsWith('/') || f.dir === 0) {
-      return f.name;
-    }
-    const dir = dirs[f.dir];
-    return dir ? `${dir}/${f.name}` : f.name;
-  };
+  const { resolveFile } = tables;
 
   // Run the program.
   c.seek(programStart);
@@ -326,6 +318,137 @@ function parseUnit(c: Cursor, rows: LineRow[]): number | null {
   return truncated || end > sectionEnd ? null : end;
 }
 
+interface FileTables {
+  /** The path of file entry `idx`, as the unit numbers its files. */
+  resolveFile(idx: number): string;
+}
+
+/** DWARF 2–4: NUL-terminated directory and file lists, both 1-based (entry 0 is the compilation directory). */
+function readLegacyTables(c: Cursor, programStart: number): FileTables {
+  const dirs: string[] = ['']; // index 0 = compilation directory (implicit)
+  while (c.offset < programStart) {
+    const dir = c.cstr();
+    if (dir === '') {
+      break;
+    }
+    dirs.push(dir);
+  }
+
+  // file_names: { name, dir_index(uleb), mtime(uleb), size(uleb) }, ended by empty name.
+  const files: { name: string; dir: number }[] = [{ name: '', dir: 0 }]; // 1-based; [0] unused
+  while (c.offset < programStart) {
+    const name = c.cstr();
+    if (name === '') {
+      break;
+    }
+    const dir = readUleb(c, programStart);
+    readUleb(c, programStart); // mtime
+    readUleb(c, programStart); // size
+    files.push({ name, dir });
+  }
+
+  return {
+    resolveFile: (idx) => {
+      const f = files[idx];
+      if (!f) {
+        return `<file ${idx}>`;
+      }
+      if (f.name.startsWith('/') || f.dir === 0) {
+        return f.name;
+      }
+      const dir = dirs[f.dir];
+      return dir ? `${dir}/${f.name}` : f.name;
+    },
+  };
+}
+
+/**
+ * DWARF 5: each table is described by an entry format (content type, form) and
+ * is 0-based; directory 0 is the compilation directory. Null when an entry uses
+ * a form this reader cannot size, since nothing after it could be placed.
+ */
+function readV5Tables(c: Cursor, programStart: number, strings: LineStringSections): FileTables | null {
+  const readTable = (): Array<{ path: string; dir: number }> | null => {
+    const formatCount = c.u8();
+    const formats: Array<{ content: number; form: number }> = [];
+    for (let i = 0; i < formatCount; i++) {
+      formats.push({ content: readUleb(c, programStart), form: readUleb(c, programStart) });
+    }
+    const count = readUleb(c, programStart);
+    const out: Array<{ path: string; dir: number }> = [];
+    for (let i = 0; i < count && c.offset < programStart; i++) {
+      const entry = { path: '', dir: 0 };
+      for (const { content, form } of formats) {
+        const v = readForm(c, form, programStart, strings);
+        if (v === null) {
+          return null;
+        }
+        if (content === DW_LNCT_path && typeof v === 'string') {
+          entry.path = v;
+        } else if (content === DW_LNCT_directory_index && typeof v === 'number') {
+          entry.dir = v;
+        }
+      }
+      out.push(entry);
+    }
+    return out;
+  };
+  const dirs = readTable();
+  const files = dirs && readTable();
+  if (!dirs || !files) {
+    return null;
+  }
+  return {
+    resolveFile: (idx) => {
+      const f = files[idx];
+      if (!f) {
+        return `<file ${idx}>`;
+      }
+      const dir = dirs[f.dir]?.path ?? '';
+      return f.path.startsWith('/') || dir === '' || dir === '.' ? f.path : `${dir}/${f.path}`;
+    },
+  };
+}
+
+/** One attribute of a DWARF 5 line-table entry, or null for a form this reader cannot size. */
+function readForm(c: Cursor, form: number, limit: number, strings: LineStringSections): string | number | null {
+  switch (form) {
+    case DW_FORM.string:
+      return c.cstr();
+    case DW_FORM.line_strp:
+      return stringAt(strings.lineStr, c.u32());
+    case DW_FORM.strp:
+      return stringAt(strings.str, c.u32());
+    case DW_FORM.udata:
+      return readUleb(c, limit);
+    case DW_FORM.data1:
+      return c.u8();
+    case DW_FORM.data2:
+      return c.u16();
+    case DW_FORM.data4:
+      return c.u32();
+    case DW_FORM.data8:
+      c.skip(8);
+      return 0;
+    case DW_FORM.data16:
+      c.skip(16); // an MD5
+      return 0;
+    case DW_FORM.block:
+      c.skip(readUleb(c, limit));
+      return 0;
+    default:
+      return null;
+  }
+}
+
+/** The NUL-terminated string at `offset` of a string section (a placeholder when the section is absent). */
+function stringAt(section: Uint8Array | undefined, offset: number): string {
+  if (!section || offset >= section.length) {
+    return `<str ${offset}>`;
+  }
+  return new Cursor(section, offset).cstr();
+}
+
 /**
  * ULEB128 bounded by `limit`: a varint whose continuation bits run past the end
  * of the readable region stops there instead of reading out of bounds.
@@ -396,6 +519,11 @@ export class LineTable {
    */
   sourceToPcs(file: string, line: number): number[] {
     return this.#index().get(normalizePath(file))?.get(line) ?? [];
+  }
+
+  /** Every line of `file` that has code, ascending; what `sourceToPcs` answers non-empty for. */
+  linesWithCode(file: string): number[] {
+    return [...(this.#index().get(normalizePath(file))?.keys() ?? [])].sort((a, b) => a - b);
   }
 
   /**

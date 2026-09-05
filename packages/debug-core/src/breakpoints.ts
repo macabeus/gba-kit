@@ -8,6 +8,7 @@ import type { HardwareEvent } from '@gba-kit/gba-emulator';
 import {
   type CompiledExpr,
   type ExprEnv,
+  type ExprHints,
   compileExpression,
   compileHitCondition,
   compileLogMessage,
@@ -58,6 +59,10 @@ export interface DataBreakpointSpec {
 
 export interface DataBreakpoint extends DataBreakpointSpec {
   id: number;
+  /** false when the condition or hit condition did not compile: nothing is watched */
+  verified: boolean;
+  /** why it is unverified, for the UI */
+  message?: string;
   compiledCondition?: CompiledExpr;
   compiledHit?: (hits: number) => boolean;
   hits: number;
@@ -86,6 +91,11 @@ export interface ResolvedAddresses {
 /** Resolves a breakpoint spec to instruction addresses; provided by the session (needs the program). */
 export type BreakpointResolver = (spec: BreakpointSpec) => ResolvedAddresses;
 
+/** What the expression compiler may assume about names at the breakpoint's addresses; provided by the session. */
+export type HintProvider = (addresses: number[]) => ExprHints;
+
+const NO_HINTS: HintProvider = () => ({});
+
 export class BreakpointStore {
   #nextId = 1;
   /** by owner: a source file path, 'instruction', or 'function' */
@@ -94,8 +104,12 @@ export class BreakpointStore {
   #data: DataBreakpoint[] = [];
   #events = new Set<EventBreakpointKind>();
 
-  /** Replace every breakpoint of `owner` (a file path, 'instruction' or 'function'). */
-  replace(owner: string, specs: BreakpointSpec[], resolve: BreakpointResolver): Breakpoint[] {
+  /**
+   * Replace every breakpoint of `owner` (a file path, 'instruction' or 'function').
+   * The condition and log message are compiled where the breakpoint lands, so a
+   * local's signedness is known to them.
+   */
+  replace(owner: string, specs: BreakpointSpec[], resolve: BreakpointResolver, hints = NO_HINTS): Breakpoint[] {
     const list = specs.map((spec): Breakpoint => {
       const id = this.#nextId++;
       const bp: Breakpoint = {
@@ -107,22 +121,23 @@ export class BreakpointStore {
         path: spec.path,
         line: spec.line,
       };
+      const resolved = resolve(spec);
       try {
+        const h = hints(resolved.addresses);
         if (spec.condition?.trim()) {
-          bp.condition = compileExpression(spec.condition);
+          bp.condition = compileExpression(spec.condition, h);
           bp.conditionText = spec.condition;
         }
         if (spec.hitCondition?.trim()) {
           bp.hitCondition = compileHitCondition(spec.hitCondition);
         }
         if (spec.logMessage?.trim()) {
-          bp.logMessage = compileLogMessage(spec.logMessage);
+          bp.logMessage = compileLogMessage(spec.logMessage, h);
         }
       } catch (err) {
         bp.message = (err as Error).message;
         return bp;
       }
-      const resolved = resolve(spec);
       bp.addresses = resolved.addresses;
       bp.verified = resolved.addresses.length > 0;
       if (resolved.line !== undefined) {
@@ -138,7 +153,7 @@ export class BreakpointStore {
     return list;
   }
 
-  /** Breakpoints at an address (empty when none). */
+  /** Breakpoints at an address, or undefined when none. */
   at(address: number): Breakpoint[] | undefined {
     return this.#byAddress.get(address);
   }
@@ -150,6 +165,16 @@ export class BreakpointStore {
   /** Every breakpoint of every group. */
   all(): Breakpoint[] {
     return [...this.#groups.values()].flat();
+  }
+
+  /** Start every hit counter over (a fresh run). */
+  resetHits(): void {
+    for (const bp of this.all()) {
+      bp.hits = 0;
+    }
+    for (const bp of this.#data) {
+      bp.hits = 0;
+    }
   }
 
   #rebuild(): void {
@@ -170,18 +195,36 @@ export class BreakpointStore {
 
   // ─── data breakpoints ───────────────────────────────────────────────
 
-  replaceData(specs: DataBreakpointSpec[]): DataBreakpoint[] {
+  /** Replace the data breakpoints. One that does not compile is kept, unverified, with its message. */
+  replaceData(specs: DataBreakpointSpec[], hints: ExprHints = {}): DataBreakpoint[] {
     this.#data = specs.map((spec) => {
-      const bp: DataBreakpoint = { ...spec, id: this.#nextId++, hits: 0 };
-      if (spec.condition?.trim()) {
-        bp.compiledCondition = compileExpression(spec.condition);
-      }
-      if (spec.hitCondition?.trim()) {
-        bp.compiledHit = compileHitCondition(spec.hitCondition);
+      const bp: DataBreakpoint = { ...spec, id: this.#nextId++, verified: false, hits: 0 };
+      try {
+        if (spec.condition?.trim()) {
+          bp.compiledCondition = compileExpression(spec.condition, hints);
+        }
+        if (spec.hitCondition?.trim()) {
+          bp.compiledHit = compileHitCondition(spec.hitCondition);
+        }
+        bp.verified = true;
+      } catch (err) {
+        bp.message = (err as Error).message;
       }
       return bp;
     });
     return this.#data;
+  }
+
+  /** The specs the data breakpoints were set from (to install their watchpoints again). */
+  get dataSpecs(): DataBreakpointSpec[] {
+    return this.#data.map(({ address, length, name, access, condition, hitCondition }) => ({
+      address,
+      length,
+      name,
+      access,
+      condition,
+      hitCondition,
+    }));
   }
 
   get data(): readonly DataBreakpoint[] {

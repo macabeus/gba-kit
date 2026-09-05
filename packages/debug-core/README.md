@@ -34,7 +34,8 @@ What a session does:
   are writable.
 - **Evaluates a Mesen-style expression grammar** for conditions, logpoints and
   watches: C operators, `[addr]` / `{addr}` / `u32(addr)` reads, registers,
-  `frame` / `scanline` / `cycle`, symbols and `a.b[3].c` paths, `&symbol`,
+  `frame` / `scanline` / `cycle`, symbols and `a.b[3].c` paths (locals of the
+  frame included, signed as their C type), enumerators, `&symbol`,
   labels.
 - **Rewinds exactly.** Keyframes (XOR + run-length deltas, a full snapshot every
   N) plus a per-frame input log put the machine back at any earlier position by

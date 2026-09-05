@@ -15,6 +15,20 @@ import type { Program } from './program.js';
 
 export type StepPredicate = (pc: number) => boolean;
 
+/** ARM7TDMI modes that are not an exception being handled: user and system. */
+const MODE_USR = 0x10;
+const MODE_SYS = 0x1f;
+
+/** Whether the CPU is inside an exception handler (IRQ, FIQ, SVC, abort, undefined). */
+export function isExceptionMode(mode: number): boolean {
+  return mode !== MODE_USR && mode !== MODE_SYS;
+}
+
+/** Whether a mode change from `from` to `to` is the handler `from` was in returning to what it interrupted. */
+function returnedFromException(from: number, to: number): boolean {
+  return isExceptionMode(from) && !isExceptionMode(to);
+}
+
 export interface StepContext {
   machine: Machine;
   program: Program;
@@ -73,9 +87,13 @@ export function stepInstruction(): StepOutcome {
 /**
  * Step into: the start of a different source line, entering calls. Code without
  * line info (asm glue, the BIOS stub) is run through until a C line is reached.
+ * An interrupt that preempts the step is not a call: its handler's lines are
+ * skipped (a breakpoint there still stops).
  */
 export function stepInto(ctx: StepContext): StepOutcome {
   const { program, machine } = ctx;
+  const cpu = machine.gba.armCpu;
+  const startMode = cpu.getMode();
   const start = ctx.visibleLine ?? program.lineAt(machine.pc);
   if (!start) {
     return stepInstruction();
@@ -84,7 +102,10 @@ export function stepInto(ctx: StepContext): StepOutcome {
   return {
     predicate: (pc) => {
       const row = program.rowAt(pc);
-      return !!row && row.isStmt && (row.file !== startFile || row.line !== start.line);
+      if (!row || !row.isStmt || cpu.getMode() !== startMode) {
+        return false; // no statement here, or an interrupt handler
+      }
+      return row.file !== startFile || row.line !== start.line;
     },
     hidden: () => 0,
   };
@@ -133,21 +154,31 @@ function stepOverStatements(ctx: StepContext, hiddenLayers: number): StepOutcome
   if (!startLine) {
     // No line info here: one instruction, but a call as a unit.
     return {
-      predicate: (a) =>
-        cpu.getMode() === startMode &&
-        cpu.registers[13]! >= startSp &&
-        (!fnRange || inFn(a) || cpu.registers[13]! > startSp),
+      predicate: (a) => {
+        const mode = cpu.getMode();
+        if (mode !== startMode) {
+          return returnedFromException(startMode, mode); // the handler returned: the interrupted code; else a nested handler
+        }
+        return cpu.registers[13]! >= startSp && (!fnRange || inFn(a) || cpu.registers[13]! > startSp);
+      },
       hidden: () => 0,
     };
   }
-  let hideOnStop = 0;
+  let hideOnStop: number | null = 0;
   const predicate: StepPredicate = (a) => {
     const row = program.rowAt(a);
     if (!row || !row.isStmt) {
       return false; // only statement rows can be stops; everything else is cheap to skip
     }
-    if (cpu.getMode() !== startMode) {
-      return false; // interrupt handler
+    const mode = cpu.getMode();
+    if (mode !== startMode) {
+      if (returnedFromException(startMode, mode)) {
+        // The handler we were stepping in returned: its "next statement" is the
+        // interrupted code's, whatever inlined layers begin there.
+        hideOnStop = null;
+        return true;
+      }
+      return false; // an interrupt handler preempted the step
     }
     const sp = cpu.registers[13]!;
     // Frame identity: CFA when CFI knows it (exact, recursion-safe), else SP outside the function.
@@ -206,6 +237,21 @@ export function stepOutTo(ctx: StepContext, returnAddress: number, callerSp: num
   const startSp = cpu.registers[13]!;
   return {
     predicate: (a) => a === target && cpu.getMode() === startMode && cpu.registers[13]! >= (callerSp ?? startSp),
+    hidden: () => null,
+  };
+}
+
+/**
+ * Step out of an exception handler: run until the CPU is back in the mode the
+ * exception interrupted (the SPSR's), i.e. the first instruction of the
+ * interrupted code after the handler's return. The BIOS stub in between has no
+ * symbol, so a return address would not do.
+ */
+export function stepOutOfException(ctx: StepContext): StepOutcome {
+  const cpu = ctx.machine.gba.armCpu;
+  const interrupted = cpu.getSPSR() & 0x1f;
+  return {
+    predicate: () => cpu.getMode() === interrupted,
     hidden: () => null,
   };
 }

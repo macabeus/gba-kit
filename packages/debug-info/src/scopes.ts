@@ -13,13 +13,17 @@ import { type DwarfSections, EntryIndex, type UnitInfo, attrAddress, attrFlag, a
 import { type EvalContext, type Location, evaluate } from './dwarf/expr.js';
 import { FrameTable } from './dwarf/frame.js';
 import { type Range, describeExpr, entryRanges, locationAt, rangesContain } from './dwarf/lists.js';
-import { type TypeDesc, TypeResolver, type ValueReader, type VarNode, formatValue } from './dwarf/values.js';
+import { type TypeDesc, TypeResolver, type ValueReader, type VarNode, formatValue, toInt } from './dwarf/values.js';
 import type { ElfFile } from './elf.js';
 import type { DwarfEntry } from './types.js';
 
-export interface Memory {
-  /** `size` bytes at `address`, or null when any byte is unreadable. */
-  read(address: number, size: number): Uint8Array | null;
+/** What the machine answers with: `size` bytes at `address`, or null when any byte is unreadable. */
+export type Memory = ValueReader;
+
+/** An enumerator constant, with the enumeration type that declares it. */
+export interface Enumerator {
+  value: number;
+  type: DwarfEntry;
 }
 
 /** A real frame on the machine's stack. */
@@ -60,6 +64,8 @@ export class DwarfScopes {
   #declarationsByName: Map<string, DwarfEntry> | null = null;
   #typesByName: Map<string, DwarfEntry> | null = null;
   #callSites: Map<string, number[]> | null = null;
+  #enumerators: Map<string, Enumerator> | null = null;
+  #inlineEntries: Map<string, number[]> | null = null;
 
   constructor(roots: DwarfEntry[], elf: ElfFile, lineRows: readonly LineRow[]) {
     this.index = new EntryIndex(roots);
@@ -271,6 +277,68 @@ export class DwarfScopes {
     );
   }
 
+  /**
+   * An enumerator by its C name (`MODE_PLAY`), from any enum of any unit, nested
+   * ones included; the first definition wins. The value is in the enum's storage
+   * domain, so a negative enumerator reads as negative whichever form encoded it.
+   */
+  enumeratorByName(name: string): Enumerator | null {
+    if (!this.#enumerators) {
+      const found = new Map<string, Enumerator>();
+      const visit = (entry: DwarfEntry): void => {
+        if (entry.tag === DW_TAG.enumeration_type) {
+          const desc = this.types.describe(entry);
+          for (const [value, n] of desc.enumerators ?? []) {
+            if (!found.has(n)) {
+              found.set(n, { value, type: entry });
+            }
+          }
+        }
+        for (const ch of entry.children) {
+          visit(ch);
+        }
+      };
+      for (const u of this.units) {
+        visit(u.root);
+      }
+      this.#enumerators = found;
+    }
+    return this.#enumerators.get(name) ?? null;
+  }
+
+  /**
+   * Every address where a call to `name` is entered inlined. An optimizer folds a
+   * small function into its callers and emits no symbol for it; these entries are
+   * where a breakpoint on its name goes.
+   */
+  inlineEntriesByName(name: string): number[] {
+    if (!this.#inlineEntries) {
+      const entries = new Map<string, number[]>();
+      const visit = (entry: DwarfEntry): void => {
+        if (entry.tag === DW_TAG.inlined_subroutine) {
+          const n = this.index.name(entry);
+          const pc = this.entryPc(entry);
+          if (n && pc !== undefined) {
+            const list = entries.get(n);
+            if (!list) {
+              entries.set(n, [pc]);
+            } else if (!list.includes(pc)) {
+              list.push(pc);
+            }
+          }
+        }
+        for (const ch of entry.children) {
+          visit(ch);
+        }
+      };
+      for (const f of this.#functions) {
+        visit(f.entry);
+      }
+      this.#inlineEntries = entries;
+    }
+    return this.#inlineEntries.get(name) ?? [];
+  }
+
   /** The unit whose code contains `pc`, or null. */
   unitContaining(pc: number): UnitInfo | null {
     const fn = this.functionAt(pc);
@@ -333,6 +401,19 @@ export class DwarfScopes {
     return this.#callSites.get(`${normalizePath(file)}:${line}`) ?? [];
   }
 
+  /** Every line of `file` from which a call was inlined, ascending. */
+  inlineCallSiteLines(file: string): number[] {
+    this.inlineCallSitesAt(file, 0); // builds the call-site map
+    const prefix = `${normalizePath(file)}:`;
+    const lines: number[] = [];
+    for (const key of this.#callSites!.keys()) {
+      if (key.startsWith(prefix)) {
+        lines.push(Number(key.slice(prefix.length)));
+      }
+    }
+    return lines.sort((a, b) => a - b);
+  }
+
   /** Where an inlined call was made from: `DW_AT_call_file` resolved through the unit's line-table files. */
   callSite(inlined: DwarfEntry): { file: string; line: number } | null {
     const fileIndex = attrNum(inlined, DW_AT.call_file);
@@ -367,14 +448,7 @@ export class DwarfScopes {
       reg: (n) => frame.regs[n],
       readMem: (address, size) => {
         const b = memory.read(address, size);
-        if (!b || b.length < size) {
-          return undefined;
-        }
-        let v = 0;
-        for (let i = size - 1; i >= 0; i--) {
-          v = v * 256 + b[i]!;
-        }
-        return v >>> 0;
+        return !b || b.length < size ? undefined : toInt(b, false) >>> 0;
       },
       cfa: () => this.frames.cfa(frame.lookupPc, frame.regs),
       frameBase: () => {
@@ -441,20 +515,24 @@ export class DwarfScopes {
   /** The variable as a tree node: name, formatted value, expandable children. */
   variableNode(variable: DwarfEntry, frame: PhysicalFrame, memory: Memory): VarNode {
     const name = this.index.name(variable) ?? `<anon@${variable.offset.toString(16)}>`;
-    const type = this.types.describe(this.index.typeOf(variable));
+    const type = this.types.describeDeclared(variable);
     const loc = this.location(variable, frame, memory);
-    const node = this.#nodeFor(name, type, loc, frame, { read: (a, s) => memory.read(a, s) });
+    const node = this.#nodeFor(name, type, loc, frame, memory);
     if (variable.tag === DW_TAG.formal_parameter) {
       node.type = `${node.type} (param)`;
     }
     return node;
   }
 
-  /** `name` typed as `typeEntry`, read from `address`: the cast operator. */
-  castNode(name: string, typeEntry: DwarfEntry, address: number, memory: Memory): VarNode {
-    const type = this.types.describe(typeEntry);
+  /**
+   * `name` typed as `typeEntry`, read from `address`: the cast operator, and a
+   * declaration (`extern`) joined to storage the linker placed — pass the
+   * declaration as `declaredBy` so an unsized array stays unsized.
+   */
+  castNode(name: string, typeEntry: DwarfEntry, address: number, memory: Memory, declaredBy?: DwarfEntry): VarNode {
+    const type = declaredBy ? this.types.describeDeclared(declaredBy) : this.types.describe(typeEntry);
     const size = type.size || 4;
-    return formatValue(name, type, memory.read(address, size), address, { read: (a, s) => memory.read(a, s) });
+    return formatValue(name, type, memory.read(address, size), address, memory);
   }
 
   /** A frame standing for "right here, live registers": for evaluating outside the call stack. */

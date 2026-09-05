@@ -11,6 +11,7 @@
  */
 export {
   Session,
+  DEFAULT_FRAME_EVENT_INTERVAL_MS,
   type HistoryInfo,
   type Position,
   type SessionEvents,
@@ -22,16 +23,8 @@ export {
 export { Machine, REGISTER_NAMES, isCodeAddress, regionOf, romHash } from './machine.js';
 export { Program, type FunctionRange, type SourceLocation } from './program.js';
 export { SourceMapper, type SourceMapperOptions } from './source-map.js';
+export { hex8, type DisassembledLine, type EvaluateResult, type Scope, type StackFrame } from './inspector.js';
 export {
-  Inspector,
-  hex8,
-  type DisassembledLine,
-  type EvaluateResult,
-  type Scope,
-  type StackFrame,
-} from './inspector.js';
-export {
-  BreakpointStore,
   EVENT_BREAKPOINT_KINDS,
   type Breakpoint,
   type BreakpointKind,
@@ -41,18 +34,13 @@ export {
   type DataBreakpointSpec,
   type EventBreakpointKind,
 } from './breakpoints.js';
-export {
-  compileExpression,
-  compileHitCondition,
-  compileLogMessage,
-  type CompiledExpr,
-  type ExprEnv,
-} from './expression.js';
-export { RewindHistory, type RewindOptions } from './rewind.js';
-export { applySnapshotDelta, decodeDelta, deltaSnapshot, encodeDelta, type SnapshotDelta } from './delta.js';
-export { Ring, type EventEntry, type TimeStamp, type TraceEntry } from './rings.js';
+export { type CompiledExpr, type ExprEnv, type ExprHints } from './expression.js';
+export { type RewindOptions } from './rewind.js';
+export { type SnapshotDelta } from './delta.js';
+export { type EventEntry, type TimeStamp, type TraceEntry } from './rings.js';
 export { LabelStore, type Label, type LabelsFile } from './labels.js';
 export {
+  BUTTON_COUNT,
   buttonsToNames,
   namesToButtons,
   parseRecording,

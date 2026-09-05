@@ -4,7 +4,7 @@
  * per-unit facts (address size, bases) that list and address forms depend on.
  */
 import type { AttrValue, DwarfEntry } from '../types.js';
-import { DW_AT, DW_FORM, DW_TAG, formClass } from './constants.js';
+import { DW_AT, DW_FORM, formClass } from './constants.js';
 
 /** What a compilation unit's header and root DIE establish for everything inside it. */
 export interface UnitInfo {
@@ -42,11 +42,6 @@ export function attrStr(entry: DwarfEntry, at: number): string | undefined {
 export function attrFlag(entry: DwarfEntry, at: number): boolean {
   const v = entry.attrs.get(at);
   return v === true || v === 1;
-}
-
-export function attrBlock(entry: DwarfEntry, at: number): Uint8Array | undefined {
-  const v = entry.attrs.get(at);
-  return v instanceof Uint8Array ? v : undefined;
 }
 
 /**
@@ -168,12 +163,5 @@ export class EntryIndex {
       e = this.ref(e, DW_AT.abstract_origin) ?? this.ref(e, DW_AT.specification);
     }
     return undefined;
-  }
-
-  /** True for a DIE that is a scope containing code: subprogram, inlined subroutine, lexical block. */
-  static isScope(entry: DwarfEntry): boolean {
-    return (
-      entry.tag === DW_TAG.subprogram || entry.tag === DW_TAG.inlined_subroutine || entry.tag === DW_TAG.lexical_block
-    );
   }
 }

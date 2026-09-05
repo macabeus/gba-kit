@@ -4,8 +4,8 @@
  * write through `poke`, and the run loop is the machine's own (`runFrame` with a
  * stop predicate), never the CPU stepped by hand.
  */
-import type { GbaButton, HardwareEvent, RunOutcome, StopPredicate } from '@gba-kit/gba-emulator';
-import { Gba, SCREEN_HEIGHT, SCREEN_WIDTH } from '@gba-kit/gba-emulator';
+import type { HardwareEvent, RunOutcome, StopPredicate } from '@gba-kit/gba-emulator';
+import { Gba } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
 export const REGISTER_NAMES = [
@@ -74,10 +74,6 @@ export class Machine {
     return this.gba.armCpu.cpsr >>> 0;
   }
 
-  get mode(): number {
-    return this.gba.armCpu.getMode();
-  }
-
   get registers(): Uint32Array {
     return this.gba.armCpu.registers;
   }
@@ -117,11 +113,6 @@ export class Machine {
     return this.gba.bus.peek(address, size);
   }
 
-  peekWord(address: number): number | undefined {
-    const b = this.peek(address, 4);
-    return b ? (b[0]! | (b[1]! << 8) | (b[2]! << 16) | (b[3]! << 24)) >>> 0 : undefined;
-  }
-
   /** Little-endian unsigned integer of `size` bytes, or undefined. */
   peekUnsigned(address: number, size: number): number | undefined {
     const b = this.peek(address, size);
@@ -159,17 +150,6 @@ export class Machine {
     this.gba.deserialize(snapshot);
   }
 
-  setButton(button: number, down: boolean): void {
-    if (button < 0 || button > 9) {
-      return;
-    }
-    if (down) {
-      this.gba.input.press(button as GbaButton);
-    } else {
-      this.gba.input.release(button as GbaButton);
-    }
-  }
-
   setButtons(mask: number): void {
     this.gba.input.setButtons(mask);
   }
@@ -183,8 +163,9 @@ export class Machine {
     this.gba.onHardwareEvent = sink;
   }
 
-  static readonly SCREEN_WIDTH = SCREEN_WIDTH;
-  static readonly SCREEN_HEIGHT = SCREEN_HEIGHT;
+  get onHardwareEvent(): ((event: HardwareEvent) => void) | null {
+    return this.gba.onHardwareEvent;
+  }
 }
 
 /** Which region an address belongs to, or null when nothing decodes it. */

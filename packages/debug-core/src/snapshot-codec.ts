@@ -4,6 +4,8 @@
  */
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
+import { type ArrayKind, arrayFrom, arrayKind, viewBytes } from './typed-arrays.js';
+
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const B64_INDEX = new Int16Array(128).fill(-1);
 for (let i = 0; i < B64.length; i++) {
@@ -49,17 +51,9 @@ type Json = Record<string, unknown>;
 
 /** Deep copy with every typed array replaced by `{ $t: 'u8'|'u32'|'i8'|'f32', $b: base64 }`. */
 function encode(value: unknown): unknown {
-  if (value instanceof Uint8Array) {
-    return { $t: 'u8', $b: bytesToBase64(value) };
-  }
-  if (value instanceof Uint32Array) {
-    return { $t: 'u32', $b: bytesToBase64(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) };
-  }
-  if (value instanceof Int8Array) {
-    return { $t: 'i8', $b: bytesToBase64(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) };
-  }
-  if (value instanceof Float32Array) {
-    return { $t: 'f32', $b: bytesToBase64(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) };
+  const kind = arrayKind(value);
+  if (kind !== null) {
+    return { $t: kind, $b: bytesToBase64(viewBytes(value as ArrayBufferView)) };
   }
   if (Array.isArray(value)) {
     return value.map(encode);
@@ -81,18 +75,7 @@ function decode(value: unknown): unknown {
   if (value && typeof value === 'object') {
     const o = value as Json;
     if (typeof o.$t === 'string' && typeof o.$b === 'string') {
-      const bytes = base64ToBytes(o.$b);
-      const copy = bytes.slice(); // own, aligned buffer
-      switch (o.$t) {
-        case 'u32':
-          return new Uint32Array(copy.buffer, 0, copy.byteLength >> 2);
-        case 'i8':
-          return new Int8Array(copy.buffer, 0, copy.byteLength);
-        case 'f32':
-          return new Float32Array(copy.buffer, 0, copy.byteLength >> 2);
-        default:
-          return copy;
-      }
+      return arrayFrom(o.$t as ArrayKind, base64ToBytes(o.$b));
     }
     const out: Json = {};
     for (const [k, v] of Object.entries(o)) {
@@ -115,6 +98,10 @@ export interface SaveStateFile {
   snapshot: unknown;
 }
 
+/**
+ * A save state as text. The metadata keys come before `snapshot`: a reader listing
+ * states parses the head of the file up to `,"snapshot":` instead of the whole snapshot.
+ */
 export function encodeSaveState(
   snapshot: GbaSnapshot,
   meta: { romHash?: string; name?: string; frame: number },

@@ -93,15 +93,7 @@ export class Program {
     if (address < 0x4000) {
       return `<BIOS stub +0x${address.toString(16)}>`;
     }
-    const fn = this.debugInfo?.pcToFunction(address);
-    if (fn) {
-      return address === fn.address ? fn.name : `${fn.name}+0x${(address - fn.address).toString(16)}`;
-    }
-    const sym = this.debugInfo?.addressToSymbol(address);
-    if (sym && (sym.exact || sym.offset < 0x1000)) {
-      return sym.offset === 0 ? sym.name : `${sym.name}+0x${sym.offset.toString(16)}`;
-    }
-    return `0x${address.toString(16).padStart(8, '0')}`;
+    return this.symbolize(address) ?? `0x${address.toString(16).padStart(8, '0')}`;
   }
 
   /** A short label for a branch target or literal (null when nothing names it). */
@@ -114,10 +106,15 @@ export class Program {
       return address === fn.address ? fn.name : `${fn.name}+0x${(address - fn.address).toString(16)}`;
     }
     const sym = this.debugInfo.addressToSymbol(address);
-    if (sym && (sym.exact || sym.offset < 0x1000)) {
+    if (sym && (sym.exact || sym.offset < MAX_SYMBOL_OFFSET)) {
       return sym.offset === 0 ? sym.name : `${sym.name}+0x${sym.offset.toString(16)}`;
     }
     return null;
+  }
+
+  /** Every address where a call to `name` is entered inlined (empty without DWARF scopes). */
+  inlinedEntries(name: string): number[] {
+    return this.debugInfo?.scopes.inlineEntriesByName(name) ?? [];
   }
 
   /** The address of a symbol: functions, objects, linker-placed globals. */
@@ -148,10 +145,29 @@ export class Program {
       return true;
     }
     const fn = this.debugInfo.pcToFunction(address);
-    return !!fn && (fn.exact || address - fn.address < 0x1000);
+    return !!fn && (fn.exact || address - fn.address < MAX_SYMBOL_OFFSET);
   }
 
-  /** Addresses where code for a local source line starts, sliding to the next line with code. */
+  /**
+   * Every line of a local source file a breakpoint arms without sliding: the
+   * statement rows of the line table plus the lines calls were inlined from.
+   * Ascending; empty without debug info or when the file is not the ELF's.
+   */
+  codeLines(localPath: string): number[] {
+    if (!this.debugInfo || !this.sources) {
+      return [];
+    }
+    const dwarfFile = this.sources.toDwarf(localPath);
+    if (!dwarfFile) {
+      return [];
+    }
+    const lines = new Set(this.debugInfo.lines.linesWithCode(dwarfFile));
+    for (const line of this.debugInfo.scopes.inlineCallSiteLines(dwarfFile)) {
+      lines.add(line);
+    }
+    return [...lines].sort((a, b) => a - b);
+  }
+
   /** Whether a breakpoint on `localPath:line` arms code on that very line (no sliding). */
   hasCodeAt(localPath: string, line: number): boolean {
     if (!this.debugInfo || !this.sources) {
@@ -165,6 +181,7 @@ export class Program {
     );
   }
 
+  /** Addresses where code for a local source line starts, sliding to the next line with code. */
   lineToAddresses(localPath: string, line: number): { line: number; addresses: number[] } | null {
     if (!this.debugInfo || !this.sources) {
       return null;
@@ -191,6 +208,8 @@ export class Program {
 
 /** how many lines a breakpoint on a line without code slides forward */
 const SLIDE_SLACK = 8;
+/** past this, a nearest-symbol match is more likely the gap after a symbol than part of it */
+const MAX_SYMBOL_OFFSET = 0x1000;
 
 function normalizeDwarf(p: string): string {
   return p.replace(/\\/g, '/');

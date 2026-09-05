@@ -21,12 +21,14 @@ import {
   type DataBreakpoint,
   type DataBreakpointSpec,
   type EventBreakpointKind,
+  type ResolvedAddresses,
 } from './breakpoints.js';
+import type { CompiledExpr, ExprEnv } from './expression.js';
 import type { Host } from './host.js';
 import { type DisassembledLine, type EvaluateResult, Inspector, type Scope, type StackFrame } from './inspector.js';
 import { type IoRegisterValue, ioSnapshot } from './io.js';
 import { LabelStore, type LabelsFile } from './labels.js';
-import { Machine, regionOf, romHash } from './machine.js';
+import { Machine, romHash } from './machine.js';
 import { type SearchOptions, filterMemory, searchMemory } from './memory-search.js';
 import {
   type SpriteInfo,
@@ -39,7 +41,7 @@ import {
   tilesSnapshot,
 } from './ppu.js';
 import { Program } from './program.js';
-import { type InputRecording, recordingToScript } from './recorder.js';
+import { BUTTON_COUNT, type InputRecording, recordingToScript } from './recorder.js';
 import { RewindHistory, type RewindOptions } from './rewind.js';
 import { type EventEntry, Ring, type TraceEntry } from './rings.js';
 import { decodeSaveState, encodeSaveState } from './snapshot-codec.js';
@@ -48,9 +50,11 @@ import {
   type StepContext,
   type StepOutcome,
   inlineEntriesAt,
+  isExceptionMode,
   runToAddress,
   stepInstruction,
   stepInto,
+  stepOutOfException,
   stepOutOfInline,
   stepOutTo,
   stepOver,
@@ -82,6 +86,12 @@ export interface SessionEvents {
   state(state: SessionState): void;
   stopped(info: StopInfo): void;
   continued(): void;
+  /** an input recording began or ended (a restart or resync ends one too) */
+  recording(active: boolean): void;
+  /** instruction tracing was turned on or off */
+  tracing(on: boolean): void;
+  /** a label was set, cleared, imported or loaded: the names disassembly and evaluation use changed */
+  labels(): void;
   /** RGBA 240×160, a fresh copy; throttled while running, always on a stop */
   frame(rgba: Uint8Array, frame: number): void;
   /** interleaved stereo samples produced by the last run slice, when a listener wants them */
@@ -99,7 +109,7 @@ export interface SessionOptions extends Omit<SourceMapperOptions, 'cwd'> {
   rewind?: RewindOptions;
   traceCapacity?: number;
   eventCapacity?: number;
-  /** milliseconds between frame events while running (default 33) */
+  /** milliseconds between frame events while running (default {@link DEFAULT_FRAME_EVENT_INTERVAL_MS}) */
   frameEventInterval?: number;
   /** debug an existing machine instead of booting a new one (see {@link Machine}) */
   machine?: Machine;
@@ -108,7 +118,7 @@ export interface SessionOptions extends Omit<SourceMapperOptions, 'cwd'> {
 /** Everything a client needs to know about the machine's position in time. */
 export interface Position {
   frame: number;
-  /** instructions attempted since the frame began */
+  /** instructions executed since the frame began (time the CPU spends halted does not count) */
   instruction: number;
   scanline: number;
   cycle: number;
@@ -120,19 +130,40 @@ export interface HistoryInfo {
   keyframes: number;
   bytes: number;
   recording: boolean;
+  /** the frame the recording in progress began at; null when none is */
+  recordingStart: number | null;
 }
 
 const FRAME_MS = 1000 / 59.7275;
+/** how often a running session emits a frame, unless the options say otherwise */
+export const DEFAULT_FRAME_EVENT_INTERVAL_MS = 33;
 /** `#hiddenInline` sentinel: hide the inlined layers that begin at the stop address */
 const AUTO_HIDDEN = -1;
 const MAX_STEP_FRAMES = 300;
 const MAX_STEP_MS = 1500;
 
+/** A place in history a reverse search can land on. */
+interface HistoryPosition {
+  frame: number;
+  instruction: number;
+  /** the machine cycle, when the instruction count alone is ambiguous (a stop while the CPU was halted) */
+  cycle?: number;
+}
+
+/**
+ * A reverse search in progress: the data breakpoints whose watchpoint fired and
+ * the events matched since the last instruction, to be placed by the scan.
+ */
+interface ReverseScan {
+  pendingData: DataBreakpoint[];
+  eventHit: boolean;
+}
+
 export class Session {
   readonly host: Host;
   readonly machine: Machine;
   readonly program: Program;
-  readonly labels = new LabelStore();
+  readonly labels = new LabelStore(() => this.#emit('labels'));
   readonly inspector: Inspector;
   readonly breakpoints = new BreakpointStore();
   readonly history: RewindHistory;
@@ -155,12 +186,20 @@ export class Session {
   #pendingStop: StopInfo | null = null;
   #stopRequest: StopInfo | null = null;
   #pauseRequested = false;
+  /** true while a command runs the machine or reports its stop: a command issued from a listener meanwhile is refused */
+  #busy = false;
   /** inlined layers of frame 0 the views hide; AUTO_HIDDEN until the stop resolves it */
-  #hiddenInline = 0;
+  #hiddenInline = AUTO_HIDDEN;
   #frameCache: StackFrame[] | null = null;
   #dataDisposers: Array<() => void> = [];
   #tracing = false;
+  #hooksInstalled = false;
   #recordEvents = true;
+  /** true only while this session runs the machine: another driver's frames are neither watched nor logged */
+  #driving = false;
+  #scan: ReverseScan | null = null;
+  /** the hardware-event sink this session installs; only its own is ever removed from a shared machine */
+  readonly #sink = (event: HardwareEvent): void => this.#onHardwareEvent(event);
 
   // ─── time ──────────────────────────────────────────────────────────
   #instrInFrame = 0;
@@ -168,6 +207,8 @@ export class Session {
   #pendingButtons: number | null = null;
   #frameButtons = 0;
   #recordingStart: number | null = null;
+  /** what `stopRecording` last returned, for a view that shows recordings whoever stopped them */
+  #lastRecording: InputRecording | null = null;
 
   /**
    * Prefer {@link Session.create}: it hashes the ROM (to bind save states and
@@ -184,9 +225,10 @@ export class Session {
     this.history = new RewindHistory(options.rewind);
     this.trace = new Ring<TraceEntry>(options.traceCapacity ?? 20_000);
     this.events = new Ring<EventEntry>(options.eventCapacity ?? 5_000);
-    this.machine.onHardwareEvent = (e) => this.#onHardwareEvent(e);
+    this.machine.onHardwareEvent = this.#sink;
     this.#lastFrame = this.machine.frame;
     this.#anchorHistory();
+    this.#resolveHiddenInline();
   }
 
   /** Start history here: a keyframe at the current frame whatever the keyframe grid says, so step-back works at once. */
@@ -222,8 +264,11 @@ export class Session {
       try {
         (h[event] as ((...a: Parameters<SessionEvents[K]>) => void) | undefined)?.(...args);
       } catch (err) {
-        // A listener must never take the machine down.
-        this.#emit('output', `listener for '${event}' threw: ${(err as Error).message}\n`, 'stderr');
+        // A listener must never take the machine down, and reporting its failure must
+        // not re-enter it: an output listener's own failure is dropped.
+        if (event !== 'output') {
+          this.#emit('output', `listener for '${event}' threw: ${(err as Error).message}\n`, 'stderr');
+        }
       }
     }
   }
@@ -271,11 +316,31 @@ export class Session {
     if (this.#state !== 'stopped') {
       throw new Error(`cannot ${what} while ${this.#state}`);
     }
+    if (this.#busy) {
+      throw new Error(`cannot ${what} from inside a session event`);
+    }
+  }
+
+  #requireLive(what: string): void {
+    if (this.#state === 'disposed') {
+      throw new Error(`cannot ${what} a disposed session`);
+    }
   }
 
   // ─── the stop predicate ────────────────────────────────────────────
 
   readonly #predicate = (): boolean => {
+    if (this.machine.halted) {
+      // Nothing executes while the CPU sleeps: the machine polls once per scheduler
+      // skip, not once per instruction. Neither a step, a breakpoint nor the
+      // instruction counter moves; only a stop an event already asked for lands here.
+      if (this.#pendingStop) {
+        this.#stopRequest = this.#pendingStop;
+        this.#pendingStop = null;
+        return true;
+      }
+      return false;
+    }
     const pc = this.machine.pc;
     this.#instrInFrame++;
     if (this.#skipAddress !== null) {
@@ -316,32 +381,20 @@ export class Session {
   };
 
   #evaluateBreakpoints(bps: Breakpoint[], pc: number): StopInfo | null {
-    const env = this.inspector.exprEnv(undefined);
+    let env: ExprEnv | null = null;
+    const envOf = (): ExprEnv => (env ??= this.inspector.liveEnv());
     const ids: number[] = [];
     let kind: StopReason = 'breakpoint';
     for (const bp of bps) {
-      if (bp.condition) {
-        let ok = false;
-        try {
-          ok = bp.condition(env) !== 0;
-        } catch (err) {
-          this.#emit(
-            'output',
-            `breakpoint ${bp.id} condition '${bp.conditionText}': ${(err as Error).message}\n`,
-            'stderr',
-          );
-          ok = true; // a broken condition stops, so the user sees it
-        }
-        if (!ok) {
-          continue;
-        }
+      if (bp.condition && !this.#conditionHolds(bp.condition, `breakpoint ${bp.id}`, bp.conditionText, envOf(), true)) {
+        continue;
       }
       bp.hits++;
       if (bp.hitCondition && !bp.hitCondition(bp.hits)) {
         continue;
       }
       if (bp.logMessage) {
-        this.#emit('output', bp.logMessage(env) + '\n', 'log');
+        this.#emit('output', bp.logMessage(envOf()) + '\n', 'log');
         continue;
       }
       ids.push(bp.id);
@@ -354,8 +407,32 @@ export class Session {
     return ids.length > 0 ? { reason: kind, address: pc, breakpointIds: ids } : null;
   }
 
+  /** Whether a breakpoint's condition holds. A condition that fails to evaluate holds, so the user sees the failure. */
+  #conditionHolds(
+    condition: CompiledExpr,
+    who: string,
+    text: string | undefined,
+    env: ExprEnv,
+    report: boolean,
+  ): boolean {
+    try {
+      return condition(env) !== 0;
+    } catch (err) {
+      if (report) {
+        this.#emit('output', `${who} condition '${text}': ${(err as Error).message}\n`, 'stderr');
+      }
+      return true;
+    }
+  }
+
   #onHardwareEvent(event: HardwareEvent): void {
+    if (!this.#driving) {
+      return; // another driver's frame: not ours to log or stop on
+    }
     if (this.#state === 'replaying') {
+      if (this.#scan && this.breakpoints.eventKindOf(event)) {
+        this.#scan.eventHit = true;
+      }
       return;
     }
     if (this.#recordEvents) {
@@ -375,10 +452,21 @@ export class Session {
 
   // ─── run loop ──────────────────────────────────────────────────────
 
+  /** Run `fn` as this session's own driving of the machine: its hooks see what happens inside. */
+  #drive<T>(fn: () => T): T {
+    const was = this.#driving;
+    this.#driving = true;
+    try {
+      return fn();
+    } finally {
+      this.#driving = was;
+    }
+  }
+
   /** One frame (or the rest of the current one). Returns the stop, if any. */
   #runOneFrame(): StopInfo | null {
     this.#beginFrameIfNew();
-    const outcome = this.machine.runFrame(this.#predicate);
+    const outcome = this.#drive(() => this.machine.runFrame(this.#predicate));
     const stop = this.#stopRequest;
     this.#stopRequest = null;
     this.#afterRun();
@@ -458,19 +546,30 @@ export class Session {
       this.#cancelLoop = null;
     }
     this.#stepper = null;
+    this.#resolveHiddenInline();
+    this.#frameCache = null;
+    this.#revision++;
+    const was = this.#busy;
+    this.#busy = true;
+    try {
+      this.#setState('stopped');
+      this.#emitFrame(true);
+      this.#emit('stopped', info);
+    } finally {
+      this.#busy = was;
+    }
+  }
+
+  /** A stop that left the hidden-layer count to be decided hides the inlined calls that begin at the pc. */
+  #resolveHiddenInline(): void {
     if (this.#hiddenInline === AUTO_HIDDEN) {
       this.#hiddenInline = inlineEntriesAt(this.program, this.machine.pc);
     }
-    this.#frameCache = null;
-    this.#revision++;
-    this.#setState('stopped');
-    this.#emitFrame(true);
-    this.#emit('stopped', info);
   }
 
   #emitFrame(force: boolean): void {
     const now = this.host.now();
-    if (!force && now - this.#lastFrameEmit < (this.options.frameEventInterval ?? 33)) {
+    if (!force && now - this.#lastFrameEmit < (this.options.frameEventInterval ?? DEFAULT_FRAME_EVENT_INTERVAL_MS)) {
       return;
     }
     this.#lastFrameEmit = now;
@@ -501,30 +600,55 @@ export class Session {
     this.#cancelLoop = this.host.interval(this.#tick, FRAME_MS);
   }
 
+  /** Stop at the next opportunity: the next frame of a run, or between the frames of a long step. */
   pause(): void {
     if (this.#state === 'running') {
       this.#pauseRequested = true;
     }
   }
 
-  /** Run synchronously until the step's predicate accepts an instruction (bounded in frames and time). */
+  /**
+   * Run synchronously until the step's predicate accepts an instruction (bounded in
+   * frames and time). The session is `running` meanwhile: a command issued from a
+   * listener is refused, and a pause lands between two frames.
+   */
   #runStep(step: StepOutcome, label: string): void {
     this.#requireStopped(label);
     this.#armResume();
     this.#stepper = step;
-    this.#emit('continued');
-    const started = this.host.now();
-    let frames = 0;
-    for (; frames < MAX_STEP_FRAMES && this.host.now() - started < MAX_STEP_MS; frames++) {
-      const stop = this.#runOneFrame();
-      if (stop) {
-        this.#stop(stop);
-        return;
+    this.#pauseRequested = false;
+    this.#busy = true;
+    try {
+      this.#setState('running');
+      this.#emit('continued');
+      const started = this.host.now();
+      let frames = 0;
+      for (; frames < MAX_STEP_FRAMES && this.host.now() - started < MAX_STEP_MS; frames++) {
+        const stop = this.#runOneFrame();
+        if (stop) {
+          this.#stop(stop);
+          return;
+        }
+        if (this.#pauseRequested) {
+          this.#pauseRequested = false;
+          this.#stop({ reason: 'pause', address: this.machine.pc });
+          return;
+        }
       }
+      this.#stepper = null;
+      const timedOut = this.host.now() - started >= MAX_STEP_MS;
+      const budget = timedOut ? `${MAX_STEP_MS / 1000} s (${frames} frames)` : `${frames} frames`;
+      this.#emit('output', `${label} did not complete within ${budget}; stopped where it was\n`, 'console');
+      this.#stop({ reason: 'step', address: this.machine.pc, description: `${label} gave up` });
+    } finally {
+      this.#busy = false;
     }
-    this.#stepper = null;
-    this.#emit('output', `${label} did not complete within ${frames} frames; stopped where it was\n`, 'console');
-    this.#stop({ reason: 'step', address: this.machine.pc, description: `${label} gave up` });
+  }
+
+  /** A step that cannot be taken from here: say why, without moving. */
+  #refuseStep(label: string, why: string): void {
+    this.#emit('output', `${label}: ${why}\n`, 'console');
+    this.#emit('stopped', { reason: 'step', address: this.machine.pc, description: why });
   }
 
   #stepContext(): StepContext {
@@ -557,6 +681,13 @@ export class Session {
     this.#runStep(stepOver(this.#stepContext()), 'step over');
   }
 
+  /**
+   * Step out: run to the caller's next instruction. The caller is the unwound
+   * frame when the ELF has call-frame information; an exception handler entered
+   * through the BIOS (nothing names its return) is left by its mode changing back;
+   * without either, lr is trusted only while it still points outside this function
+   * (once the function has made a call, lr is that call's return, not ours).
+   */
   stepOut(): void {
     this.#requireStopped('step out');
     const frames = this.#frames();
@@ -567,9 +698,28 @@ export class Session {
     }
     const caller =
       frames.find((f) => f.index > 0 && f.virtual && f.virtual.physical !== top?.virtual?.physical) ?? frames[1];
-    const returnAddress = caller && !caller.heuristic ? caller.address : (this.machine.registers[14]! & ~1) >>> 0;
-    const callerSp = caller?.virtual?.physical.regs[13];
-    this.#runStep(stepOutTo(this.#stepContext(), returnAddress, callerSp), 'step out');
+    if (caller && !caller.heuristic) {
+      this.#runStep(stepOutTo(this.#stepContext(), caller.address, caller.virtual?.physical.regs[13]), 'step out');
+      return;
+    }
+    if (isExceptionMode(this.machine.gba.armCpu.getMode())) {
+      this.#runStep(stepOutOfException(this.#stepContext()), 'step out');
+      return;
+    }
+    if (!caller) {
+      this.#refuseStep('step out', 'no caller frame to step out to');
+      return;
+    }
+    const lr = (this.machine.registers[14]! & ~1) >>> 0;
+    const fn = this.program.functionRange(this.machine.pc);
+    if (fn && lr >= fn.lo && lr < fn.hi) {
+      this.#refuseStep(
+        'step out',
+        'the caller is unknown: no call-frame information, and lr is the return of a call this function made',
+      );
+      return;
+    }
+    this.#runStep(stepOutTo(this.#stepContext(), lr, undefined), 'step out');
   }
 
   runToAddress(address: number): void {
@@ -580,6 +730,7 @@ export class Session {
   stepFrame(): void {
     this.#requireStopped('step frame');
     this.#armResume();
+    this.#setState('running');
     this.#emit('continued');
     const stop = this.#runOneFrame();
     this.#stop(stop ?? { reason: 'step', address: this.machine.pc, description: 'frame' });
@@ -588,9 +739,10 @@ export class Session {
   stepScanline(): void {
     this.#requireStopped('step scanline');
     this.#armResume();
+    this.#setState('running');
     this.#emit('continued');
     this.#beginFrameIfNew();
-    const outcome = this.machine.runScanline(this.#predicate);
+    const outcome = this.#drive(() => this.machine.runScanline(this.#predicate));
     const stop = this.#stopRequest;
     this.#stopRequest = null;
     this.#afterRun();
@@ -599,31 +751,25 @@ export class Session {
     );
   }
 
-  /** Reload the ROM and boot again. Breakpoints survive; history, trace and events do not. */
+  /** Reload the ROM and boot again. Breakpoints survive (their hit counts start over); history, trace and events do not. */
   restart(): void {
-    if (this.#cancelLoop) {
-      this.#cancelLoop();
-      this.#cancelLoop = null;
-    }
-    this.#state = 'stopped';
+    this.#requireLive('restart');
     this.machine.boot();
     this.#epoch++;
-    this.#revision++;
     this.#instrInFrame = 0;
     this.#lastFrame = 0;
     this.#pendingButtons = null;
-    this.#recordingStart = null;
+    this.#setRecordingStart(null);
+    this.#pauseRequested = false;
     this.#hiddenInline = AUTO_HIDDEN;
-    this.#frameCache = null;
     this.#stopRequest = null;
     this.#pendingStop = null;
+    this.breakpoints.resetHits();
     this.history.clear();
     this.trace.clear();
     this.events.clear();
     this.#pushKeyframeIfDue();
-    this.#setState('stopped');
-    this.#emitFrame(true);
-    this.#emit('stopped', { reason: 'restart', address: this.machine.pc });
+    this.#stop({ reason: 'restart', address: this.machine.pc });
   }
 
   // ─── breakpoints ───────────────────────────────────────────────────
@@ -633,6 +779,7 @@ export class Session {
       path,
       specs.map((s) => ({ ...s, kind: 'source', path })),
       (spec) => this.#resolve(spec),
+      (addresses) => this.inspector.hintsAt(addresses[0]),
     );
   }
 
@@ -641,6 +788,7 @@ export class Session {
       'instruction',
       specs.map((s) => ({ ...s, kind: 'instruction' })),
       (spec) => this.#resolve(spec),
+      (addresses) => this.inspector.hintsAt(addresses[0]),
     );
   }
 
@@ -649,19 +797,28 @@ export class Session {
       'function',
       specs.map((s) => ({ ...s, kind: 'function' })),
       (spec) => this.#resolve(spec),
+      (addresses) => this.inspector.hintsAt(addresses[0]),
     );
   }
 
-  #resolve(spec: BreakpointSpec): { addresses: number[]; line?: number; message?: string } {
+  #resolve(spec: BreakpointSpec): ResolvedAddresses {
     switch (spec.kind) {
       case 'instruction':
         return spec.address === undefined
           ? { addresses: [], message: 'no address' }
           : { addresses: [(spec.address & ~1) >>> 0] };
       case 'function': {
+        // The symbol's entry, plus every place the function is entered inlined: an
+        // optimizer may have emitted no symbol for it at all.
         const name = spec.functionName ?? '';
-        const address = this.program.symbolAddress(name) ?? this.labels.byName(name)?.address ?? null;
-        return address === null ? { addresses: [], message: `no symbol '${name}'` } : { addresses: [address & ~1] };
+        const symbol = this.program.symbolAddress(name) ?? this.labels.byName(name)?.address ?? null;
+        const addresses = new Set(this.program.inlinedEntries(name));
+        if (symbol !== null) {
+          addresses.add((symbol & ~1) >>> 0);
+        }
+        return addresses.size === 0
+          ? { addresses: [], message: `no symbol '${name}'` }
+          : { addresses: [...addresses].sort((a, b) => a - b) };
       }
       default: {
         if (!this.program.hasSymbols) {
@@ -684,14 +841,32 @@ export class Session {
   }
 
   /**
-   * What a data breakpoint on `name` would watch: a DWARF-typed variable path, a
-   * symbol (whole extent), a hex address (`size` bytes, default 4), or a label.
+   * What a data breakpoint on `name` would watch: a variable or member path visible
+   * from frame `frameIndex` (a local's stack slot included), a DWARF-typed global
+   * path, a symbol (whole extent), a hex address (`size` bytes, default 4), or a
+   * label. Null when nothing by that name has an address (a register-held local).
    */
-  dataBreakpointTarget(name: string, size?: number): { address: number; length: number; name: string } | null {
+  dataBreakpointTarget(
+    name: string,
+    size?: number,
+    frameIndex?: number,
+  ): { address: number; length: number; name: string } | null {
     const di = this.program.debugInfo;
     const trimmed = name.trim();
     if (/^0x[0-9a-f]+$/i.test(trimmed)) {
-      return { address: parseInt(trimmed, 16) >>> 0, length: size ?? 4, name: trimmed };
+      const address = parseInt(trimmed, 16);
+      // a literal wider than the bus would wrap onto some other address: nothing to watch
+      return address <= 0xffffffff ? { address, length: size ?? 4, name: trimmed } : null;
+    }
+    if (frameIndex !== undefined && this.#state === 'stopped') {
+      try {
+        const scalar = this.inspector.variableTarget(trimmed, this.#frames(), frameIndex);
+        if (scalar) {
+          return { address: scalar.address, length: size ?? scalar.length, name: trimmed };
+        }
+      } catch {
+        // not a typed path: the symbol table may still know it
+      }
     }
     if (di) {
       const loc = di.resolveVariable(trimmed);
@@ -707,14 +882,24 @@ export class Session {
     return { address, length: size ?? extent ?? 4, name: trimmed };
   }
 
+  /** Replace the data breakpoints. One whose condition does not compile is returned unverified and watches nothing. */
   setDataBreakpoints(specs: DataBreakpointSpec[]): DataBreakpoint[] {
+    const list = this.breakpoints.replaceData(specs, this.inspector.hintsAt());
+    this.#installWatchpoints();
+    return list;
+  }
+
+  /** Put the bus watchpoints of the verified data breakpoints in place (replacing any installed). */
+  #installWatchpoints(): void {
     for (const d of this.#dataDisposers) {
       d();
     }
-    const list = this.breakpoints.replaceData(specs);
     const bus = this.machine.gba.bus;
-    this.#dataDisposers = list.flatMap((bp) => {
+    this.#dataDisposers = this.breakpoints.data.flatMap((bp) => {
       const disposers: Array<() => void> = [];
+      if (!bp.verified) {
+        return disposers;
+      }
       if (bp.access !== 'read') {
         disposers.push(
           bus.addWriteWatchpoint(bp.address, bp.length, (info) => this.#onDataAccess(bp, 'written', info)),
@@ -725,22 +910,43 @@ export class Session {
       }
       return disposers;
     });
-    return list;
   }
 
   /** A watched range was accessed: stop before the next instruction, unless the breakpoint's condition or hit count says otherwise. */
   #onDataAccess(bp: DataBreakpoint, verb: 'written' | 'read', info: WatchpointWrite | WatchpointRead): void {
+    if (!this.#driving) {
+      return; // another driver's access
+    }
+    if (this.#scan) {
+      // A reverse search: the hit is placed by the scan, at the next instruction.
+      if (
+        !bp.compiledCondition ||
+        this.#conditionHolds(
+          bp.compiledCondition,
+          `data breakpoint ${bp.id}`,
+          bp.condition,
+          this.inspector.liveEnv(),
+          false,
+        )
+      ) {
+        this.#scan.pendingData.push(bp);
+      }
+      return;
+    }
     if (this.#state === 'replaying' || this.#pendingStop) {
       return;
     }
-    if (bp.compiledCondition) {
-      try {
-        if (bp.compiledCondition(this.inspector.exprEnv(undefined)) === 0) {
-          return;
-        }
-      } catch {
-        // a broken condition stops, so the user sees it
-      }
+    if (
+      bp.compiledCondition &&
+      !this.#conditionHolds(
+        bp.compiledCondition,
+        `data breakpoint ${bp.id}`,
+        bp.condition,
+        this.inspector.liveEnv(),
+        true,
+      )
+    ) {
+      return;
     }
     bp.hits++;
     if (bp.compiledHit && !bp.compiledHit(bp.hits)) {
@@ -753,7 +959,8 @@ export class Session {
     this.#pendingStop = {
       reason: 'data breakpoint',
       address: this.machine.pc,
-      description: `${bp.name} ${verb} (0x${info.value.toString(16)}, ${info.size} bytes at 0x${info.address.toString(16)}) by ${by}`,
+      // the bus hands a 32-bit value over as a signed int: print its bits, not its sign
+      description: `${bp.name} ${verb} (0x${(info.value >>> 0).toString(16)}, ${info.size} bytes at 0x${info.address.toString(16)}) by ${by}`,
       breakpointIds: [bp.id],
     };
   }
@@ -776,23 +983,26 @@ export class Session {
   }
 
   scopes(frameIndex: number): Scope[] {
-    return this.inspector.scopes(this.#frames()[frameIndex]);
+    const frames = this.#frames();
+    if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex >= frames.length) {
+      throw new Error(`no frame ${frameIndex} (the stack has ${frames.length})`);
+    }
+    return this.inspector.scopes(frames[frameIndex]);
   }
 
   evaluate(expression: string, frameIndex = 0): EvaluateResult {
     return this.inspector.evaluate(expression, this.#frames(), frameIndex);
   }
 
-  /** Write a scalar the variables view showed as writable. */
+  /** Write a scalar the variables view showed as writable; returns how it now reads there. */
   setVariable(node: VarNode, text: string): string {
     if (!node.writable) {
       throw new Error(`'${node.name}' is not a writable scalar`);
     }
-    this.inspector.setScalar(node.writable, text);
+    const shown = this.inspector.setScalar(node.writable, text);
     this.#revision++;
     this.#frameCache = null;
-    const v = this.machine.peekUnsigned(node.writable.address, node.writable.size) ?? 0;
-    return `${v} (0x${v.toString(16)})`;
+    return shown;
   }
 
   disassemble(address: number, count: number, mode?: 'arm' | 'thumb'): DisassembledLine[] {
@@ -827,11 +1037,22 @@ export class Session {
 
   /** Press or release a button. Applied at the next frame boundary so the input log stays exact. */
   setButton(button: number, down: boolean): void {
-    if (button < 0 || button > 9) {
+    if (button < 0 || button >= BUTTON_COUNT) {
       return;
     }
     const current = this.#pendingButtons ?? this.machine.buttons;
     const next = down ? current | (1 << button) : current & ~(1 << button);
+    if (this.#state === 'stopped' && this.#instrInFrame === 0) {
+      this.machine.setButtons(next);
+      this.#pendingButtons = null;
+    } else {
+      this.#pendingButtons = next;
+    }
+  }
+
+  /** Set every button at once from a mask (bits 0–9, `BUTTON_NAMES` order); applied like `setButton`. */
+  setButtons(mask: number): void {
+    const next = mask & ((1 << BUTTON_COUNT) - 1);
     if (this.#state === 'stopped' && this.#instrInFrame === 0) {
       this.machine.setButtons(next);
       this.#pendingButtons = null;
@@ -852,6 +1073,7 @@ export class Session {
       keyframes: this.history.keyframeCount,
       bytes: this.history.bytes,
       recording: this.#recordingStart !== null,
+      recordingStart: this.#recordingStart,
     };
   }
 
@@ -860,15 +1082,12 @@ export class Session {
    * keyframe and replay the input log through the machine. Returns false when the
    * history does not reach that far.
    */
-  #replayTo(frame: number, instruction: number): boolean {
+  #replayTo(frame: number, instruction: number, cycle?: number): boolean {
     const key = this.history.keyframeAtOrBefore(frame);
     if (!key) {
       return false;
     }
-    const previous = this.#state;
-    this.#state = 'replaying';
-    this.machine.onHardwareEvent = null;
-    try {
+    this.#replaying(() => {
       this.machine.restore(key.snapshot);
       this.#lastFrame = key.frame;
       this.#instrInFrame = 0;
@@ -882,39 +1101,60 @@ export class Session {
       this.machine.setButtons(this.history.inputAt(frame));
       this.#frameButtons = this.machine.buttons;
       this.#instrInFrame = 0;
-      if (instruction > 0) {
+      if (instruction > 0 || cycle !== undefined) {
+        // Count what the live predicate counts: executed instructions, not the polls
+        // made while the CPU is halted; a stop is taken at the first poll after them
+        // (or, when a cycle is given, at the first poll at or past it: the polls of
+        // one halt all share an instruction count).
         let count = 0;
-        const outcome = this.machine.runFrame(() => count++ >= instruction);
+        const outcome = this.machine.runFrame(() => {
+          if (count >= instruction) {
+            return cycle === undefined || this.machine.cycle >= cycle;
+          }
+          if (!this.machine.halted) {
+            count++;
+          }
+          return false;
+        });
         this.#instrInFrame = outcome === 'stopped' ? instruction : 0;
         if (outcome !== 'stopped') {
           this.#lastFrame = this.machine.frame;
         }
       }
-    } finally {
-      this.machine.onHardwareEvent = (e) => this.#onHardwareEvent(e);
-      this.#state = previous;
-    }
+    });
     return true;
   }
 
-  /** How many instructions frame `frame` attempts, by replaying it. */
+  /**
+   * Run `fn` with the machine in replay: the hardware sink off, the state
+   * `replaying` (so nothing is recorded or stops), both restored afterwards.
+   */
+  #replaying<T>(fn: () => T): T {
+    const previous = this.#state;
+    this.#state = 'replaying';
+    this.machine.onHardwareEvent = null;
+    try {
+      return this.#drive(fn);
+    } finally {
+      this.machine.onHardwareEvent = this.#sink;
+      this.#state = previous;
+    }
+  }
+
+  /** How many instructions frame `frame` executes, by replaying it. */
   #instructionsIn(frame: number): number | null {
     if (!this.#replayTo(frame, 0)) {
       return null;
     }
     let count = 0;
-    const previous = this.#state;
-    this.#state = 'replaying';
-    this.machine.onHardwareEvent = null;
-    try {
+    this.#replaying(() => {
       this.machine.runFrame(() => {
-        count++;
+        if (!this.machine.halted) {
+          count++;
+        }
         return false;
       });
-    } finally {
-      this.machine.onHardwareEvent = (e) => this.#onHardwareEvent(e);
-      this.#state = previous;
-    }
+    });
     return count;
   }
 
@@ -927,7 +1167,11 @@ export class Session {
     this.#stop({ reason, address: this.machine.pc, description });
   }
 
-  /** Go back to the start of `frame` (or as far as history reaches). */
+  /**
+   * Go back to the start of `frame` (or as far as history reaches). False when the
+   * position cannot move: no history, or already at the start of the target frame
+   * (from inside a frame, its own start is a move).
+   */
   rewindToFrame(frame: number): boolean {
     this.#requireStopped('rewind');
     const earliest = this.history.earliestFrame;
@@ -935,6 +1179,9 @@ export class Session {
       return false;
     }
     const target = Math.max(earliest, Math.min(frame, this.machine.frame));
+    if (target === this.machine.frame && this.#instrInFrame === 0) {
+      return false;
+    }
     if (!this.#replayTo(target, 0)) {
       return false;
     }
@@ -972,8 +1219,10 @@ export class Session {
 
   /**
    * Run backwards to the most recent breakpoint hit before now: keyframes are
-   * replayed forward with the breakpoints armed and the last hit before the
-   * current position wins. Without a hit, lands on the earliest frame in history.
+   * replayed forward with every breakpoint armed — instruction, source, function,
+   * data and event breakpoints, their conditions and hit counts — and the last hit
+   * before the current position wins. Logpoints are silent in reverse. Without a
+   * hit, lands on the earliest frame in history.
    */
   reverseContinue(): boolean {
     this.#requireStopped('reverse continue');
@@ -983,11 +1232,12 @@ export class Session {
     if (earliest === null || (nowFrame === earliest && nowInstr === 0)) {
       return false;
     }
+    const visitsAfter = new Map<Breakpoint | DataBreakpoint, number>();
     let searchFrom = this.history.keyframeAtOrBefore(nowFrame)?.frame ?? earliest;
     for (;;) {
-      const hit = this.#lastHitBetween(searchFrom, nowFrame, nowInstr);
+      const hit = this.#lastHitBetween(searchFrom, nowFrame, nowInstr, visitsAfter);
       if (hit) {
-        this.#replayTo(hit.frame, hit.instruction);
+        this.#replayTo(hit.frame, hit.instruction, hit.cycle);
         this.#finishRewind('breakpoint', `reverse-continued to a breakpoint at frame ${hit.frame}`);
         return true;
       }
@@ -1005,59 +1255,170 @@ export class Session {
     return true;
   }
 
-  /** The last (frame, instruction) in [`from`, now) where an enabled breakpoint would stop. */
-  #lastHitBetween(from: number, nowFrame: number, nowInstr: number): { frame: number; instruction: number } | null {
+  /**
+   * The last (frame, instruction) in [`from`, now) where a breakpoint would stop,
+   * evaluated as the forward run evaluates it. A hit count is reconstructed: the
+   * k-th of a breakpoint's V visits in the window saw `hits - after - V + k`,
+   * `after` being its visits between the window and now (`visitsAfter`, which
+   * this call extends with the window's own).
+   */
+  #lastHitBetween(
+    from: number,
+    nowFrame: number,
+    nowInstr: number,
+    visitsAfter: Map<Breakpoint | DataBreakpoint, number>,
+  ): HistoryPosition | null {
     if (!this.#replayTo(from, 0)) {
       return null;
     }
-    let last: { frame: number; instruction: number } | null = null;
-    const previous = this.#state;
-    this.#state = 'replaying';
-    this.machine.onHardwareEvent = null;
-    try {
-      for (let f = from; f <= nowFrame; f++) {
-        this.machine.setButtons(this.history.inputAt(f));
-        let count = 0;
-        const limit = f === nowFrame ? nowInstr : Infinity;
-        this.machine.runFrame(() => {
-          if (count >= limit) {
-            return true;
-          }
-          const pc = this.machine.pc & ~1;
-          const bps = this.breakpoints.at(pc);
-          if (bps && bps.some((bp) => bp.verified && !bp.logMessage)) {
-            last = { frame: f, instruction: count };
-          }
-          count++;
-          return false;
-        });
+    let last: HistoryPosition | null = null;
+    // Visits of the breakpoints that have a hit condition, oldest first. The one at
+    // the current position (if the forward run stopped on it) counts toward the
+    // breakpoint's tally without being a place to land.
+    const visits = new Map<Breakpoint | DataBreakpoint, Array<{ at: HistoryPosition; landable: boolean }>>();
+    const visited = (bp: Breakpoint | DataBreakpoint, at: HistoryPosition, landable: boolean): void => {
+      if (hitTestOf(bp)) {
+        const list = visits.get(bp);
+        if (list) {
+          list.push({ at, landable });
+        } else {
+          visits.set(bp, [{ at, landable }]);
+        }
+      } else if (landable) {
+        last = at;
       }
+    };
+    const scan: ReverseScan = { pendingData: [], eventHit: false };
+    this.#scan = scan;
+    try {
+      this.#replaying(() => {
+        this.machine.onHardwareEvent = this.#sink;
+        for (let f = from; f <= nowFrame; f++) {
+          this.machine.setButtons(this.history.inputAt(f));
+          let count = 0;
+          const limit = f === nowFrame ? nowInstr : Infinity;
+          const instructionBreakpointsHere = (landable: boolean): void => {
+            const bps = this.breakpoints.at(this.machine.pc & ~1);
+            if (!bps) {
+              return;
+            }
+            // Built once per address, because several breakpoints can share one, and
+            // never reused beyond it: `liveEnv` binds the scope of the pc it was made
+            // at, so a condition judged in a stale scope would not find its locals and
+            // would count as a hit (a condition that cannot be evaluated holds).
+            let env: ExprEnv | null = null;
+            for (const bp of bps) {
+              if (!bp.verified || bp.logMessage) {
+                continue;
+              }
+              if (bp.condition) {
+                env ??= this.inspector.liveEnv();
+                if (!this.#conditionHolds(bp.condition, `breakpoint ${bp.id}`, bp.conditionText, env, false)) {
+                  continue;
+                }
+              }
+              visited(bp, { frame: f, instruction: count }, landable);
+            }
+          };
+          this.machine.runFrame(() => {
+            const now = count >= limit;
+            if (scan.pendingData.length > 0 || scan.eventHit) {
+              // A watchpoint or event fired since the last poll: the forward run stops at this one.
+              const at = { frame: f, instruction: count, cycle: this.machine.cycle };
+              for (const bp of scan.pendingData) {
+                visited(bp, at, !now);
+              }
+              scan.pendingData.length = 0;
+              if (scan.eventHit) {
+                scan.eventHit = false;
+                if (!now) {
+                  last = at;
+                }
+              }
+            }
+            if (now) {
+              if (!this.machine.halted) {
+                instructionBreakpointsHere(false);
+              }
+              return true;
+            }
+            if (this.machine.halted) {
+              return false;
+            }
+            instructionBreakpointsHere(true);
+            count++;
+            return false;
+          });
+        }
+      });
     } finally {
-      this.machine.onHardwareEvent = (e) => this.#onHardwareEvent(e);
-      this.#state = previous;
+      this.#scan = null;
+    }
+    for (const [bp, list] of visits) {
+      const after = visitsAfter.get(bp) ?? 0;
+      const test = hitTestOf(bp)!;
+      for (let k = list.length; k >= 1; k--) {
+        const { at, landable } = list[k - 1]!;
+        const hits = bp.hits - after - list.length + k;
+        if (landable && hits >= 1 && test(hits)) {
+          if (!last || at.frame > last.frame || (at.frame === last.frame && at.instruction > last.instruction)) {
+            last = at;
+          }
+          break;
+        }
+      }
+      visitsAfter.set(bp, after + list.length);
     }
     return last;
   }
 
   // ─── recording ─────────────────────────────────────────────────────
 
+  /** Record the buttons held on every frame from this one, until `stopRecording`. */
   startRecording(): void {
-    this.#recordingStart = this.machine.frame;
+    this.#setRecordingStart(this.machine.frame);
   }
 
   get recording(): boolean {
     return this.#recordingStart !== null;
   }
 
+  /** The frame the recording in progress began at; null when none is. */
+  get recordingStart(): number | null {
+    return this.#recordingStart;
+  }
+
+  /** What `stopRecording` last returned; null until a recording has been stopped. Survives a restart: one from frame 0 replays after it. */
+  get lastRecording(): InputRecording | null {
+    return this.#lastRecording;
+  }
+
   /** The buttons held on every frame since `startRecording`, bound to this ROM. */
   stopRecording(): InputRecording {
     const start = this.#recordingStart ?? this.machine.frame;
-    this.#recordingStart = null;
+    this.#setRecordingStart(null);
     const frames: number[] = [];
     for (let f = start; f < this.machine.frame; f++) {
       frames.push(this.history.inputAt(f));
     }
-    return { format: 'gba-kit-input', version: 1, romHash: this.romHash, startFrame: start, frames };
+    const recording: InputRecording = {
+      format: 'gba-kit-input',
+      version: 1,
+      romHash: this.romHash,
+      startFrame: start,
+      frames,
+    };
+    this.#lastRecording = recording;
+    return recording;
+  }
+
+  /** Every way a recording begins or ends goes through here, so listeners hear of each flip exactly once. */
+  #setRecordingStart(frame: number | null): void {
+    const was = this.#recordingStart !== null;
+    this.#recordingStart = frame;
+    if (was !== (frame !== null)) {
+      this.#emit('recording', frame !== null);
+    }
   }
 
   recordingAsScript(recording: InputRecording): string {
@@ -1075,11 +1436,12 @@ export class Session {
     }
     if (recording.startFrame === 0 && (this.history.earliestFrame ?? 0) > 0) {
       this.restart();
-    } else if (!this.#replayTo(recording.startFrame, 0)) {
-      return false;
+    } else if (recording.startFrame > this.machine.frame || !this.#replayTo(recording.startFrame, 0)) {
+      return false; // the past only: a start frame ahead of the machine is not in history
     }
     this.history.truncateAfter(this.machine.frame);
     this.#armResume();
+    this.#setState('running');
     this.#emit('continued');
     for (const mask of recording.frames) {
       this.machine.setButtons(mask);
@@ -1122,30 +1484,52 @@ export class Session {
   }
 
   /**
+   * Hand the machine to another driver while stopped: the session's hooks come off
+   * (its watchpoints, hardware-event sink and trace hook), so the other driver's
+   * frames cost nothing and record nothing. {@link resync} puts them back.
+   */
+  detach(): void {
+    this.#requireStopped('detach');
+    for (const d of this.#dataDisposers) {
+      d();
+    }
+    this.#dataDisposers = [];
+    if (this.machine.onHardwareEvent === this.#sink) {
+      this.machine.onHardwareEvent = null;
+    }
+    if (this.#hooksInstalled) {
+      this.machine.gba.armCpu.setDebugHooks(undefined);
+      this.#hooksInstalled = false;
+    }
+  }
+
+  /**
    * Someone else drove the machine (a play mode, a state loaded outside the
-   * session): forget the history that no longer describes it, start counting from
-   * here, and re-arm the hooks the other driver may have replaced.
+   * session): forget the history, trace, events and hit counts that no longer
+   * describe it, start counting from here, and put the hooks back.
    */
   resync(description = 'the machine changed outside the debugger'): void {
-    if (this.#state === 'running') {
-      this.pause();
-    }
+    this.#requireLive('resync');
     if (this.#cancelLoop) {
       this.#cancelLoop();
       this.#cancelLoop = null;
     }
-    this.#state = 'stopped';
+    this.#pauseRequested = false;
     this.#lastFrame = this.machine.frame;
     this.#instrInFrame = 0;
     this.#pendingButtons = null;
-    this.#recordingStart = null;
+    this.#setRecordingStart(null);
     this.#anchorHistory();
     this.#stopRequest = null;
     this.#pendingStop = null;
     this.#hiddenInline = AUTO_HIDDEN;
     this.#epoch++;
-    this.machine.onHardwareEvent = (e) => this.#onHardwareEvent(e);
+    this.breakpoints.resetHits();
+    this.trace.clear();
+    this.events.clear();
+    this.machine.onHardwareEvent = this.#sink;
     this.setTracing(this.#tracing);
+    this.#installWatchpoints();
     this.#stop({ reason: 'restart', address: this.machine.pc, description });
   }
 
@@ -1189,16 +1573,25 @@ export class Session {
     return this.#tracing;
   }
 
+  /** Turn instruction tracing on or off; listeners hear of a change, not of a resync putting the hooks back. */
   setTracing(on: boolean): void {
+    const changed = this.#tracing !== on;
     this.#tracing = on;
+    if (changed) {
+      this.#emit('tracing', on);
+    }
     const cpu = this.machine.gba.armCpu;
     if (!on) {
-      cpu.setDebugHooks(undefined);
+      if (this.#hooksInstalled) {
+        cpu.setDebugHooks(undefined);
+        this.#hooksInstalled = false;
+      }
       return;
     }
+    this.#hooksInstalled = true;
     cpu.setDebugHooks({
       onInstructionPost: (address, instruction) => {
-        if (this.#state === 'replaying') {
+        if (!this.#driving || this.#state === 'replaying') {
           return;
         }
         const r = cpu.registers;
@@ -1258,7 +1651,11 @@ export class Session {
     return path;
   }
 
+  /** Release the machine for good: only this session's own hooks are removed from it. */
   dispose(): void {
+    if (this.#state === 'disposed') {
+      return;
+    }
     if (this.#cancelLoop) {
       this.#cancelLoop();
       this.#cancelLoop = null;
@@ -1266,11 +1663,22 @@ export class Session {
     for (const d of this.#dataDisposers) {
       d();
     }
-    this.machine.onHardwareEvent = null;
-    this.machine.gba.armCpu.setDebugHooks(undefined);
+    this.#dataDisposers = [];
+    if (this.machine.onHardwareEvent === this.#sink) {
+      this.machine.onHardwareEvent = null;
+    }
+    if (this.#hooksInstalled) {
+      this.machine.gba.armCpu.setDebugHooks(undefined);
+      this.#hooksInstalled = false;
+    }
     this.#handlers = [];
     this.#state = 'disposed';
   }
+}
+
+/** The hit-count test of a breakpoint of either kind, if it has one. */
+function hitTestOf(bp: Breakpoint | DataBreakpoint): ((hits: number) => boolean) | undefined {
+  return 'access' in bp ? bp.compiledHit : bp.hitCondition;
 }
 
 function describeEvent(event: HardwareEvent): string {
@@ -1291,5 +1699,3 @@ function describeEvent(event: HardwareEvent): string {
       return 'CPU halted';
   }
 }
-
-export { regionOf };

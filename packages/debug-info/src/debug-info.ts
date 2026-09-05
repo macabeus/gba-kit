@@ -65,7 +65,12 @@ export class DebugInfo {
     const elf = ElfFile.parse(bytes);
     const symbols = SymbolIndex.fromElf(elf);
     const debugLine = elf.sectionData('.debug_line');
-    let lines = debugLine ? parseDebugLine(debugLine, elf.littleEndian) : new LineTable([]);
+    let lines = debugLine
+      ? parseDebugLine(debugLine, elf.littleEndian, {
+          lineStr: elf.sectionData('.debug_line_str'),
+          str: elf.sectionData('.debug_str'),
+        })
+      : new LineTable([]);
     // Rows for code the linker discarded (`--gc-sections`) keep their addresses at
     // 0, below every loadable section; a PC in the BIOS stub would resolve into them.
     const lowest = lowestLoadableAddress(elf);

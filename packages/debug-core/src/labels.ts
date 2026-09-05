@@ -27,6 +27,20 @@ export class LabelStore {
   readonly #byAddress = new Map<number, Label>();
   readonly #byName = new Map<string, Label>();
   #dirty = false;
+  readonly #onChange: (() => void) | undefined;
+  /** true while a file or symbol import runs, so it reports one change rather than one per line */
+  #importing = false;
+
+  /** `onChange` runs after every edit, import or load: the names shown for addresses are stale. */
+  constructor(onChange?: () => void) {
+    this.#onChange = onChange;
+  }
+
+  #changed(): void {
+    if (!this.#importing) {
+      this.#onChange?.();
+    }
+  }
 
   get size(): number {
     return this.#byAddress.size;
@@ -62,6 +76,7 @@ export class LabelStore {
     if (!entry.label && !entry.comment) {
       this.#byAddress.delete(address);
       this.#dirty = true;
+      this.#changed();
       return;
     }
     const label: Label = {
@@ -76,6 +91,7 @@ export class LabelStore {
       this.#byName.set(label.label, label);
     }
     this.#dirty = true;
+    this.#changed();
   }
 
   remove(address: number): void {
@@ -101,10 +117,16 @@ export class LabelStore {
     if (file.format !== 'gba-kit-labels') {
       throw new Error('not a gba-kit labels file');
     }
-    for (const l of file.labels) {
-      this.set(l);
+    this.#importing = true;
+    try {
+      for (const l of file.labels) {
+        this.set(l);
+      }
+    } finally {
+      this.#importing = false;
     }
     this.#dirty = false;
+    this.#changed();
   }
 
   /**
@@ -117,6 +139,16 @@ export class LabelStore {
    * Lines that fit none are skipped; the count of imported labels is returned.
    */
   importSymbols(text: string): number {
+    this.#importing = true;
+    try {
+      return this.#importLines(text);
+    } finally {
+      this.#importing = false;
+      this.#changed();
+    }
+  }
+
+  #importLines(text: string): number {
     let count = 0;
     for (const raw of text.split(/\r?\n/)) {
       const line = raw

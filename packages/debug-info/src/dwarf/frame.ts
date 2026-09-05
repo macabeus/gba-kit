@@ -188,7 +188,9 @@ export class FrameTable {
       }
     }
     out[13] = cfa;
-    const ra = out[fde.cie.returnReg] ?? (fde.cie.returnReg === 14 ? regs[14] : undefined);
+    // A leaf keeps its return address in lr (the no-rule case above); a rule that
+    // marked it undefined or unreadable means there is no caller to report.
+    const ra = out[fde.cie.returnReg];
     if (ra === undefined) {
       return null;
     }

@@ -96,9 +96,12 @@ describe('a unit_length that undercounts its own line program (agbcc / GCC 2.95)
 });
 
 describe('units we cannot decode are skipped by their own unit_length', () => {
-  it('keeps the rest of the section when a DWARF 5 unit comes first', () => {
-    // DWARF 5 rewrote the header (address_size/segment_selector_size, and typed
-    // directory/file entry formats), so its bytes are not a v2–v4 header.
+  it('keeps the rest of the section when a unit of a later version comes first', () => {
+    expect(rowsOf(concat(unmodellableUnit(6), section))).toEqual(pristine);
+  });
+
+  it('keeps the rest of the section when a DWARF 5 unit’s tables cannot be read', () => {
+    // Version 5 with garbage after it: the header length points past the unit, so it is skipped whole.
     expect(rowsOf(concat(unmodellableUnit(5), section))).toEqual(pristine);
   });
 
@@ -109,6 +112,47 @@ describe('units we cannot decode are skipped by their own unit_length', () => {
   it('steps over zero-word padding between units', () => {
     const pad = new Uint8Array(8); // two zero unit_lengths
     expect(rowsOf(concat(pad, section))).toEqual(pristine);
+  });
+});
+
+describe('a DWARF 5 line program', () => {
+  // The assembler of a modern toolchain emits a version 5 unit for a `.s` file even
+  // when the C units next to it are version 3: the debug-core fixture links both.
+  const fixture = join(here, '..', '..', '..', 'debug-core', 'test-fixtures', 'build', 'thumb-O2.elf');
+  const mixed = ElfFile.parse(new Uint8Array(readFileSync(fixture)));
+  const line = mixed.sectionData('.debug_line')!;
+  const strings = { lineStr: mixed.sectionData('.debug_line_str'), str: mixed.sectionData('.debug_str') };
+
+  it('reads the entry-format tables, with names from .debug_line_str', () => {
+    const table = parseDebugLine(line, true, strings);
+    expect(table.files).toEqual(expect.arrayContaining(['source/start.s', 'source/main.c', 'source/util.c']));
+    expect(table.sourceToPcs('source/start.s', 10)).toEqual([0x08000000]);
+    expect(table.sourceToPcs('source/start.s', 14)).toEqual([0x080000c4, 0x08000100]);
+    expect(table.pcToSource(0x080000c4)).toMatchObject({ file: 'source/start.s', line: 14 });
+    expect(table.rowAt(0x080000c4)).toMatchObject({ line: 14, isStmt: true });
+  });
+
+  it('lists the lines of a file that have code, as sourceToPcs answers them', () => {
+    const table = parseDebugLine(line, true, strings);
+    const lines = table.linesWithCode('source/main.c');
+    expect(lines.length).toBeGreaterThan(10);
+    expect(lines).toEqual([...lines].sort((a, b) => a - b));
+    const byQuery = [];
+    for (let l = 1; l <= 200; l++) {
+      if (table.sourceToPcs('source/main.c', l).length > 0) {
+        byQuery.push(l);
+      }
+    }
+    expect(lines).toEqual(byQuery);
+    expect(table.linesWithCode('./source/main.c')).toEqual(lines); // matched normalized, as sourceToPcs is
+    expect(table.linesWithCode('source/nowhere.c')).toEqual([]);
+  });
+
+  it('still decodes the rows without the string sections, with placeholder names', () => {
+    const rows = parseDebugLine(line).rows.filter((r) => r.address === 0x080000c4 && !r.endSequence);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.line).toBe(14);
+    expect(rows[0]!.file).toMatch(/^<str \d+>/);
   });
 });
 
