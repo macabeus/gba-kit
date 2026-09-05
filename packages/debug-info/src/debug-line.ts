@@ -21,6 +21,12 @@ export interface LineRow {
   line: number;
   /** True for the DW_LNE_end_sequence marker that bounds a run of addresses. */
   endSequence: boolean;
+  /**
+   * The row's `is_stmt` flag: a recommended breakpoint / step-stop location. An
+   * optimizing compiler emits non-stmt rows for the middle of an expression, so a
+   * debugger that stops at every row over-steps.
+   */
+  isStmt: boolean;
 }
 
 // Standard opcodes
@@ -129,7 +135,7 @@ function parseUnit(c: Cursor, rows: LineRow[]): number | null {
   if (version >= 4) {
     c.u8(); // maximum_operations_per_instruction (always 1 on ARM/MIPS/PPC)
   }
-  c.u8(); // default_is_stmt — parsed for layout; rows don't carry is_stmt
+  const defaultIsStmt = c.u8() !== 0;
   const lineBase = c.s8();
   const lineRange = c.u8() || 1; // guard against a divide-by-zero on a bogus header
   const opcodeBase = c.u8() || 1;
@@ -186,16 +192,18 @@ function parseUnit(c: Cursor, rows: LineRow[]): number | null {
    * whether the program is still running (see the loop condition below).
    */
   let inSequence = false;
+  let isStmt = defaultIsStmt;
   /** rows.length when execution first reached the declared unit end. */
   let rowsAtUnitEnd = -1;
 
   const emit = () =>
-    rows.push({ address: address >>> 0, fileIndex: file, file: resolveFile(file), line, endSequence: false });
+    rows.push({ address: address >>> 0, fileIndex: file, file: resolveFile(file), line, endSequence: false, isStmt });
   const endSequence = () => {
-    rows.push({ address: address >>> 0, fileIndex: file, file: resolveFile(file), line, endSequence: true });
+    rows.push({ address: address >>> 0, fileIndex: file, file: resolveFile(file), line, endSequence: true, isStmt });
     address = 0;
     file = 1;
     line = 1;
+    isStmt = defaultIsStmt;
     inSequence = false;
   };
 
@@ -280,6 +288,8 @@ function parseUnit(c: Cursor, rows: LineRow[]): number | null {
         readUleb(c, sectionEnd);
         break;
       case DW_LNS_negate_stmt:
+        isStmt = !isStmt;
+        break;
       case DW_LNS_set_basic_block:
         break;
       case DW_LNS_const_add_pc:
