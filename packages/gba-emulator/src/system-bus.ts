@@ -93,6 +93,9 @@ export class GbaSystemBus implements MemoryBus {
   /** Callback when BG2/BG3 reference point registers are written (for PPU ref point reload) */
   onBgRefPointWrite?: (bgIndex: 2 | 3, isX: boolean) => void;
 
+  /** Observer for every write into the I/O register file (an event log's MMIO rows). */
+  onMmioWrite: ((address: number, value: number, size: 1 | 2 | 4) => void) | null = null;
+
   /** Data watchpoints: fire when a write commits to [start, end). Empty until set. */
   readonly #watchpoints: Array<{
     start: number;
@@ -532,6 +535,7 @@ export class GbaSystemBus implements MemoryBus {
         this.iwram[address & 0x7fff] = value;
         break;
       case 0x04:
+        this.onMmioWrite?.(address >>> 0, value & 0xff, 1);
         this.#mmioWrite8(address, value);
         break;
       case 0x05:
@@ -590,6 +594,7 @@ export class GbaSystemBus implements MemoryBus {
         this.#write16To(this.iwram, addr & 0x7fff, value);
         break;
       case 0x04:
+        this.onMmioWrite?.(addr >>> 0, value & 0xffff, 2);
         this.#mmioWrite16(addr, value);
         break;
       case 0x05:
@@ -637,6 +642,7 @@ export class GbaSystemBus implements MemoryBus {
         this.#write32To(this.iwram, addr & 0x7fff, value);
         break;
       case 0x04:
+        this.onMmioWrite?.(addr >>> 0, value >>> 0, 4);
         this.#mmioWrite32(addr, value);
         break;
       case 0x05:

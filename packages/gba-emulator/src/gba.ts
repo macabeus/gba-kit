@@ -15,7 +15,7 @@ import { ArmCpu } from '@gba-kit/arm-emulator/arm-cpu';
 
 import { Apu } from './apu/apu.js';
 import { type BiosEnv, handleSwi } from './bios.js';
-import { DmaController } from './dma.js';
+import { DmaController, type DmaTransferInfo } from './dma.js';
 import { InputController } from './input.js';
 import { InterruptController } from './interrupts.js';
 import { Ppu } from './ppu/ppu.js';
@@ -64,6 +64,16 @@ export type StopPredicate = () => boolean;
  */
 export type RunOutcome = 'done' | 'stopped' | 'halted' | 'stalled';
 
+/** A hardware event, stamped by the reader with the cycle/frame/scanline it happened at. */
+export type HardwareEvent =
+  | { kind: 'irq-request'; flag: number }
+  | { kind: 'irq-enter'; pc: number }
+  | { kind: 'dma'; channel: number; info: DmaTransferInfo }
+  | { kind: 'mmio-write'; address: number; value: number; size: 1 | 2 | 4 }
+  | { kind: 'vblank' }
+  | { kind: 'hblank'; scanline: number }
+  | { kind: 'halt' };
+
 export class Gba {
   readonly scheduler: Scheduler;
   readonly interrupts: InterruptController;
@@ -84,6 +94,7 @@ export class Gba {
   /** Tracks whether the CPU is currently inside the BIOS IRQ handler */
   #inIrqHandler = false;
   readonly #biosEnv: BiosEnv;
+  #eventSink: ((event: HardwareEvent) => void) | null = null;
 
   constructor() {
     this.scheduler = new Scheduler();
@@ -161,6 +172,22 @@ export class Gba {
   /** Release a button */
   releaseButton(button: GbaButton): void {
     this.input.release(button);
+  }
+
+  /**
+   * Observe hardware events (interrupt requests and entries, DMA transfers, I/O
+   * writes, VBlank/HBlank, halts). One sink, or null to stop observing; the
+   * subsystems' hooks stay unset when nobody listens so the hot paths pay nothing.
+   */
+  set onHardwareEvent(sink: ((event: HardwareEvent) => void) | null) {
+    this.#eventSink = sink;
+    this.interrupts.onRequest = sink ? (flag) => sink({ kind: 'irq-request', flag }) : null;
+    this.dma.onTransfer = sink ? (channel, info) => sink({ kind: 'dma', channel, info }) : null;
+    this.bus.onMmioWrite = sink ? (address, value, size) => sink({ kind: 'mmio-write', address, value, size }) : null;
+  }
+
+  get onHardwareEvent(): ((event: HardwareEvent) => void) | null {
+    return this.#eventSink;
   }
 
   /** Hardware frames completed since reset. */
@@ -253,6 +280,7 @@ export class Gba {
       // If halted (e.g. by SWI Halt/VBlankIntrWait), stop running CPU
       // The outer loop will fast-forward to the next event
       if (this.interrupts.halted) {
+        this.#eventSink?.({ kind: 'halt' });
         break;
       }
 
@@ -325,6 +353,7 @@ export class Gba {
     this.bus.write16(0x03007ff8, currentMirror | pending);
 
     this.#inIrqHandler = true;
+    this.#eventSink?.({ kind: 'irq-enter', pc: this.armCpu.registers[15]! });
     this.armCpu.enterIrq();
   }
 
@@ -346,6 +375,7 @@ export class Gba {
   }
 
   #onHBlank(): void {
+    this.#eventSink?.({ kind: 'hblank', scanline: this.#currentScanline });
     // Set HBlank flag in DISPSTAT
     const dispstat = this.bus.mmioRegisters[4]! | (this.bus.mmioRegisters[5]! << 8);
     this.bus.mmioRegisters[4] = (dispstat | 0x02) & 0xff; // Set HBlank bit
@@ -406,6 +436,7 @@ export class Gba {
   }
 
   #onVBlankStart(): void {
+    this.#eventSink?.({ kind: 'vblank' });
     // Set VBlank flag in DISPSTAT
     this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! | 0x01;
 

@@ -6,7 +6,8 @@
 
 // Main system
 export { Gba } from './gba.js';
-export type { RunOutcome, StopPredicate } from './gba.js';
+export type { HardwareEvent, RunOutcome, StopPredicate } from './gba.js';
+export type { DmaTransferInfo } from './dma.js';
 export type { BiosEnv } from './bios.js';
 
 // Subsystems

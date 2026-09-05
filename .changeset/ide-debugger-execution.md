@@ -13,3 +13,4 @@ Debugger-grade execution and inspection in the emulator core:
 - `GbaSystemBus.peek` / `poke`: side-effect-free debugger reads (an EEPROM peek never clocks its protocol) and writes that store the byte typed (no OAM drop / VRAM duplication) without notifying data watchpoints.
 - `EmulatorBridge.loadState` releases the buttons a snapshot restores, keeping the browser's save-state UX unchanged.
 - `disassembleThumbAt` / `disassembleArmAt`: a Thumb `bl` prefix/suffix pair is one 4-byte instruction with its target, and branch / literal-pool targets can be symbolized.
+- `Gba.onHardwareEvent`: one sink for interrupt requests and entries, DMA transfers (with the instruction that started them), I/O writes, VBlank/HBlank and halts — the feed for an event log; the hot paths pay nothing when nobody listens.

@@ -61,6 +61,18 @@ export interface DmaMemoryAccess {
 const DMA_EVENT_IDS = [EventId.Dma0, EventId.Dma1, EventId.Dma2, EventId.Dma3] as const;
 const DMA_IRQ_FLAGS = [IrqFlag.Dma0, IrqFlag.Dma1, IrqFlag.Dma2, IrqFlag.Dma3] as const;
 
+/** What a DMA transfer is about to do, as reported to {@link DmaController.onTransfer}. */
+export interface DmaTransferInfo {
+  source: number;
+  destination: number;
+  /** transfer units (halfwords or words) */
+  count: number;
+  wordSize: 2 | 4;
+  timing: DmaStartTiming;
+  /** the instruction that enabled the channel */
+  origin: WriteOrigin;
+}
+
 export class DmaController {
   readonly #channels: DmaChannel[] = [];
   readonly #scheduler: Scheduler;
@@ -185,6 +197,9 @@ export class DmaController {
     });
   }
 
+  /** Observer for every transfer as it starts (an event log's DMA rows). */
+  onTransfer: ((channel: number, info: DmaTransferInfo) => void) | null = null;
+
   #executeTransfer(index: number): void {
     const memory = this.#memory;
     if (!memory) {
@@ -192,6 +207,14 @@ export class DmaController {
     }
     const ch = this.#channels[index]!;
     const step = ch.wordSize ? 4 : 2;
+    this.onTransfer?.(index, {
+      source: ch.srcAddr >>> 0,
+      destination: ch.dstAddr >>> 0,
+      count: ch.wordCount,
+      wordSize: ch.wordSize ? 4 : 2,
+      timing: ch.startTiming,
+      origin: ch.startOrigin,
+    });
 
     // Attribute this channel's writes to its start instruction (for watchpoints).
     memory.setDmaSource?.(index, ch.startOrigin);
