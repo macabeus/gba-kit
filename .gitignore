@@ -24,3 +24,7 @@ Thumbs.db
 # Cache
 .cache/
 
+
+# VS Code downloaded for the Extension Development Host tests
+apps/vscode-extension/.vscode-test/
+apps/vscode-extension/*.vsix
