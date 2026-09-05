@@ -16,9 +16,11 @@ import { SaveSlotCard } from './SaveSlotCard';
 interface SaveStateDrawerProps {
   emulator: EmulatorBridge;
   romData: ArrayBuffer | null;
+  /** a state was loaded into the machine (the Debug page resyncs its session) */
+  onStateLoaded?: () => void;
 }
 
-export function SaveStateDrawer({ emulator, romData }: SaveStateDrawerProps) {
+export function SaveStateDrawer({ emulator, romData, onStateLoaded }: SaveStateDrawerProps) {
   const [expanded, setExpanded] = useState(false);
   const [saves, setSaves] = useState<SaveStateMeta[]>([]);
   const [romHash, setRomHash] = useState<string | null>(null);
@@ -69,9 +71,10 @@ export function SaveStateDrawer({ emulator, romData }: SaveStateDrawerProps) {
       const record = await loadState(id);
       if (record) {
         emulator.loadState(record.snapshot);
+        onStateLoaded?.();
       }
     },
-    [emulator],
+    [emulator, onStateLoaded],
   );
 
   const handleDelete = useCallback(

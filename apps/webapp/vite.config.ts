@@ -19,6 +19,11 @@ export default defineConfig(({ command }) => ({
             '@gba-kit/gba-emulator': path.join(packagesDir, 'gba-emulator/src/index.ts'),
             '@gba-kit/gba-browser': path.join(packagesDir, 'gba-browser/src/index.ts'),
             '@gba-kit/gba-react': path.join(packagesDir, 'gba-react/src/index.ts'),
+            '@gba-kit/debug-info': path.join(packagesDir, 'debug-info/src/index.ts'),
+            '@gba-kit/debug-core': path.join(packagesDir, 'debug-core/src/index.ts'),
+            '@gba-kit/debug-adapter/protocol': path.join(packagesDir, 'debug-adapter/src/protocol.ts'),
+            '@gba-kit/debug-ui/styles.css': path.join(packagesDir, 'debug-ui/src/styles.css'),
+            '@gba-kit/debug-ui': path.join(packagesDir, 'debug-ui/src/index.ts'),
           },
         }
       : undefined,

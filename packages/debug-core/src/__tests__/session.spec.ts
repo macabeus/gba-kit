@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { ManualHost } from '../host.js';
+import { Machine } from '../machine.js';
 import { Session, type StopInfo } from '../session.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -457,6 +458,37 @@ describe('Session views and tools (thumb-O0)', () => {
     expect(kinds.has('vblank')).toBe(true);
     expect(kinds.has('irq-request')).toBe(true);
     expect(kinds.has('mmio-write')).toBe(true);
+  });
+
+  it('wraps an existing machine and resyncs after someone else drove it', async () => {
+    const rom = new Uint8Array(readFileSync(join(fixtures, 'build', 'thumb-O0.gba')));
+    const elf = new Uint8Array(readFileSync(join(fixtures, 'build', 'thumb-O0.elf')));
+    const outside = new Machine(rom);
+    outside.runFrame();
+    outside.runFrame();
+    const host = new ManualHost();
+    const session = await Session.create(host, { rom, elf, cwd: fixtures, exists: () => true, machine: outside });
+    expect(session.machine).toBe(outside);
+    expect(session.frame).toBe(2); // adopted as it was, not rebooted
+    session.stepFrame();
+    expect(session.frame).toBe(3);
+    expect(session.stepBack()).toBe(true);
+    // the other driver moves the machine behind the session's back
+    outside.runFrame();
+    outside.runFrame();
+    outside.runFrame();
+    const stops: StopInfo[] = [];
+    session.on({ stopped: (i) => stops.push(i) });
+    const epoch = session.epoch;
+    session.resync();
+    expect(stops[0]?.reason).toBe('restart');
+    expect(session.epoch).toBe(epoch + 1);
+    expect(session.frame).toBe(outside.frame);
+    expect(session.historyInfo().earliestFrame).toBe(outside.frame);
+    expect(session.stepBack()).toBe(false); // no history before the resync
+    session.stepFrame();
+    expect(session.frame).toBe(outside.frame);
+    expect(session.stepBack()).toBe(true);
   });
 
   it('restart boots again with breakpoints kept and history cleared', async () => {

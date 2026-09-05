@@ -1,3 +1,4 @@
+import '@gba-kit/debug-ui/styles.css';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 

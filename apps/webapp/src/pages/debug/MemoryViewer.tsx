@@ -1,11 +1,12 @@
-import type { EmulatorBridge } from '@gba-kit/gba-browser';
+import type { Session } from '@gba-kit/debug-core';
 import clsx from 'clsx';
 import { useCallback, useMemo, useState } from 'react';
 
 import { Panel } from '../../components/Panel';
 
 interface MemoryViewerProps {
-  emulator: EmulatorBridge;
+  session: Session;
+  revision: number;
 }
 
 interface MemorySection {
@@ -28,7 +29,7 @@ const MEMORY_SECTIONS: MemorySection[] = [
 const BYTES_PER_ROW = 16;
 const VISIBLE_ROWS = 8;
 
-export function MemoryViewer({ emulator }: MemoryViewerProps) {
+export function MemoryViewer({ session, revision }: MemoryViewerProps) {
   const [sectionIndex, setSectionIndex] = useState(0);
   const section = MEMORY_SECTIONS[sectionIndex]!;
 
@@ -50,7 +51,8 @@ export function MemoryViewer({ emulator }: MemoryViewerProps) {
   }, [inputAddr]);
 
   const totalBytes = BYTES_PER_ROW * VISIBLE_ROWS;
-  const data = useMemo(() => emulator.readMemory(baseAddr, totalBytes), [emulator, baseAddr, totalBytes]);
+  // `revision` is the cache key: the machine moved
+  const data = useMemo(() => session.readMemory(baseAddr, totalBytes).data, [session, baseAddr, totalBytes, revision]);
 
   const memoryHeaderRight = (
     <div className="flex items-center gap-2">

@@ -14,4 +14,5 @@ Adapter Protocol server, a browser page or a test drives the same way.
 - **Tracing and events**: an instruction trace ring and a hardware event log with frame, scanline and cycle stamps.
 - **Labels** for addresses the ELF does not name (a decomp's `gUnk_...`), persisted per project and importable from `.sym` files, usable in expressions and shown in disassembly.
 - **Input recording and replay**, save states bound to the ROM's hash, memory search with narrowing, and the emulator views: palette, tiles, tilemaps, sprites, backgrounds and decoded I/O registers.
+- **Shares a machine with a player**: a session can wrap an existing `Gba` (`SessionOptions.machine`) and `resync()` after someone else drove it (a play mode, a state loaded outside), so a page plays a ROM and debugs it in turns.
 - Tested against small C programs built for Thumb (-O0 and -O2) and ARM, whose ROM/ELF pairs are committed under `test-fixtures/` and rebuilt on CI.

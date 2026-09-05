@@ -28,12 +28,22 @@ export const REGISTER_NAMES = [
 ] as const;
 
 export class Machine {
-  readonly gba = new Gba();
+  readonly gba: Gba;
   readonly rom: Uint8Array;
 
-  constructor(rom: Uint8Array) {
+  /**
+   * A fresh machine booted with `rom`, or a wrapper around an existing `gba` that
+   * already runs it (a page that plays the ROM and debugs it in turns): the
+   * existing one is left exactly as it is.
+   */
+  constructor(rom: Uint8Array, gba?: Gba) {
     this.rom = rom;
-    this.boot();
+    if (gba) {
+      this.gba = gba;
+    } else {
+      this.gba = new Gba();
+      this.boot();
+    }
   }
 
   /** Reset to the post-BIOS boot state the real BIOS leaves behind, ROM loaded. */

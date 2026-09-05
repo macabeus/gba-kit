@@ -101,6 +101,8 @@ export interface SessionOptions extends Omit<SourceMapperOptions, 'cwd'> {
   eventCapacity?: number;
   /** milliseconds between frame events while running (default 33) */
   frameEventInterval?: number;
+  /** debug an existing machine instead of booting a new one (see {@link Machine}) */
+  machine?: Machine;
 }
 
 /** Everything a client needs to know about the machine's position in time. */
@@ -175,7 +177,7 @@ export class Session {
   constructor(host: Host, options: SessionOptions, program: Program, romHash: string) {
     this.host = host;
     this.options = options;
-    this.machine = new Machine(options.rom);
+    this.machine = options.machine ?? new Machine(options.rom);
     this.program = program;
     this.romHash = romHash;
     this.inspector = new Inspector(this.machine, this.program, this.labels);
@@ -183,7 +185,14 @@ export class Session {
     this.trace = new Ring<TraceEntry>(options.traceCapacity ?? 20_000);
     this.events = new Ring<EventEntry>(options.eventCapacity ?? 5_000);
     this.machine.onHardwareEvent = (e) => this.#onHardwareEvent(e);
-    this.#pushKeyframeIfDue();
+    this.#lastFrame = this.machine.frame;
+    this.#anchorHistory();
+  }
+
+  /** Start history here: a keyframe at the current frame whatever the keyframe grid says, so step-back works at once. */
+  #anchorHistory(): void {
+    this.history.clear();
+    this.history.push(this.machine.frame, this.machine.snapshot());
   }
 
   static async create(host: Host, options: SessionOptions): Promise<Session> {
@@ -1105,11 +1114,38 @@ export class Session {
     this.#lastFrame = this.machine.frame;
     this.#instrInFrame = 0;
     this.#pendingButtons = null;
-    this.history.clear();
-    this.#pushKeyframeIfDue();
+    this.#anchorHistory();
     this.#stopRequest = null;
     this.#pendingStop = null;
     this.#hiddenInline = AUTO_HIDDEN;
+    this.#stop({ reason: 'restart', address: this.machine.pc, description });
+  }
+
+  /**
+   * Someone else drove the machine (a play mode, a state loaded outside the
+   * session): forget the history that no longer describes it, start counting from
+   * here, and re-arm the hooks the other driver may have replaced.
+   */
+  resync(description = 'the machine changed outside the debugger'): void {
+    if (this.#state === 'running') {
+      this.pause();
+    }
+    if (this.#cancelLoop) {
+      this.#cancelLoop();
+      this.#cancelLoop = null;
+    }
+    this.#state = 'stopped';
+    this.#lastFrame = this.machine.frame;
+    this.#instrInFrame = 0;
+    this.#pendingButtons = null;
+    this.#recordingStart = null;
+    this.#anchorHistory();
+    this.#stopRequest = null;
+    this.#pendingStop = null;
+    this.#hiddenInline = AUTO_HIDDEN;
+    this.#epoch++;
+    this.machine.onHardwareEvent = (e) => this.#onHardwareEvent(e);
+    this.setTracing(this.#tracing);
     this.#stop({ reason: 'restart', address: this.machine.pc, description });
   }
 

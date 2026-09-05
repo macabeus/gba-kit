@@ -1,15 +1,16 @@
-import type { DebugInfo } from '@gba-kit/debug-info';
-import type { EmulatorBridge } from '@gba-kit/gba-browser';
+import type { Session } from '@gba-kit/debug-core';
 import clsx from 'clsx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Panel } from '../../components/Panel';
-import { loadDebugInfoFromFile, loadDebugInfoFromServer } from './elf-loader';
+import { readElfFile } from '../../session/elf-loader';
 import { type SourceRow, buildSourceRows, matchSegmentsIndex, toRenderItems } from './source-model';
 
 interface SourceViewProps {
-  emulator: EmulatorBridge;
-  pc: number;
+  session: Session;
+  revision: number;
+  /** the user picked an ELF: the session is rebuilt with it */
+  onElfLoad: (elf: Uint8Array) => void;
 }
 
 /** A picked source file, with its path split into segments for suffix matching. */
@@ -18,13 +19,13 @@ interface PickedFile {
   file: File;
 }
 
-export function SourceView({ emulator, pc }: SourceViewProps) {
-  const [di, setDi] = useState<DebugInfo | null>(null);
+export function SourceView({ session, revision, onElfLoad }: SourceViewProps) {
+  const pc = session.pc;
+  const di = session.program.debugInfo;
   const [error, setError] = useState<string | null>(null);
   const elfInputRef = useRef<HTMLInputElement>(null);
   const sourcesInputRef = useRef<HTMLInputElement>(null);
   const activeRef = useRef<HTMLDivElement>(null);
-  const autoLoadTried = useRef(false);
 
   // Picked source files + lazily-read file contents (DWARF path -> lines | null).
   const [sourceFiles, setSourceFiles] = useState<PickedFile[] | null>(null);
@@ -39,25 +40,23 @@ export function SourceView({ emulator, pc }: SourceViewProps) {
     }
   }, [di]);
 
-  const handleElfLoad = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) {
-      return;
-    }
-    setError(null);
-    try {
-      const loaded = await loadDebugInfoFromFile(file);
-      if (!loaded.hasLineInfo) {
-        setError('That ELF has no DWARF line info. Build with -g and load the sidecar ELF.');
+  const handleElfLoad = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) {
         return;
       }
-      setDi(loaded);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load ELF');
-    } finally {
-      e.target.value = '';
-    }
-  }, []);
+      setError(null);
+      try {
+        onElfLoad(await readElfFile(file));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load ELF');
+      } finally {
+        e.target.value = '';
+      }
+    },
+    [onElfLoad],
+  );
 
   const handleSourcesLoad = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const list = e.target.files;
@@ -74,39 +73,19 @@ export function SourceView({ emulator, pc }: SourceViewProps) {
     e.target.value = '';
   }, []);
 
-  // Auto-load the sidecar ELF the dev server serves (zero-click), if one is
-  // configured and nothing is loaded yet. Falls back to the manual picker.
-  useEffect(() => {
-    if (di || autoLoadTried.current || !window.__GBAKIT_CONFIG__?.hasElf) {
-      return;
-    }
-    autoLoadTried.current = true;
-    let cancelled = false;
-    void loadDebugInfoFromServer()
-      .then((loaded) => {
-        if (cancelled) {
-          return;
-        }
-        if (!loaded.hasLineInfo) {
-          setError('The server ELF has no DWARF line info. Build with -g.');
-          return;
-        }
-        setDi(loaded);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Failed to auto-load ELF');
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [di]);
-
   const fn = useMemo(() => di?.pcToFunction(pc) ?? null, [di, pc]);
   const rows: SourceRow[] = useMemo(
-    () => (di && fn ? buildSourceRows((a, c) => emulator.disassembleAt(a, c), di, fn.address, fn.end) : []),
-    [di, fn, emulator],
+    () =>
+      di && fn
+        ? buildSourceRows(
+            (a, c) => session.disassemble(a, c).map((l) => ({ address: l.address, mnemonic: l.text })),
+            di,
+            fn.address,
+            fn.end,
+          )
+        : [],
+    // `revision` re-reads the ROM's bytes after a memory write, and labels after a rename
+    [di, fn, session, revision],
   );
   const current = useMemo(() => (di ? di.lines.pcToSource(pc) : null), [di, pc]);
 
@@ -165,7 +144,7 @@ export function SourceView({ emulator, pc }: SourceViewProps) {
     />
   );
 
-  if (!di) {
+  if (!di || !di.hasLineInfo) {
     return (
       <Panel title="Source" className="h-full">
         <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-400 text-xs px-4 text-center">
@@ -174,7 +153,8 @@ export function SourceView({ emulator, pc }: SourceViewProps) {
             <code className="text-slate-300">klonoa-eod.elf</code>) to follow execution in source.
           </p>
           <p className="text-slate-500 text-[10px]">
-            The ELF carries DWARF; the shipped <code>.gba</code> doesn&apos;t. Its loadable bytes match the ROM.
+            The ELF carries DWARF; the shipped <code>.gba</code> doesn&apos;t. Its loadable bytes match the ROM. Start
+            the dev server with <code>--elf</code> to load it automatically.
           </p>
           <button
             type="button"
