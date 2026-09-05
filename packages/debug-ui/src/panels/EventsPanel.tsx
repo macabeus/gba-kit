@@ -1,0 +1,93 @@
+import type { EventEntry } from '@gba-kit/debug-core';
+import { useState } from 'react';
+
+import { Button, Empty, Hex } from '../components.js';
+import { useAtStop } from '../hooks.js';
+import type { Transport } from '../transport.js';
+
+const KINDS = ['vblank', 'hblank', 'irq-request', 'irq-enter', 'dma', 'mmio-write', 'halt'] as const;
+
+export function EventsPanel({ transport }: { transport: Transport }) {
+  const [hidden, setHidden] = useState<Set<string>>(() => new Set(['hblank']));
+  const { data, error, refresh } = useAtStop(transport, (t) => t.request('gba-kit/events', { count: 2000 }));
+  const toggle = (kind: string): void =>
+    setHidden((h) => {
+      const next = new Set(h);
+      if (next.has(kind)) {
+        next.delete(kind);
+      } else {
+        next.add(kind);
+      }
+      return next;
+    });
+  return (
+    <div className="gk-col">
+      <div className="gk-row" style={{ padding: '6px 10px 0' }}>
+        {KINDS.map((k) => (
+          <label key={k} className="gk-check gk-small">
+            <input type="checkbox" checked={!hidden.has(k)} onChange={() => toggle(k)} /> {k}
+          </label>
+        ))}
+        <Button onClick={refresh}>Refresh</Button>
+      </div>
+      {error && <Empty>{error}</Empty>}
+      {data && <EventsView entries={data.entries.filter((e) => !hidden.has(e.event.kind))} />}
+      {!data && !error && <Empty>Stop the machine to see the event log.</Empty>}
+    </div>
+  );
+}
+
+/** A one-line account of a hardware event's fields, the kind aside. */
+export function describeEvent(event: EventEntry['event']): string {
+  const { kind: _kind, ...rest } = event as { kind: string } & Record<string, unknown>;
+  return Object.entries(rest)
+    .map(
+      ([k, v]) =>
+        `${k}=${typeof v === 'number' ? (v > 255 ? '0x' + v.toString(16) : String(v)) : typeof v === 'object' && v ? JSON.stringify(v) : String(v)}`,
+    )
+    .join(' ');
+}
+
+export function EventsView({ entries }: { entries: EventEntry[] }) {
+  if (entries.length === 0) {
+    return <Empty>No events (of the kinds shown) yet.</Empty>;
+  }
+  return (
+    <table className="gk-table">
+      <thead>
+        <tr>
+          <th className="gk-right">frame</th>
+          <th className="gk-right">line</th>
+          <th className="gk-right">cycle</th>
+          <th>pc</th>
+          <th>event</th>
+          <th>details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {entries.map((e, i) => (
+          <tr key={i}>
+            <td className="gk-right gk-muted">{e.frame}</td>
+            <td className="gk-right gk-muted">{e.scanline}</td>
+            <td className="gk-right gk-muted">{e.cycle}</td>
+            <td>
+              <Hex value={e.pc} />
+            </td>
+            <td
+              className={
+                e.event.kind === 'irq-enter' || e.event.kind === 'irq-request'
+                  ? 'gk-warn'
+                  : e.event.kind === 'dma'
+                    ? 'gk-accent'
+                    : ''
+              }
+            >
+              {e.event.kind}
+            </td>
+            <td className="gk-muted">{describeEvent(e.event)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
