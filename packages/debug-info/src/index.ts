@@ -24,6 +24,22 @@ export {
 } from './symbols.js';
 export { LineTable, normalizePath, parseDebugLine, type LineRow, type LineRowStart } from './debug-line.js';
 export { parseDebugMacinfo, type MacroDefinition } from './debug-macro.js';
+export { DwarfScopes, type Memory, type PhysicalFrame, type VirtualFrame } from './scopes.js';
+export { DW_AT, DW_ATE, DW_FORM, DW_OP, DW_TAG, formClass, type FormClass } from './dwarf/constants.js';
+export { EntryIndex, attrFlag, attrNum, attrStr, type DwarfSections, type UnitInfo } from './dwarf/entries.js';
+export { entryRanges, locationAt, describeExpr, rangesContain, regName, type LocationAttr, type LocationEntry, type Range } from './dwarf/lists.js';
+export { evaluate, type EvalContext, type Location } from './dwarf/expr.js';
+export { FrameTable, type UnwindResult } from './dwarf/frame.js';
+export {
+  TypeResolver,
+  formatValue,
+  toInt,
+  type MemberDesc,
+  type TypeDesc,
+  type TypeKind,
+  type ValueReader,
+  type VarNode,
+} from './dwarf/values.js';
 export {
   TypeIndex,
   readDwarfEntries,

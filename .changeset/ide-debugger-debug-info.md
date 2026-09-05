@@ -10,3 +10,4 @@ The queries an IDE debugger needs on top of the parser:
 - `checkRomIdentity(rom)` compares the ELF's cartridge-window sections with a ROM and names the first mismatch; `isLinked` distinguishes an image from an object file (`ElfFile.type`).
 - Line rows for code the linker discarded (addresses below every loadable section) are dropped, so a PC in the BIOS stub no longer resolves into them.
 - `readDwarfEntries(elf)` exports the DIE trees with attribute forms and unit versions, for scope- and location-level readers.
+- `DebugInfo.scopes` (`DwarfScopes`): the function and inlined calls containing a PC, the variables visible there and where they live at that PC (location lists for DWARF 2–5, a DWARF expression evaluator, frame bases via `.debug_frame` CFA), typed value trees for any DWARF type (structs, both bitfield dialects, arrays, enums, pointers), call-frame unwinding, and "optimized out" answers that say where the compiler did keep the value.

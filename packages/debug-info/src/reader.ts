@@ -52,6 +52,32 @@ export class Cursor {
     return v >>> 0;
   }
 
+  s16(): number {
+    const v = this.view.getInt16(this.offset, this.littleEndian);
+    this.offset += 2;
+    return v;
+  }
+
+  s32(): number {
+    const v = this.view.getInt32(this.offset, this.littleEndian);
+    this.offset += 4;
+    return v;
+  }
+
+  /** A 64-bit unsigned value as a JS number (exact up to 2^53, which every DWARF constant here is). */
+  u64(): number {
+    const lo = this.u32();
+    const hi = this.u32();
+    return this.littleEndian ? hi * 0x100000000 + lo : lo * 0x100000000 + hi;
+  }
+
+  /** The next `n` bytes as a view, advancing past them. */
+  take(n: number): Uint8Array {
+    const out = this.bytes.subarray(this.offset, this.offset + n);
+    this.offset += n;
+    return out;
+  }
+
   /** Absolute reads that don't move `offset` (for fixed-layout tables). */
   u8At(offset: number): number {
     return this.view.getUint8(offset);

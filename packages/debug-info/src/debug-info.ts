@@ -6,7 +6,8 @@ import { LineTable, parseDebugLine } from './debug-line.js';
 import { type MacroDefinition, parseDebugMacinfo } from './debug-macro.js';
 import { ET_EXEC, ElfFile } from './elf.js';
 import { type FunctionEntry, type IsaMode, SymbolIndex } from './symbols.js';
-import { type MemberLocation, type StructType, TypeIndex, parsePath } from './types.js';
+import { DwarfScopes } from './scopes.js';
+import { type MemberLocation, type StructType, TypeIndex, parsePath, readDwarfEntries } from './types.js';
 
 export interface SourceLocation {
   file: string;
@@ -48,6 +49,7 @@ export class DebugInfo {
   readonly types: TypeIndex;
   /** Every `#define` the ELF recorded (`-g3`), in stream order; empty when it carried none. */
   readonly macros: MacroDefinition[];
+  #scopes: DwarfScopes | null = null;
 
   /** Use {@link DebugInfo.fromElf}; this constructor is an internal detail. */
   constructor(elf: ElfFile, symbols: SymbolIndex, lines: LineTable, types: TypeIndex, macros: MacroDefinition[] = []) {
@@ -73,6 +75,17 @@ export class DebugInfo {
     const types = TypeIndex.fromElf(elf);
     const macinfo = elf.sectionData('.debug_macinfo');
     return new DebugInfo(elf, symbols, lines, types, macinfo ? parseDebugMacinfo(macinfo) : []);
+  }
+
+  /**
+   * Scope-level DWARF: functions, inlined calls, locals and their locations, call
+   * frames, typed values. Built on first use (it walks every DIE once).
+   */
+  get scopes(): DwarfScopes {
+    if (!this.#scopes) {
+      this.#scopes = new DwarfScopes(readDwarfEntries(this.elf), this.elf, this.lines.rows);
+    }
+    return this.#scopes;
   }
 
   /** True if the ELF actually carried a DWARF line table. */
