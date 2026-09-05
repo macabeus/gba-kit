@@ -3,6 +3,7 @@ import clsx from 'clsx';
 import { useCallback, useMemo, useState } from 'react';
 
 import { Panel } from '../../components/Panel';
+import { memoryRows } from './memory-model';
 
 interface MemoryViewerProps {
   session: Session;
@@ -52,7 +53,8 @@ export function MemoryViewer({ session, revision }: MemoryViewerProps) {
 
   const totalBytes = BYTES_PER_ROW * VISIBLE_ROWS;
   // `revision` is the cache key: the machine moved
-  const data = useMemo(() => session.readMemory(baseAddr, totalBytes).data, [session, baseAddr, totalBytes, revision]);
+  const read = useMemo(() => session.readMemory(baseAddr, totalBytes), [session, baseAddr, totalBytes, revision]);
+  const rows = useMemo(() => memoryRows(read, baseAddr, BYTES_PER_ROW, VISIBLE_ROWS), [read, baseAddr]);
 
   const memoryHeaderRight = (
     <div className="flex items-center gap-2">
@@ -98,31 +100,29 @@ export function MemoryViewer({ session, revision }: MemoryViewerProps) {
       headerExtra={memorySectionTabs}
       contentClassName="font-mono text-[13px] leading-[1.4] text-xs px-3 py-1"
     >
-      {Array.from({ length: VISIBLE_ROWS }, (_, row) => {
-        const rowAddr = baseAddr + row * BYTES_PER_ROW;
-        const rowData = data.subarray(row * BYTES_PER_ROW, (row + 1) * BYTES_PER_ROW);
+      {read.readable === 0 && (
+        <div className="text-slate-600 py-0.5">
+          nothing is mapped here (SRAM without a backup chip, or past the end of the ROM)
+        </div>
+      )}
+      {rows.map((row) => (
+        <div key={row.address} className="flex items-center py-0.5 hover:bg-slate-700/30 rounded">
+          {/* Address */}
+          <span className="text-sky-400/70 w-24 shrink-0">{row.address.toString(16).padStart(8, '0')}</span>
 
-        return (
-          <div key={rowAddr} className="flex items-center py-0.5 hover:bg-slate-700/30 rounded">
-            {/* Address */}
-            <span className="text-sky-400/70 w-24 shrink-0">{rowAddr.toString(16).padStart(8, '0')}</span>
-
-            {/* Hex bytes */}
-            <div className="flex gap-1 shrink-0 mr-4">
-              {Array.from(rowData, (byte, i) => (
-                <span key={i} className="text-slate-300 w-5 text-center">
-                  {byte.toString(16).padStart(2, '0')}
-                </span>
-              ))}
-            </div>
-
-            {/* ASCII */}
-            <span className="text-slate-500">
-              {Array.from(rowData, (byte) => (byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.')).join('')}
-            </span>
+          {/* Hex bytes: `--` where nothing is mapped */}
+          <div className="flex gap-1 shrink-0 mr-4">
+            {row.cells.map((cell, i) => (
+              <span key={i} className={clsx('w-5 text-center', cell.mapped ? 'text-slate-300' : 'text-slate-600')}>
+                {cell.hex}
+              </span>
+            ))}
           </div>
-        );
-      })}
+
+          {/* ASCII */}
+          <span className="text-slate-500 whitespace-pre">{row.cells.map((cell) => cell.ascii).join('')}</span>
+        </div>
+      ))}
     </Panel>
   );
 }

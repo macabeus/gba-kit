@@ -63,6 +63,8 @@ export function App() {
       emulator.loadRom(data);
       setRomLoaded(true);
       setRomData(data);
+      // an ELF describes one ROM: the sidecar is fetched again, a picked one must be picked again
+      setElfData(null);
     },
     [emulator],
   );
@@ -115,7 +117,6 @@ export function App() {
 
   const handleRun = useCallback(() => emulator.run(), [emulator]);
   const handlePause = useCallback(() => emulator.pause(), [emulator]);
-  const handleStateLoaded = useCallback(() => debug.session?.resync('a save state was loaded'), [debug.session]);
 
   const handleStartRecording = useCallback(() => {
     recorder.start();
@@ -165,7 +166,7 @@ export function App() {
 
       {content}
 
-      {romLoaded && <SaveStateDrawer emulator={emulator} romData={romData} onStateLoaded={handleStateLoaded} />}
+      {romLoaded && <SaveStateDrawer emulator={emulator} romData={romData} onStateLoaded={debug.onStateLoaded} />}
     </div>
   );
 }

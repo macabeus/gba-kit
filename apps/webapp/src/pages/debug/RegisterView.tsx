@@ -10,10 +10,11 @@ interface RegisterViewProps {
 
 /** The registers as the session's inspector names them: `lr`/`pc` symbolized, `cpsr` decoded. */
 export function RegisterView({ session, revision }: RegisterViewProps) {
-  const nodes = useMemo(() => {
-    void revision;
-    return session.state === 'stopped' ? (session.scopes(0).find((s) => s.kind === 'registers')?.nodes ?? []) : [];
-  }, [session, revision]);
+  // `revision` is the cache key: the machine moved, or a label changed
+  const nodes = useMemo(
+    () => (session.state === 'stopped' ? (session.scopes(0).find((s) => s.kind === 'registers')?.nodes ?? []) : []),
+    [session, revision],
+  );
 
   return (
     <Panel

@@ -14,10 +14,12 @@ import { DisassemblyView } from './DisassemblyView';
 import { MemoryViewer } from './MemoryViewer';
 import { RegisterView } from './RegisterView';
 import { SourceView } from './SourceView';
+import { instructionAddresses, toggleInstructionBreakpoint } from './instruction-breakpoints';
+import { programStatus } from './program-status';
 
 interface DebugViewProps {
   session: Session | null;
-  /** bumps on every stop, resume and machine change */
+  /** bumps on every stop, resume, machine change and label edit */
   revision: number;
   error: string | null;
   onElfLoad: (elf: Uint8Array) => void;
@@ -35,19 +37,22 @@ function openText(content: string, language: string): void {
 
 export function DebugView({ session, revision, error, onElfLoad }: DebugViewProps) {
   const [centerPanel, setCenterPanel] = useState<CenterPanel>('disassembly');
-  const [breakpoints, setBreakpoints] = useState<number[]>([]);
   const transport = useMemo(() => (session ? createSessionTransport(session, { openText }) : null), [session]);
 
-  // instruction breakpoints live in the session; this list is what the views draw
-  useEffect(() => {
-    session?.setInstructionBreakpoints(breakpoints.map((address) => ({ address })));
-  }, [session, breakpoints]);
-
-  const toggleBreakpoint = useCallback((address: number) => {
-    setBreakpoints((list) =>
-      list.includes(address) ? list.filter((a) => a !== address) : [...list, address].sort((a, b) => a - b),
-    );
-  }, []);
+  // Instruction breakpoints live in the session, which outlives this view: the list
+  // is read from it, never kept here, so a remount shows what was set before.
+  // `breakpointEdits` counts the toggles made here and is the list's cache key.
+  const [breakpointEdits, setBreakpointEdits] = useState(0);
+  const breakpoints = useMemo(() => (session ? instructionAddresses(session) : []), [session, breakpointEdits]);
+  const toggleBreakpoint = useCallback(
+    (address: number) => {
+      if (session) {
+        toggleInstructionBreakpoint(session, address);
+        setBreakpointEdits((n) => n + 1);
+      }
+    },
+    [session],
+  );
 
   const stopped = session?.state === 'stopped';
   const running = session?.state === 'running';
@@ -97,6 +102,7 @@ export function DebugView({ session, revision, error, onElfLoad }: DebugViewProp
 
   const pc = session.pc;
   const position = session.position;
+  const status = programStatus(session.program);
 
   return (
     <div className="flex flex-col gap-3 h-[calc(100vh-140px)] gk-root">
@@ -134,7 +140,12 @@ export function DebugView({ session, revision, error, onElfLoad }: DebugViewProp
         <ToolbarButton onClick={() => session.rewindFrames(60)} label="Rewind 1s" color="blue" disabled={!stopped} />
         <div className="ml-4 text-slate-500 text-xs mono">
           PC: 0x{pc.toString(16).padStart(8, '0')} · frame {position.frame} · line {position.scanline}
-          {session.program.hasSymbols ? '' : ' · no ELF'}
+          {status && (
+            <span className={clsx(status.detail && 'text-amber-400')} title={status.detail}>
+              {' · '}
+              {status.text}
+            </span>
+          )}
         </div>
       </div>
 
@@ -183,7 +194,18 @@ export function DebugView({ session, revision, error, onElfLoad }: DebugViewProp
         <div className="min-h-0 bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
           <DebugPanels
             transport={transport}
-            panels={['io', 'palette', 'tiles', 'tilemap', 'sprites', 'trace', 'events', 'search', 'labels']}
+            panels={[
+              'io',
+              'palette',
+              'tiles',
+              'tilemap',
+              'sprites',
+              'trace',
+              'events',
+              'search',
+              'labels',
+              'recording',
+            ]}
           />
         </div>
       </div>
