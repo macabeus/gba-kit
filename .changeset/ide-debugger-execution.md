@@ -12,3 +12,4 @@ Debugger-grade execution and inspection in the emulator core:
 - The HLE BIOS no longer keeps module-global state: `handleSwi` takes a per-machine `BiosEnv`, so two `Gba` instances in one process cannot cross-talk.
 - `GbaSystemBus.peek` / `poke`: side-effect-free debugger reads (an EEPROM peek never clocks its protocol) and writes that store the byte typed (no OAM drop / VRAM duplication) without notifying data watchpoints.
 - `EmulatorBridge.loadState` releases the buttons a snapshot restores, keeping the browser's save-state UX unchanged.
+- `disassembleThumbAt` / `disassembleArmAt`: a Thumb `bl` prefix/suffix pair is one 4-byte instruction with its target, and branch / literal-pool targets can be symbolized.
