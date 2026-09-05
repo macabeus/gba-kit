@@ -430,6 +430,14 @@ export class ArmCpu {
 
   // ─── Public API ──────────────────────────────────────────────────
 
+  /**
+   * Whether `step()` refuses to run because the CPU itself has halted (reached the
+   * sentinel, or SWI Halt) — as opposed to a debug hook having refused one instruction.
+   */
+  get halted(): boolean {
+    return this.#halted || this.#haltedBySWI;
+  }
+
   /** Attach or detach debug hooks */
   setDebugHooks(hooks: DebugHooks | undefined): void {
     this.#hooks = hooks;

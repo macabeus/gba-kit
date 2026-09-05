@@ -42,6 +42,15 @@ export class Scheduler {
     event.active = true;
   }
 
+  /**
+   * Replace the callback of an already-scheduled event WITHOUT moving it. This is
+   * how a restored snapshot gets its callbacks back: `fireCycle` is state and must
+   * survive the round trip exactly, or a restored machine drifts from the original.
+   */
+  reattach(id: EventId, callback: () => void): void {
+    this.#events[id]!.callback = callback;
+  }
+
   /** Cancel a scheduled event. */
   cancel(id: EventId): void {
     this.#events[id]!.active = false;

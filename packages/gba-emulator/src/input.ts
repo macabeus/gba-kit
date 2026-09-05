@@ -83,9 +83,13 @@ export class InputController {
     return { buttons: this.#buttons, keycnt: this.#keycnt };
   }
 
-  /** Restore from a snapshot. */
+  /**
+   * Restore from a snapshot, held buttons included: a replay that resumes from a
+   * snapshot must see the same KEYINPUT the original run saw. (A player-facing
+   * save-state UI can release everything itself if that is what it wants.)
+   */
   deserialize(snap: InputSnapshot): void {
-    this.#buttons = 0;
+    this.#buttons = snap.buttons & 0x3ff;
     this.#keycnt = snap.keycnt;
   }
 

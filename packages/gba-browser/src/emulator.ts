@@ -395,10 +395,11 @@ export class EmulatorBridge {
   loadState(snapshot: GbaSnapshot): void {
     cancelAnimationFrame(this.#animFrameId);
 
-    // Restore GBA subsystems
+    // Restore GBA subsystems (CPU included)
     this.#gba.deserialize(snapshot);
-    // Restore CPU
-    this.#gba.armCpu.deserialize(snapshot.cpu);
+    // The snapshot restores the buttons that were held when it was taken; the
+    // player's keys are not held now, so release them.
+    this.#gba.input.setButtons(0);
 
     // Re-render frame from restored framebuffer
     this.#renderFrame();

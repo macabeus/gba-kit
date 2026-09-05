@@ -268,6 +268,16 @@ export class DmaController {
     }
   }
 
+  /** After a snapshot restore: a transfer that was scheduled keeps its cycle and gets its callback back. */
+  reattachEvents(): void {
+    for (let i = 0; i < 4; i++) {
+      const id = DMA_EVENT_IDS[i]!;
+      if (this.#scheduler.isScheduled(id)) {
+        this.#scheduler.reattach(id, () => this.#executeTransfer(i));
+      }
+    }
+  }
+
   /** Serialize to a plain snapshot. */
   serialize(): DmaSnapshot {
     return {

@@ -253,6 +253,111 @@ export class GbaSystemBus implements MemoryBus {
    *
    * Side-effect free — unlike a read, which can advance the EEPROM serial state.
    */
+  /**
+   * Debugger read: `length` bytes starting at `address`, taken from the backing
+   * arrays without any of the bus's side effects (an EEPROM read through the bus
+   * clocks its serial protocol; this never does). `readable` counts the leading
+   * bytes that map to something; the rest of `data` is zero and must not be shown
+   * as memory contents. Mirrors resolve to their canonical bytes. MMIO is decoded
+   * the way a CPU read would see it, which for the registers modelled here is
+   * side-effect free.
+   */
+  peek(address: number, length: number): { data: Uint8Array; readable: number } {
+    const data = new Uint8Array(length);
+    let readable = 0;
+    for (let i = 0; i < length; i++) {
+      const value = this.#peekByte((address + i) >>> 0);
+      if (value === null) {
+        break;
+      }
+      data[i] = value;
+      readable++;
+    }
+    return { data, readable };
+  }
+
+  #peekByte(addr: number): number | null {
+    const offset = addr & 0x00ffffff;
+    switch ((addr >>> 24) & 0xff) {
+      case 0x00:
+        return offset < 0x4000 ? this.#bios[offset]! : null;
+      case 0x02:
+        return this.ewram[addr & 0x3ffff]!;
+      case 0x03:
+        return this.iwram[addr & 0x7fff]!;
+      case 0x04:
+        return offset < 0x400 ? this.#mmioRead8(addr) : null;
+      case 0x05:
+        return this.palette[addr & 0x3ff]!;
+      case 0x06:
+        return this.vram[this.#mirrorVram(addr)]!;
+      case 0x07:
+        return this.oam[addr & 0x3ff]!;
+      case 0x08:
+      case 0x09:
+      case 0x0a:
+      case 0x0b:
+      case 0x0c: {
+        const romOffset = addr & 0x01ffffff;
+        return romOffset < this.#rom.length ? this.#rom[romOffset]! : null;
+      }
+      case 0x0e:
+      case 0x0f:
+        return this.#hasSram ? this.sram[addr & 0xffff]! : null;
+      default:
+        return null; // EEPROM (a protocol, not bytes), and everything unmapped
+    }
+  }
+
+  /**
+   * Debugger write: store `bytes` at `address` in the backing arrays, bypassing the
+   * hardware's write rules (a byte write to OAM is dropped by the bus, to VRAM it is
+   * duplicated; a hex editor means the byte it typed) and without notifying data
+   * watchpoints. MMIO goes through the bus so the register's side effects apply.
+   * BIOS, ROM and EEPROM are refused. Returns how many leading bytes were written.
+   */
+  poke(address: number, bytes: Uint8Array): number {
+    let written = 0;
+    for (let i = 0; i < bytes.length; i++) {
+      const addr = (address + i) >>> 0;
+      const value = bytes[i]!;
+      switch ((addr >>> 24) & 0xff) {
+        case 0x02:
+          this.ewram[addr & 0x3ffff] = value;
+          break;
+        case 0x03:
+          this.iwram[addr & 0x7fff] = value;
+          break;
+        case 0x04:
+          if ((addr & 0x00ffffff) >= 0x400) {
+            return written;
+          }
+          this.#mmioWrite8(addr, value);
+          break;
+        case 0x05:
+          this.palette[addr & 0x3ff] = value;
+          break;
+        case 0x06:
+          this.vram[this.#mirrorVram(addr)] = value;
+          break;
+        case 0x07:
+          this.oam[addr & 0x3ff] = value;
+          break;
+        case 0x0e:
+        case 0x0f:
+          if (!this.#hasSram) {
+            return written;
+          }
+          this.sram[addr & 0xffff] = value;
+          break;
+        default:
+          return written;
+      }
+      written++;
+    }
+    return written;
+  }
+
   describeAddress(address: number): { region: string } | null {
     const addr = address >>> 0;
     const offset = addr & 0x00ffffff;

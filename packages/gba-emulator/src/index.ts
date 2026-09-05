@@ -6,6 +6,8 @@
 
 // Main system
 export { Gba } from './gba.js';
+export type { RunOutcome, StopPredicate } from './gba.js';
+export type { BiosEnv } from './bios.js';
 
 // Subsystems
 export { GbaSystemBus } from './system-bus.js';
