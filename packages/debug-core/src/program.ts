@@ -152,6 +152,19 @@ export class Program {
   }
 
   /** Addresses where code for a local source line starts, sliding to the next line with code. */
+  /** Whether a breakpoint on `localPath:line` arms code on that very line (no sliding). */
+  hasCodeAt(localPath: string, line: number): boolean {
+    if (!this.debugInfo || !this.sources) {
+      return false;
+    }
+    const dwarfFile = this.sources.toDwarf(localPath);
+    return (
+      !!dwarfFile &&
+      (this.debugInfo.lines.sourceToPcs(dwarfFile, line).length > 0 ||
+        this.debugInfo.scopes.inlineCallSitesAt(dwarfFile, line).length > 0)
+    );
+  }
+
   lineToAddresses(localPath: string, line: number): { line: number; addresses: number[] } | null {
     if (!this.debugInfo || !this.sources) {
       return null;

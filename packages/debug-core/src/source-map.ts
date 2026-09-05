@@ -31,7 +31,8 @@ export class SourceMapper {
   readonly #exists: (p: string) => boolean;
   readonly #fold: (p: string) => string;
   readonly #toLocalCache = new Map<string, string | null>();
-  readonly #localToDwarf = new Map<string, string>();
+  /** folded local path → the DWARF spelling and the local path as the file system spells it */
+  readonly #localToDwarf = new Map<string, { dwarf: string; local: string }>();
 
   constructor(dwarfFiles: Iterable<string>, options: SourceMapperOptions) {
     this.#cwd = options.cwd.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -46,7 +47,7 @@ export class SourceMapper {
     for (const file of dwarfFiles) {
       const local = this.toLocal(file);
       if (local) {
-        this.#localToDwarf.set(this.#fold(local), normalizePath(file));
+        this.#localToDwarf.set(this.#fold(local), { dwarf: normalizePath(file), local });
       }
     }
   }
@@ -65,12 +66,12 @@ export class SourceMapper {
 
   /** Local path → DWARF path (as the line table spells it), or null when the ELF never compiled that file. */
   toDwarf(localPath: string): string | null {
-    return this.#localToDwarf.get(this.#fold(normalizePath(localPath))) ?? null;
+    return this.#localToDwarf.get(this.#fold(normalizePath(localPath)))?.dwarf ?? null;
   }
 
   /** Every local file the ELF's sources were mapped to. */
   get localFiles(): string[] {
-    return [...this.#localToDwarf.keys()];
+    return [...this.#localToDwarf.values()].map((v) => v.local);
   }
 
   #resolve(p: string): string | null {
