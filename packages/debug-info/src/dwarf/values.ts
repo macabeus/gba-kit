@@ -9,7 +9,7 @@
  */
 import type { DwarfEntry } from '../types.js';
 import { DW_AT, DW_ATE, DW_OP, DW_TAG } from './constants.js';
-import { attrNum, EntryIndex } from './entries.js';
+import { EntryIndex, attrNum } from './entries.js';
 
 export type TypeKind =
   | 'int'
@@ -244,7 +244,13 @@ function hex(v: number, size: number): string {
 }
 
 /** Build the tree node for a value of `type` held in `bytes` (or at `address` for lazy reads). */
-export function formatValue(name: string, type: TypeDesc, bytes: Uint8Array | null, address: number | undefined, reader: ValueReader): VarNode {
+export function formatValue(
+  name: string,
+  type: TypeDesc,
+  bytes: Uint8Array | null,
+  address: number | undefined,
+  reader: ValueReader,
+): VarNode {
   const node: VarNode = { name, value: '', type: type.name, address };
   if (!bytes) {
     node.value = address !== undefined ? `<unreadable at ${hex(address, 4)}>` : '<optimized out>';
@@ -278,7 +284,8 @@ export function formatValue(name: string, type: TypeDesc, bytes: Uint8Array | nu
     }
     case 'float': {
       const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-      node.value = bytes.length === 8 ? String(dv.getFloat64(0, true)) : bytes.length === 4 ? String(dv.getFloat32(0, true)) : '?';
+      node.value =
+        bytes.length === 8 ? String(dv.getFloat64(0, true)) : bytes.length === 4 ? String(dv.getFloat32(0, true)) : '?';
       break;
     }
     case 'enum': {
@@ -383,9 +390,20 @@ function memberNode(m: MemberDesc, bytes: Uint8Array, base: number | undefined, 
     const value = Math.floor(raw / 2 ** (m.bitOffset % 8)) % 2 ** m.bitSize;
     const signed = m.type.kind === 'int' || m.type.kind === 'char';
     const v = signed && value >= 2 ** (m.bitSize - 1) ? value - 2 ** m.bitSize : value;
-    return { name: m.name, value: `${v} (${m.bitSize} bits)`, type: m.type.name, address: base === undefined ? undefined : base + firstByte };
+    return {
+      name: m.name,
+      value: `${v} (${m.bitSize} bits)`,
+      type: m.type.name,
+      address: base === undefined ? undefined : base + firstByte,
+    };
   }
   const size = m.type.size || (m.type.kind === 'pointer' ? 4 : 0);
   const slice = bytes.subarray(m.offset, m.offset + size);
-  return formatValue(m.name, m.type, slice.length === size ? slice : null, base === undefined ? undefined : base + m.offset, reader);
+  return formatValue(
+    m.name,
+    m.type,
+    slice.length === size ? slice : null,
+    base === undefined ? undefined : base + m.offset,
+    reader,
+  );
 }

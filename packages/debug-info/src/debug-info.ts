@@ -5,8 +5,8 @@
 import { LineTable, parseDebugLine } from './debug-line.js';
 import { type MacroDefinition, parseDebugMacinfo } from './debug-macro.js';
 import { ET_EXEC, ElfFile } from './elf.js';
-import { type FunctionEntry, type IsaMode, SymbolIndex } from './symbols.js';
 import { DwarfScopes } from './scopes.js';
+import { type FunctionEntry, type IsaMode, SymbolIndex } from './symbols.js';
 import { type MemberLocation, type StructType, TypeIndex, parsePath, readDwarfEntries } from './types.js';
 
 export interface SourceLocation {
@@ -162,7 +162,11 @@ export class DebugInfo {
       }
       const offset = s.addr & 0x01ffffff;
       if (offset + s.size > rom.length) {
-        return { ok: false, reason: `section ${s.name} at 0x${s.addr.toString(16)} extends past the end of the ROM`, section: s.name };
+        return {
+          ok: false,
+          reason: `section ${s.name} at 0x${s.addr.toString(16)} extends past the end of the ROM`,
+          section: s.name,
+        };
       }
       for (let i = 0; i < s.size; i++) {
         if (data[i] !== rom[offset + i]) {

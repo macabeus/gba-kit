@@ -115,7 +115,14 @@ describe('Gba.onHardwareEvent', () => {
     // mov r0,#0x04000000 ; mov r1,#8 ; strh r1,[r0,#4] (DISPSTAT: VBlank IRQ enable) ; b .
     const gba = boot([0xe3a00301, 0xe3a01008, 0xe1c010b4, 0xeafffffe]);
     const events: string[] = [];
-    gba.onHardwareEvent = (e) => events.push(e.kind === 'mmio-write' ? `mmio:${e.address.toString(16)}=${e.value}` : e.kind === 'irq-request' ? `irq:${e.flag}` : e.kind);
+    gba.onHardwareEvent = (e) =>
+      events.push(
+        e.kind === 'mmio-write'
+          ? `mmio:${e.address.toString(16)}=${e.value}`
+          : e.kind === 'irq-request'
+            ? `irq:${e.flag}`
+            : e.kind,
+      );
     gba.runFrame();
     expect(events[0]).toBe('mmio:4000004=8');
     expect(events.filter((e) => e === 'hblank').length).toBe(228);

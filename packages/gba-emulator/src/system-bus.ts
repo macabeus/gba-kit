@@ -40,6 +40,20 @@ export interface WatchpointWrite {
   dmaOrigin: WriteOrigin | null;
 }
 
+/** A read reported to a data watchpoint. */
+export interface WatchpointRead {
+  /** The watched byte that was read (within the access, clamped to the watch range). */
+  address: number;
+  /** Value the read returned, masked to `size` bytes. */
+  value: number;
+  /** Access size in bytes (1, 2 or 4). */
+  size: number;
+  /** Active DMA channel (0-3) if a DMA performed the read, else -1 (a CPU/BIOS load). */
+  dmaChannel: number;
+  /** The DMA's start instruction when `dmaChannel >= 0`, else null. */
+  dmaOrigin: WriteOrigin | null;
+}
+
 export class GbaSystemBus implements MemoryBus {
   /** BIOS ROM (16 KB) — set via loadBios() */
   #bios = new Uint8Array(0x4000);
@@ -103,7 +117,14 @@ export class GbaSystemBus implements MemoryBus {
     onWrite: (info: WatchpointWrite) => void;
   }> = [];
 
-  /** DMA channel (0-3) currently transferring, or -1 for CPU writes; attributes hits. */
+  /** Read watchpoints: fire when a load returns from [start, end). Empty until set. */
+  readonly #readWatchpoints: Array<{
+    start: number;
+    end: number;
+    onRead: (info: WatchpointRead) => void;
+  }> = [];
+
+  /** DMA channel (0-3) currently transferring, or -1 for CPU accesses; attributes hits. */
   #dmaChannel = -1;
   #dmaOrigin: WriteOrigin | null = null;
 
@@ -134,14 +155,55 @@ export class GbaSystemBus implements MemoryBus {
     };
   }
 
-  /** Remove every registered watchpoint. */
+  /** Remove every registered write watchpoint. */
   clearWriteWatchpoints(): void {
     this.#watchpoints.length = 0;
   }
 
-  /** Whether any data watchpoint is registered (hot-path gate). */
+  /**
+   * Register a read watchpoint over [address, address+length); returns a disposer.
+   * Fires after the load, with the value it returned. Only bus loads count: a
+   * debugger's `peek` and the instruction fetch do not.
+   */
+  addReadWatchpoint(address: number, length: number, onRead: (info: WatchpointRead) => void): () => void {
+    const len = length >= 1 ? length : 1;
+    const wp = { start: address >>> 0, end: (address + len) >>> 0, onRead };
+    this.#readWatchpoints.push(wp);
+    return () => {
+      const i = this.#readWatchpoints.indexOf(wp);
+      if (i >= 0) {
+        this.#readWatchpoints.splice(i, 1);
+      }
+    };
+  }
+
+  /** Remove every registered read watchpoint. */
+  clearReadWatchpoints(): void {
+    this.#readWatchpoints.length = 0;
+  }
+
+  /** Whether any write watchpoint is registered (hot-path gate). */
   hasWatchpoints(): boolean {
     return this.#watchpoints.length > 0;
+  }
+
+  /** Whether any read watchpoint is registered (hot-path gate). */
+  hasReadWatchpoints(): boolean {
+    return this.#readWatchpoints.length > 0;
+  }
+
+  /** Notify read watchpoints overlapping a load of `size` bytes at `base` that returned `value`. */
+  #notifyRead(base: number, value: number, size: number): number {
+    const lo = base >>> 0;
+    const hi = (lo + size) >>> 0;
+    const list = this.#readWatchpoints.length === 1 ? this.#readWatchpoints : this.#readWatchpoints.slice();
+    for (const wp of list) {
+      if (lo < wp.end && hi > wp.start) {
+        const address = (lo > wp.start ? lo : wp.start) >>> 0;
+        wp.onRead({ address, value, size, dmaChannel: this.#dmaChannel, dmaOrigin: this.#dmaOrigin });
+      }
+    }
+    return value;
   }
 
   /**
@@ -409,6 +471,13 @@ export class GbaSystemBus implements MemoryBus {
   // ─── MemoryBus Implementation ─────────────────────────────────────
 
   read8(address: number): number {
+    const value = this.#read8(address);
+    return this.#readWatchpoints.length > 0
+      ? this.#notifyRead(this.#canonicalAddress(address), value & 0xff, 1)
+      : value;
+  }
+
+  #read8(address: number): number {
     const region = (address >>> 24) & 0xff;
     switch (region) {
       case 0x00:
@@ -443,6 +512,13 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   read16(address: number): number {
+    const value = this.#read16(address);
+    return this.#readWatchpoints.length > 0
+      ? this.#notifyRead(this.#canonicalAddress(address & ~1), value & 0xffff, 2)
+      : value;
+  }
+
+  #read16(address: number): number {
     const addr = address & ~1; // Force halfword alignment
     const region = (addr >>> 24) & 0xff;
     switch (region) {
@@ -484,6 +560,11 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   read32(address: number): number {
+    const value = this.#read32(address);
+    return this.#readWatchpoints.length > 0 ? this.#notifyRead(this.#canonicalAddress(address & ~3), value, 4) : value;
+  }
+
+  #read32(address: number): number {
     const addr = address & ~3; // Force word alignment
     const region = (addr >>> 24) & 0xff;
     switch (region) {
@@ -578,7 +659,7 @@ export class GbaSystemBus implements MemoryBus {
         break;
     }
     if (committed && this.#watchpoints.length > 0) {
-      this.#notifyWrite(this.#canonicalWriteAddress(address), value & 0xff, 1);
+      this.#notifyWrite(this.#canonicalAddress(address), value & 0xff, 1);
     }
   }
 
@@ -626,7 +707,7 @@ export class GbaSystemBus implements MemoryBus {
         break;
     }
     if (committed && this.#watchpoints.length > 0) {
-      this.#notifyWrite(this.#canonicalWriteAddress(addr), value & 0xffff, 2);
+      this.#notifyWrite(this.#canonicalAddress(addr), value & 0xffff, 2);
     }
   }
 
@@ -674,7 +755,7 @@ export class GbaSystemBus implements MemoryBus {
         break;
     }
     if (committed && this.#watchpoints.length > 0) {
-      this.#notifyWrite(this.#canonicalWriteAddress(addr), value >>> 0, 4);
+      this.#notifyWrite(this.#canonicalAddress(addr), value >>> 0, 4);
     }
   }
 
@@ -731,7 +812,7 @@ export class GbaSystemBus implements MemoryBus {
    * Canonical (un-mirrored) address of the byte a write stores to, so writes via a
    * region mirror match watchpoints registered on the canonical address.
    */
-  #canonicalWriteAddress(address: number): number {
+  #canonicalAddress(address: number): number {
     switch ((address >>> 24) & 0xff) {
       case 0x02:
         return (0x02000000 | (address & 0x3ffff)) >>> 0;

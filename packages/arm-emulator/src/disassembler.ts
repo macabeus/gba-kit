@@ -660,7 +660,6 @@ function formatPsrFields(mask: number): string {
   return fields;
 }
 
-
 // ─── Debugger-facing disassembly ────────────────────────────────────
 
 export interface DisassembleOptions {

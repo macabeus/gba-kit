@@ -71,9 +71,38 @@ describe('GbaSystemBus.poke', () => {
     const bus = new GbaSystemBus();
     let hits = 0;
     bus.addWriteWatchpoint(0x03000000, 4, () => hits++);
+    bus.addReadWatchpoint(0x03000000, 4, () => hits++);
     bus.poke(0x03000000, new Uint8Array([1, 2, 3, 4]));
+    bus.peek(0x03000000, 4);
     expect(hits).toBe(0);
     bus.write8(0x03000000, 9);
     expect(hits).toBe(1);
+    bus.read8(0x03000000);
+    expect(hits).toBe(2);
+  });
+});
+
+describe('read watchpoints', () => {
+  it('fire after a load overlapping the range, with the value read and the watched byte', () => {
+    const bus = new GbaSystemBus();
+    bus.poke(0x03000000, new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]));
+    const seen: Array<{ address: number; value: number; size: number }> = [];
+    const dispose = bus.addReadWatchpoint(0x03000002, 2, ({ address, value, size }) =>
+      seen.push({ address, value, size }),
+    );
+    expect(bus.read8(0x03000001)).toBe(0x22); // before the range
+    expect(bus.read16(0x03000002)).toBe(0x4433);
+    expect(bus.read32(0x03000000)).toBe(0x44332211); // overlaps: the watched byte is reported, not the base
+    expect(bus.read8(0x03000004)).toBe(0x55); // after the range
+    expect(bus.read16(0x03007fff + 0x2 + 0x1)).toBe(0x4433); // IWRAM mirror, same bytes: canonical address
+    expect(seen).toEqual([
+      { address: 0x03000002, value: 0x4433, size: 2 },
+      { address: 0x03000002, value: 0x44332211, size: 4 },
+      { address: 0x03000002, value: 0x4433, size: 2 },
+    ]);
+    dispose();
+    bus.read16(0x03000002);
+    expect(seen.length).toBe(3);
+    expect(bus.hasReadWatchpoints()).toBe(false);
   });
 });

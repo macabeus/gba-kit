@@ -446,12 +446,26 @@ export class LineTable {
     if (this.#byFileLine) {
       return this.#byFileLine;
     }
+    // One location per *run* of rows for a line, at the run's first statement row:
+    // a line whose code spans several rows (`x = a + b` as a load, an add, a store)
+    // is one breakpoint, but a line the compiler split around another (a loop
+    // condition, a hoisted load) is one per piece. Rows without `is_stmt` are not
+    // places a debugger should stop, so they neither open a run nor count as code.
     const index = new Map<string, Map<number, number[]>>();
+    let prevFile: string | null = null;
+    let prevLine = -1;
     for (const row of this.rows) {
       if (row.endSequence) {
+        prevFile = null;
         continue;
       }
       const file = normalizePath(row.file);
+      const sameRun = file === prevFile && row.line === prevLine;
+      prevFile = file;
+      prevLine = row.line;
+      if (sameRun || !row.isStmt) {
+        continue;
+      }
       let byLine = index.get(file);
       if (!byLine) {
         byLine = new Map();
@@ -460,7 +474,7 @@ export class LineTable {
       const list = byLine.get(row.line);
       if (!list) {
         byLine.set(row.line, [row.address]);
-      } else if (list[list.length - 1] !== row.address) {
+      } else if (!list.includes(row.address)) {
         list.push(row.address);
       }
     }

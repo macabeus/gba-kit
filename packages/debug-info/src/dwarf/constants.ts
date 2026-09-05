@@ -103,7 +103,18 @@ export const DW_FORM = {
 } as const;
 
 /** The class of a form, which decides how an attribute's value is interpreted. */
-export type FormClass = 'address' | 'addrx' | 'constant' | 'block' | 'string' | 'flag' | 'reference' | 'secoffset' | 'loclistx' | 'rnglistx' | 'other';
+export type FormClass =
+  | 'address'
+  | 'addrx'
+  | 'constant'
+  | 'block'
+  | 'string'
+  | 'flag'
+  | 'reference'
+  | 'secoffset'
+  | 'loclistx'
+  | 'rnglistx'
+  | 'other';
 
 export function formClass(form: number): FormClass {
   switch (form) {

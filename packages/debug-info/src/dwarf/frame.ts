@@ -86,7 +86,12 @@ export class FrameTable {
         if (cie) {
           const start = c.u32();
           const range = c.u32();
-          this.#fdes.push({ cie, start: start >>> 0, end: (start + range) >>> 0, instructions: section.subarray(c.offset, end) });
+          this.#fdes.push({
+            cie,
+            start: start >>> 0,
+            end: (start + range) >>> 0,
+            instructions: section.subarray(c.offset, end),
+          });
         }
       }
       c.seek(end);
@@ -136,7 +141,11 @@ export class FrameTable {
   }
 
   /** Registers of the caller of the frame executing at `pc` with `regs`, or null without CFI there. */
-  unwind(pc: number, regs: ReadonlyArray<number | undefined>, readWord: (address: number) => number | undefined): UnwindResult | null {
+  unwind(
+    pc: number,
+    regs: ReadonlyArray<number | undefined>,
+    readWord: (address: number) => number | undefined,
+  ): UnwindResult | null {
     const fde = this.#find(pc);
     if (!fde) {
       return null;
@@ -202,7 +211,14 @@ export class FrameTable {
   }
 }
 
-function runCfa(program: Uint8Array, cie: Cie, state: RowState, startLoc: number, targetPc: number, initial: RowState | null): void {
+function runCfa(
+  program: Uint8Array,
+  cie: Cie,
+  state: RowState,
+  startLoc: number,
+  targetPc: number,
+  initial: RowState | null,
+): void {
   const c = new Cursor(program, 0, true);
   let loc = startLoc;
   const saved: RowState[] = [];
@@ -282,7 +298,12 @@ function runCfa(program: Uint8Array, cie: Cie, state: RowState, startLoc: number
         break;
       }
       case 0x0a: // remember_state
-        saved.push({ cfaReg: state.cfaReg, cfaOffset: state.cfaOffset, cfaUnsupported: state.cfaUnsupported, rules: new Map(state.rules) });
+        saved.push({
+          cfaReg: state.cfaReg,
+          cfaOffset: state.cfaOffset,
+          cfaUnsupported: state.cfaUnsupported,
+          rules: new Map(state.rules),
+        });
         break;
       case 0x0b: {
         // restore_state

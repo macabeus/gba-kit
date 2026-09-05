@@ -53,7 +53,12 @@ export function attrBlock(entry: DwarfEntry, at: number): Uint8Array | undefined
  * An address-class attribute (`low_pc`, `entry_pc`), resolving `DW_FORM_addrx`
  * through `.debug_addr` when the unit uses it. Undefined when absent or unresolvable.
  */
-export function attrAddress(entry: DwarfEntry, at: number, unit: UnitInfo, sections: DwarfSections): number | undefined {
+export function attrAddress(
+  entry: DwarfEntry,
+  at: number,
+  unit: UnitInfo,
+  sections: DwarfSections,
+): number | undefined {
   const v = entry.attrs.get(at);
   if (typeof v !== 'number') {
     return undefined;
@@ -167,6 +172,8 @@ export class EntryIndex {
 
   /** True for a DIE that is a scope containing code: subprogram, inlined subroutine, lexical block. */
   static isScope(entry: DwarfEntry): boolean {
-    return entry.tag === DW_TAG.subprogram || entry.tag === DW_TAG.inlined_subroutine || entry.tag === DW_TAG.lexical_block;
+    return (
+      entry.tag === DW_TAG.subprogram || entry.tag === DW_TAG.inlined_subroutine || entry.tag === DW_TAG.lexical_block
+    );
   }
 }

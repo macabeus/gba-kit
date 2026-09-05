@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest';
 import { DebugInfo } from '../debug-info.js';
 import { DW_AT, DW_FORM, DW_OP } from '../dwarf/constants.js';
 import type { UnitInfo } from '../dwarf/entries.js';
-import { evaluate, type EvalContext } from '../dwarf/expr.js';
+import { type EvalContext, evaluate } from '../dwarf/expr.js';
 import { entryRanges, locationAt } from '../dwarf/lists.js';
 import type { Memory } from '../scopes.js';
 import type { DwarfEntry } from '../types.js';
@@ -133,7 +133,12 @@ describe('call-frame information', () => {
     const scopes = devkitarm.scopes;
     const add = devkitarm.symbolToAddress('add')!;
     // At entry nothing is pushed yet: the caller's pc is lr, and its sp is ours.
-    const frames = scopes.physicalFrames(add, regs({ 14: 0x08000123 }), patternMemory, (a) => a >= 0x08000000 && a < 0x08010000);
+    const frames = scopes.physicalFrames(
+      add,
+      regs({ 14: 0x08000123 }),
+      patternMemory,
+      (a) => a >= 0x08000000 && a < 0x08010000,
+    );
     expect(frames.length).toBe(2);
     expect(frames[1]!.pc).toBe(0x08000122);
     expect(frames[1]!.regs[13]).toBe(0x03007f00);
@@ -164,12 +169,18 @@ describe('DWARF expressions', () => {
     expect(evaluate(new Uint8Array([DW_OP.fbreg, 0x78]), ctx())).toEqual({ kind: 'memory', address: 0x03007f20 - 8 });
     expect(evaluate(new Uint8Array([DW_OP.breg0 + 13, 0x10]), ctx())).toEqual({ kind: 'memory', address: 0x03007f10 });
     expect(evaluate(new Uint8Array([DW_OP.call_frame_cfa]), ctx())).toEqual({ kind: 'memory', address: 0x03007f30 });
-    expect(evaluate(new Uint8Array([DW_OP.addr, 0x20, 0x52, 0x00, 0x03]), ctx())).toEqual({ kind: 'memory', address: 0x03005220 });
+    expect(evaluate(new Uint8Array([DW_OP.addr, 0x20, 0x52, 0x00, 0x03]), ctx())).toEqual({
+      kind: 'memory',
+      address: 0x03005220,
+    });
   });
 
   it('registers, computed values and pieces', () => {
     expect(evaluate(new Uint8Array([DW_OP.reg0 + 4]), ctx())).toEqual({ kind: 'register', reg: 4 });
-    expect(evaluate(new Uint8Array([DW_OP.breg0 + 4, 0x02, DW_OP.stack_value]), ctx())).toEqual({ kind: 'value', value: 0x1236 });
+    expect(evaluate(new Uint8Array([DW_OP.breg0 + 4, 0x02, DW_OP.stack_value]), ctx())).toEqual({
+      kind: 'value',
+      value: 0x1236,
+    });
     expect(evaluate(new Uint8Array([DW_OP.reg0 + 4, DW_OP.piece, 4, DW_OP.reg0 + 5, DW_OP.piece, 4]), ctx())).toEqual({
       kind: 'composite',
       pieces: [
@@ -177,7 +188,10 @@ describe('DWARF expressions', () => {
         { loc: { kind: 'register', reg: 5 }, size: 4 },
       ],
     });
-    expect(evaluate(new Uint8Array([DW_OP.breg0 + 13, 0x10, DW_OP.deref]), ctx())).toEqual({ kind: 'memory', address: 0xdeadbeef });
+    expect(evaluate(new Uint8Array([DW_OP.breg0 + 13, 0x10, DW_OP.deref]), ctx())).toEqual({
+      kind: 'memory',
+      address: 0xdeadbeef,
+    });
   });
 
   it('refuses what it cannot know rather than guessing', () => {
@@ -199,7 +213,15 @@ describe('range and location lists', () => {
     rnglistsBase: 12,
   });
   function entry(tag: number, attrs: Record<number, [number, unknown]>): DwarfEntry {
-    const e: DwarfEntry = { tag, offset: 0, attrs: new Map(), forms: new Map(), children: [], version: 5, unitOffset: 0 };
+    const e: DwarfEntry = {
+      tag,
+      offset: 0,
+      attrs: new Map(),
+      forms: new Map(),
+      children: [],
+      version: 5,
+      unitOffset: 0,
+    };
     for (const [at, [form, value]] of Object.entries(attrs)) {
       e.attrs.set(Number(at), value as never);
       e.forms.set(Number(at), form);
@@ -209,9 +231,15 @@ describe('range and location lists', () => {
 
   it('high_pc is an offset in a constant form and an address in an address form', () => {
     const u = unit(5, 0);
-    const byOffset = entry(0x2e, { [DW_AT.low_pc]: [DW_FORM.addr, 0x08000100], [DW_AT.high_pc]: [DW_FORM.data4, 0x20] });
+    const byOffset = entry(0x2e, {
+      [DW_AT.low_pc]: [DW_FORM.addr, 0x08000100],
+      [DW_AT.high_pc]: [DW_FORM.data4, 0x20],
+    });
     expect(entryRanges(byOffset, u, {})).toEqual([[0x08000100, 0x08000120]]);
-    const byAddress = entry(0x2e, { [DW_AT.low_pc]: [DW_FORM.addr, 0x08000100], [DW_AT.high_pc]: [DW_FORM.addr, 0x08000130] });
+    const byAddress = entry(0x2e, {
+      [DW_AT.low_pc]: [DW_FORM.addr, 0x08000100],
+      [DW_AT.high_pc]: [DW_FORM.addr, 0x08000130],
+    });
     expect(entryRanges(byAddress, u, {})).toEqual([[0x08000100, 0x08000130]]);
   });
 
@@ -242,8 +270,14 @@ describe('range and location lists', () => {
     const loclists = new Uint8Array([4, 0x00, 0x10, 1, DW_OP.reg0, 4, 0x10, 0x30, 1, DW_OP.reg0 + 4, 0]);
     const e = entry(0x34, { [DW_AT.location]: [DW_FORM.sec_offset, 0] });
     const u = unit(5, 0x08000000);
-    expect(locationAt(e, DW_AT.location, 0x08000008, u, { loclists })).toEqual({ kind: 'expr', expr: new Uint8Array([DW_OP.reg0]) });
-    expect(locationAt(e, DW_AT.location, 0x08000020, u, { loclists })).toEqual({ kind: 'expr', expr: new Uint8Array([DW_OP.reg0 + 4]) });
+    expect(locationAt(e, DW_AT.location, 0x08000008, u, { loclists })).toEqual({
+      kind: 'expr',
+      expr: new Uint8Array([DW_OP.reg0]),
+    });
+    expect(locationAt(e, DW_AT.location, 0x08000020, u, { loclists })).toEqual({
+      kind: 'expr',
+      expr: new Uint8Array([DW_OP.reg0 + 4]),
+    });
     const gone = locationAt(e, DW_AT.location, 0x08000040, u, { loclists });
     expect(gone.kind).toBe('not-here');
     expect(gone.kind === 'not-here' && gone.entries.map((x) => [x.lo, x.hi])).toEqual([
@@ -254,7 +288,10 @@ describe('range and location lists', () => {
 
   it('an exprloc is the expression itself, and a missing attribute is none', () => {
     const e = entry(0x34, { [DW_AT.location]: [DW_FORM.exprloc, new Uint8Array([DW_OP.fbreg, 0x7c])] });
-    expect(locationAt(e, DW_AT.location, 0, unit(5, 0), {})).toEqual({ kind: 'expr', expr: new Uint8Array([DW_OP.fbreg, 0x7c]) });
+    expect(locationAt(e, DW_AT.location, 0, unit(5, 0), {})).toEqual({
+      kind: 'expr',
+      expr: new Uint8Array([DW_OP.fbreg, 0x7c]),
+    });
     expect(locationAt(entry(0x34, {}), DW_AT.location, 0, unit(5, 0), {})).toEqual({ kind: 'none' });
   });
 });

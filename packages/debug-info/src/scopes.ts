@@ -7,14 +7,14 @@
  * Everything that reads the machine goes through {@link Memory}; this module never
  * touches an emulator directly, so it serves a live session, a snapshot, or a test.
  */
+import { type LineRow, normalizePath } from './debug-line.js';
 import { DW_AT, DW_TAG } from './dwarf/constants.js';
-import { attrFlag, attrNum, EntryIndex, type DwarfSections, type UnitInfo } from './dwarf/entries.js';
-import { evaluate, type EvalContext, type Location } from './dwarf/expr.js';
+import { type DwarfSections, EntryIndex, type UnitInfo, attrAddress, attrFlag, attrNum } from './dwarf/entries.js';
+import { type EvalContext, type Location, evaluate } from './dwarf/expr.js';
 import { FrameTable } from './dwarf/frame.js';
-import { describeExpr, entryRanges, locationAt, rangesContain, type Range } from './dwarf/lists.js';
-import { formatValue, TypeResolver, type TypeDesc, type ValueReader, type VarNode } from './dwarf/values.js';
+import { type Range, describeExpr, entryRanges, locationAt, rangesContain } from './dwarf/lists.js';
+import { type TypeDesc, TypeResolver, type ValueReader, type VarNode, formatValue } from './dwarf/values.js';
 import type { ElfFile } from './elf.js';
-import type { LineRow } from './debug-line.js';
 import type { DwarfEntry } from './types.js';
 
 export interface Memory {
@@ -59,6 +59,7 @@ export class DwarfScopes {
   #globalsByName: Map<string, DwarfEntry> | null = null;
   #declarationsByName: Map<string, DwarfEntry> | null = null;
   #typesByName: Map<string, DwarfEntry> | null = null;
+  #callSites: Map<string, number[]> | null = null;
 
   constructor(roots: DwarfEntry[], elf: ElfFile, lineRows: readonly LineRow[]) {
     this.index = new EntryIndex(roots);
@@ -174,7 +175,9 @@ export class DwarfScopes {
 
   /** Top-level variables of a unit that have a location (definitions, not declarations). */
   globals(unit: UnitInfo): DwarfEntry[] {
-    return unit.root.children.filter((d) => d.tag === DW_TAG.variable && !attrFlag(d, DW_AT.declaration) && d.attrs.has(DW_AT.location));
+    return unit.root.children.filter(
+      (d) => d.tag === DW_TAG.variable && !attrFlag(d, DW_AT.declaration) && d.attrs.has(DW_AT.location),
+    );
   }
 
   /** A global variable definition by name, from any unit. */
@@ -249,7 +252,8 @@ export class DwarfScopes {
             continue;
           }
           const complete =
-            !attrFlag(d, DW_AT.declaration) && (d.tag === DW_TAG.typedef || d.tag === DW_TAG.base_type || d.attrs.has(DW_AT.byte_size));
+            !attrFlag(d, DW_AT.declaration) &&
+            (d.tag === DW_TAG.typedef || d.tag === DW_TAG.base_type || d.attrs.has(DW_AT.byte_size));
           const existing = this.#typesByName.get(key);
           if (!existing || (complete && attrFlag(existing, DW_AT.declaration))) {
             this.#typesByName.set(key, d);
@@ -279,6 +283,54 @@ export class DwarfScopes {
       }
     }
     return null;
+  }
+
+  /**
+   * The address an inlined call is entered at: `DW_AT_entry_pc` when the compiler
+   * states it, else the lowest range start. The two differ when the optimizer
+   * hoists part of the callee (a load of a constant address) above the call.
+   */
+  entryPc(inlined: DwarfEntry): number | undefined {
+    const stated = attrAddress(inlined, DW_AT.entry_pc, this.index.unit(inlined), this.#sections);
+    if (stated !== undefined) {
+      return stated;
+    }
+    const r = this.ranges(inlined);
+    return r.length > 0 ? Math.min(...r.map(([lo]) => lo)) : undefined;
+  }
+
+  /**
+   * Entry addresses of the calls inlined at `file:line`. A line that only calls an
+   * inlined function has no line-table row of its own (its code carries the
+   * callee's lines), so this is where a breakpoint on that line goes.
+   */
+  inlineCallSitesAt(file: string, line: number): number[] {
+    if (!this.#callSites) {
+      const sites = new Map<string, number[]>();
+      const visit = (entry: DwarfEntry): void => {
+        if (entry.tag === DW_TAG.inlined_subroutine) {
+          const site = this.callSite(entry);
+          const pc = this.entryPc(entry);
+          if (site && pc !== undefined) {
+            const key = `${normalizePath(site.file)}:${site.line}`;
+            const list = sites.get(key);
+            if (!list) {
+              sites.set(key, [pc]);
+            } else if (!list.includes(pc)) {
+              list.push(pc);
+            }
+          }
+        }
+        for (const ch of entry.children) {
+          visit(ch);
+        }
+      };
+      for (const f of this.#functions) {
+        visit(f.entry);
+      }
+      this.#callSites = sites;
+    }
+    return this.#callSites.get(`${normalizePath(file)}:${line}`) ?? [];
   }
 
   /** Where an inlined call was made from: `DW_AT_call_file` resolved through the unit's line-table files. */
@@ -370,7 +422,10 @@ export class DwarfScopes {
         // split it into registers it never described" is visible in the ranges.
         const where = attr.entries
           .slice(0, 3)
-          .map((e) => `${describeExpr(e.expr)} for 0x${e.lo.toString(16).padStart(8, '0')}–0x${e.hi.toString(16).padStart(8, '0')}`)
+          .map(
+            (e) =>
+              `${describeExpr(e.expr)} for 0x${e.lo.toString(16).padStart(8, '0')}–0x${e.hi.toString(16).padStart(8, '0')}`,
+          )
           .join(', ');
         const more = attr.entries.length > 3 ? `, +${attr.entries.length - 3} more` : '';
         return {
@@ -476,7 +531,13 @@ export class DwarfScopes {
    * the ELF has it; otherwise a single LR guess for frame 1, flagged `exact: false`.
    * `isCode` says whether a return address is worth following (mapped, named).
    */
-  physicalFrames(pc: number, liveRegs: ArrayLike<number>, memory: Memory, isCode: (a: number) => boolean, maxDepth = 32): PhysicalFrame[] {
+  physicalFrames(
+    pc: number,
+    liveRegs: ArrayLike<number>,
+    memory: Memory,
+    isCode: (a: number) => boolean,
+    maxDepth = 32,
+  ): PhysicalFrame[] {
     const regs: Array<number | undefined> = Array.from(liveRegs);
     const frames: PhysicalFrame[] = [{ pc, lookupPc: pc, regs, fn: this.functionAt(pc), exact: true }];
     const readWord = (address: number): number | undefined => {

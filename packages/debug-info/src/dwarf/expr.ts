@@ -224,7 +224,8 @@ export function evaluate(expr: Uint8Array, ctx: EvalContext): Location {
           break;
         case DW_OP.piece: {
           const size = c.uleb();
-          const loc: Location = current ?? (stack.length > 0 ? { kind: 'memory', address: pop() } : optOut('empty piece'));
+          const loc: Location =
+            current ?? (stack.length > 0 ? { kind: 'memory', address: pop() } : optOut('empty piece'));
           pieces.push({ loc, size });
           current = null;
           break;
@@ -273,7 +274,7 @@ function binary(op: number, a: number, b: number): number {
     case DW_OP.minus:
       return (a - b) >>> 0;
     case DW_OP.mod:
-      return b === 0 ? 0 : a % b >>> 0;
+      return b === 0 ? 0 : (a % b) >>> 0;
     case DW_OP.mul:
       return Math.imul(a, b) >>> 0;
     case DW_OP.or:

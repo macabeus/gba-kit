@@ -32,7 +32,8 @@ describe('disassembleThumbAt', () => {
   });
 
   it('symbolizes branch targets and literal-pool words', () => {
-    const symbolize = (a: number): string | null => (a === 0x08000a20 ? 'UpdatePlayer' : a === 0x03001234 ? 'gState' : null);
+    const symbolize = (a: number): string | null =>
+      a === 0x08000a20 ? 'UpdatePlayer' : a === 0x03001234 ? 'gState' : null;
     const call = halfwords(0x08000100, [0xf000, 0xfc8e]);
     expect(disassembleThumbAt(call, 0x08000100, { symbolize }).text).toBe('bl 0x08000a20 <UpdatePlayer>');
     // ldr r0, [pc, #0x8]: target = (0x08000000 + 4 & ~3) + 8 = 0x0800000c

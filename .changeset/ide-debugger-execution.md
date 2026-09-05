@@ -11,6 +11,7 @@ Debugger-grade execution and inspection in the emulator core:
 - Snapshot restore is bit-exact: scheduled events keep their `fireCycle` and only get their callbacks reattached (`Scheduler.reattach`, `TimerController.reattachEvents`, `DmaController.reattachEvents`), held buttons are restored, and `frameCount` is part of the snapshot. Running K frames from a restored snapshot now reproduces the original run.
 - The HLE BIOS no longer keeps module-global state: `handleSwi` takes a per-machine `BiosEnv`, so two `Gba` instances in one process cannot cross-talk.
 - `GbaSystemBus.peek` / `poke`: side-effect-free debugger reads (an EEPROM peek never clocks its protocol) and writes that store the byte typed (no OAM drop / VRAM duplication) without notifying data watchpoints.
+- `GbaSystemBus.addReadWatchpoint`: read data breakpoints, the counterpart of the write watchpoints. A load overlapping the range reports the value it returned and which DMA channel, if any, performed it; the read paths pay one length check when none is set.
 - `EmulatorBridge.loadState` releases the buttons a snapshot restores, keeping the browser's save-state UX unchanged.
 - `disassembleThumbAt` / `disassembleArmAt`: a Thumb `bl` prefix/suffix pair is one 4-byte instruction with its target, and branch / literal-pool targets can be symbolized.
 - `Gba.onHardwareEvent`: one sink for interrupt requests and entries, DMA transfers (with the instruction that started them), I/O writes, VBlank/HBlank and halts — the feed for an event log; the hot paths pay nothing when nobody listens.

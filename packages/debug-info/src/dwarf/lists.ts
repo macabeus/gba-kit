@@ -5,7 +5,7 @@
 import { Cursor } from '../reader.js';
 import type { DwarfEntry } from '../types.js';
 import { DW_AT, DW_FORM, DW_OP, formClass } from './constants.js';
-import { addrxValue, attrAddress, type DwarfSections, type UnitInfo } from './entries.js';
+import { type DwarfSections, type UnitInfo, addrxValue, attrAddress } from './entries.js';
 
 export type Range = [number, number];
 
@@ -35,7 +35,8 @@ export function entryRanges(entry: DwarfEntry, unit: UnitInfo, sections: DwarfSe
       if (at + 4 > section.length) {
         return [];
       }
-      offset = unit.rnglistsBase + new DataView(section.buffer, section.byteOffset, section.byteLength).getUint32(at, true);
+      offset =
+        unit.rnglistsBase + new DataView(section.buffer, section.byteOffset, section.byteLength).getUint32(at, true);
     }
     return readRnglist(section, offset, unit, sections);
   }
@@ -141,7 +142,13 @@ export type LocationAttr =
   | { kind: 'unsupported'; reason: string };
 
 /** The location expression of `entry`'s attribute `at` that is valid at `pc`. */
-export function locationAt(entry: DwarfEntry, at: number, pc: number, unit: UnitInfo, sections: DwarfSections): LocationAttr {
+export function locationAt(
+  entry: DwarfEntry,
+  at: number,
+  pc: number,
+  unit: UnitInfo,
+  sections: DwarfSections,
+): LocationAttr {
   const v = entry.attrs.get(at);
   if (v === undefined) {
     return { kind: 'none' };
@@ -164,7 +171,8 @@ export function locationAt(entry: DwarfEntry, at: number, pc: number, unit: Unit
       if (at2 + 4 > section.length) {
         return { kind: 'unsupported', reason: 'loclistx out of range' };
       }
-      offset = unit.loclistsBase + new DataView(section.buffer, section.byteOffset, section.byteLength).getUint32(at2, true);
+      offset =
+        unit.loclistsBase + new DataView(section.buffer, section.byteOffset, section.byteLength).getUint32(at2, true);
     }
     return readLoclist(section, offset, pc, unit, sections);
   }
@@ -175,7 +183,13 @@ export function locationAt(entry: DwarfEntry, at: number, pc: number, unit: Unit
   return readLegacyLoclist(section, v, unit.lowPc, pc);
 }
 
-function readLoclist(section: Uint8Array, offset: number, pc: number, unit: UnitInfo, sections: DwarfSections): LocationAttr {
+function readLoclist(
+  section: Uint8Array,
+  offset: number,
+  pc: number,
+  unit: UnitInfo,
+  sections: DwarfSections,
+): LocationAttr {
   const c = new Cursor(section, offset);
   let base = unit.lowPc;
   const addrx = (i: number): number => addrxValue(i, unit, sections) ?? 0;

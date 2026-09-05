@@ -11,7 +11,16 @@ import { describe, expect, it } from 'vitest';
 import { DebugInfo } from '../debug-info.js';
 import { LineTable, normalizePath } from '../debug-line.js';
 import { ElfFile } from '../elf.js';
-import { SHN_ABS, SHN_UNDEF, STB_GLOBAL, STB_LOCAL, STT_FUNC, STT_NOTYPE, STT_OBJECT, SymbolIndex } from '../symbols.js';
+import {
+  SHN_ABS,
+  SHN_UNDEF,
+  STB_GLOBAL,
+  STB_LOCAL,
+  STT_FUNC,
+  STT_NOTYPE,
+  STT_OBJECT,
+  SymbolIndex,
+} from '../symbols.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DEVKITARM_ELF = join(here, '..', '..', 'test-projects', 'devkitarm-min', 'build', 'min.elf');
@@ -161,7 +170,9 @@ describe('ROM / ELF identity', () => {
     const bytes = new Uint8Array(readFileSync(DEVKITARM_ELF));
     const di = DebugInfo.fromElf(bytes);
     expect(di.checkRomIdentity(new Uint8Array(4)).ok).toBe(false);
-    const obj = ElfFile.parse(new Uint8Array(readFileSync(join(here, '..', '..', 'test-projects', 'ppc-min', 'build', 'main.o'))));
+    const obj = ElfFile.parse(
+      new Uint8Array(readFileSync(join(here, '..', '..', 'test-projects', 'ppc-min', 'build', 'main.o'))),
+    );
     expect(obj.type).not.toBe(2);
     expect(di.isLinked).toBe(true);
   });

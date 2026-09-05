@@ -1394,7 +1394,15 @@ function parseDie(
     forms.set(spec.attr, spec.form);
   }
 
-  const die: Die = { tag: abbrev.tag, offset, attrs, forms, version: ctx.version, unitOffset: ctx.cuStart, children: [] };
+  const die: Die = {
+    tag: abbrev.tag,
+    offset,
+    attrs,
+    forms,
+    version: ctx.version,
+    unitOffset: ctx.cuStart,
+    children: [],
+  };
 
   if (abbrev.hasChildren) {
     for (;;) {
