@@ -4,26 +4,43 @@
  * request each. Everything that knows about GBA memory, symbols or stepping
  * lives below the DAP seam.
  */
-import { GbaDebugSession, StreamReader } from '@gba-kit/debug-adapter';
-import type { ControlAction } from '@gba-kit/debug-ui';
+import { GbaDebugSession, newPipePath } from '@gba-kit/debug-adapter';
+import { AUDIO_SAMPLE_RATE, type StateBody } from '@gba-kit/debug-adapter/protocol';
+import type { ControlAction, PanelId } from '@gba-kit/debug-ui/transport';
 import { accessSync, constants } from 'node:fs';
-import { type Server, createServer } from 'node:net';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import * as vscode from 'vscode';
 
+import { serveFrames } from './frame-server.js';
 import { type BridgeSession, CONTROL_REQUESTS, HostBridge } from './host-bridge.js';
 import { type Root, nonce, webviewHtml } from './webview-html.js';
 
 const DEBUG_TYPE = 'gba-kit';
 
-/** Per debug session: its frame stream (out-of-process) or the inline adapter. */
+/** The session every panel follows: how to reach it, whether it should produce audio, and how to stop its feed. */
 interface Live {
   session: vscode.DebugSession;
   bridge: BridgeSession;
-  server: Server | null;
+  /** audio is mixed and carried only while a panel plays it; told again on every change */
+  setAudio(wanted: boolean): void;
   dispose(): void;
 }
+
+/** The core an in-process adapter runs; a restart replaces it. */
+type Core = Parameters<Parameters<GbaDebugSession['onSession']>[0]>[0];
+
+/** What the panels see once the session is gone: a whole state body, so every consumer of one reads it safely. */
+const DISPOSED_STATE: StateBody = {
+  state: 'disposed',
+  frame: 0,
+  pc: 0,
+  position: { frame: 0, instruction: 0, scanline: 0, cycle: 0, pc: 0 },
+  revision: 0,
+  epoch: 0,
+  history: { earliestFrame: null, keyframes: 0, bytes: 0, recording: false, recordingStart: null },
+  recording: false,
+  tracing: false,
+};
 
 const CONTROL_COMMANDS: Partial<Record<ControlAction, string>> = {
   continue: 'workbench.action.debug.continue',
@@ -52,6 +69,8 @@ class Panels {
     for (const { bridge } of this.#panels.values()) {
       bridge.attach(live?.bridge ?? null);
     }
+    // the panels' wishes may have changed while the stream was being attached
+    live?.setAudio(this.wantsAudio);
   }
 
   show(root: Root): void {
@@ -87,11 +106,21 @@ class Panels {
           .openTextDocument({ language, content })
           .then((doc) => vscode.window.showTextDocument(doc, vscode.ViewColumn.Active));
       },
+      showPanel: (panel) => this.showTool(panel),
+      subscriptionsChanged: () => this.#live?.setAudio(this.wantsAudio),
     });
     bridge.attach(this.#live?.bridge ?? null);
+    bridge.setVisible(panel.visible);
     webview.onDidReceiveMessage((message) => void bridge.receive(message));
+    panel.onDidChangeViewState((e) => bridge.setVisible(e.webviewPanel.visible));
     panel.onDidDispose(() => this.#panels.delete(root));
     this.#panels.set(root, { panel, bridge });
+  }
+
+  /** Bring the Tools view up on one of its tabs (a recording just stopped: its Recording tab), creating it if need be. */
+  showTool(panel: PanelId): void {
+    this.show('tools');
+    this.#panels.get('tools')?.bridge.showPanel(panel);
   }
 
   frame(rgba: Uint8Array, frame: number): void {
@@ -118,7 +147,7 @@ class Panels {
     }
   }
 
-  /** Whether any panel wants audio: the stream only carries it when asked. */
+  /** Whether any panel plays audio. The live session mixes and carries audio only while one does. */
   get wantsAudio(): boolean {
     return [...this.#panels.values()].some(({ bridge }) => bridge.subscriptions.has('audio'));
   }
@@ -134,6 +163,8 @@ class Panels {
 export function activate(context: vscode.ExtensionContext): void {
   const panels = new Panels(context);
   const inline = new Map<string, GbaDebugSession>();
+  /** stream attachments in flight, by session id; one whose session ended meanwhile is dropped, not made live */
+  const pending = new Map<string, Promise<Live>>();
   const output = vscode.window.createOutputChannel('gba-kit');
 
   const bridgeFor = (session: vscode.DebugSession): BridgeSession => ({
@@ -175,14 +206,30 @@ export function activate(context: vscode.ExtensionContext): void {
       if (session.type !== DEBUG_TYPE) {
         return;
       }
-      void attachStream(session, inline.get(session.id) ?? null, panels, output).then((live) => panels.setLive(live));
+      const attach = attachStream(session, inline.get(session.id) ?? null, panels, output);
+      pending.set(session.id, attach);
+      attach.then(
+        (live) => {
+          if (pending.get(session.id) !== attach) {
+            live.dispose(); // the session ended before its stream was attached
+            return;
+          }
+          pending.delete(session.id);
+          panels.setLive(live);
+        },
+        (err: Error) => {
+          pending.delete(session.id);
+          output.appendLine(`gba-kit: could not attach the frame stream: ${err.message}`);
+        },
+      );
     }),
 
     vscode.debug.onDidTerminateDebugSession((session) => {
+      pending.delete(session.id);
       inline.delete(session.id);
       if (panels.live?.session.id === session.id) {
         panels.setLive(null);
-        panels.state({ state: 'disposed', frame: 0, pc: 0 });
+        panels.state(DISPOSED_STATE);
       }
     }),
 
@@ -209,10 +256,9 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       if (state.recording) {
-        const result = (await request('gba-kit/recordStop')) as { script: string } | undefined;
-        if (result) {
-          const doc = await vscode.workspace.openTextDocument({ language: 'javascript', content: result.script });
-          await vscode.window.showTextDocument(doc, vscode.ViewColumn.Active);
+        // the Recording tab shows the session's last recording, and can replay it
+        if (await request('gba-kit/recordStop')) {
+          panels.showTool('recording');
         }
       } else {
         await request('gba-kit/recordStart');
@@ -289,7 +335,8 @@ export function activate(context: vscode.ExtensionContext): void {
   /**
    * Frames and audio never cross the DAP connection. An in-process adapter hands
    * them over directly; a process adapter writes them to a pipe the extension
-   * owns, told to it with `gba-kit/stream`.
+   * owns, told to it with `gba-kit/stream`. Either way audio is only asked for
+   * while a panel plays it: the core does not mix what nobody hears.
    */
   async function attachStream(
     session: vscode.DebugSession,
@@ -299,50 +346,80 @@ export function activate(context: vscode.ExtensionContext): void {
   ): Promise<Live> {
     const bridge = bridgeFor(session);
     if (adapter) {
-      let off: (() => void) | null = null;
-      adapter.onSession((core) => {
-        off = core.on({
-          frame: (rgba, frame) => sink.frame(rgba, frame),
-          audio: (samples) => sink.wantsAudio && sink.audio(samples, 32768),
-        });
-      });
-      return { session, bridge, server: null, dispose: () => off?.() };
+      return attachInline(session, adapter, bridge, sink);
     }
-    const pipe = pipePath();
-    const server = createServer((socket) => {
-      const reader = new StreamReader(
-        (f) => sink.frame(f.rgba, f.frame),
-        (a) => sink.audio(a.samples, a.sampleRate),
-      );
-      socket.on('data', (chunk: Buffer) => {
-        try {
-          reader.push(chunk);
-        } catch (err) {
-          log.appendLine(`gba-kit: frame stream: ${(err as Error).message}`);
-          socket.destroy();
+    const pipe = newPipePath();
+    const server = await serveFrames(pipe, sink, (message) => log.appendLine(`gba-kit: frame stream: ${message}`));
+    let audio = sink.wantsAudio;
+    const stream = async (): Promise<void> => {
+      try {
+        await session.customRequest('gba-kit/stream', { path: pipe, audio });
+      } catch (err) {
+        log.appendLine(`gba-kit: could not connect the frame stream: ${(err as Error).message}`);
+      }
+    };
+    await stream();
+    return {
+      session,
+      bridge,
+      // the adapter connects to the same pipe again, with or without audio; the server takes the newer connection
+      setAudio: (wanted) => {
+        if (wanted !== audio) {
+          audio = wanted;
+          void stream();
         }
-      });
-      socket.on('error', () => {});
+      },
+      dispose: () => server.dispose(),
+    };
+  }
+
+  /** Listen to the in-process adapter's core directly, following it across restarts. */
+  function attachInline(
+    session: vscode.DebugSession,
+    adapter: GbaDebugSession,
+    bridge: BridgeSession,
+    sink: Panels,
+  ): Live {
+    let core: Core | null = null;
+    let audio = false;
+    let offFrame: (() => void) | null = null;
+    let offAudio: (() => void) | null = null;
+    let disposed = false;
+    const listenAudio = (): void => {
+      offAudio?.();
+      offAudio = audio && core ? core.on({ audio: (samples) => sink.audio(samples, AUDIO_SAMPLE_RATE) }) : null;
+    };
+    adapter.onSession((next) => {
+      if (disposed) {
+        return;
+      }
+      // a restart brings a new core; the previous one's listeners went with it
+      core = next;
+      offFrame?.();
+      offFrame = next.on({ frame: (rgba, frame) => sink.frame(rgba, frame) });
+      listenAudio();
     });
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(pipe, resolve);
-    });
-    try {
-      await session.customRequest('gba-kit/stream', { path: pipe, audio: true });
-    } catch (err) {
-      log.appendLine(`gba-kit: could not connect the frame stream: ${(err as Error).message}`);
-    }
-    return { session, bridge, server, dispose: () => server.close() };
+    return {
+      session,
+      bridge,
+      setAudio: (wanted) => {
+        if (wanted !== audio) {
+          audio = wanted;
+          listenAudio();
+        }
+      },
+      dispose: () => {
+        disposed = true;
+        offFrame?.();
+        offAudio?.();
+        offFrame = offAudio = null;
+        core = null;
+      },
+    };
   }
 }
 
 export function deactivate(): void {}
-
-function pipePath(): string {
-  const id = `gba-kit-${process.pid}-${Date.now().toString(36)}`;
-  return process.platform === 'win32' ? `\\\\.\\pipe\\${id}` : path.join(tmpdir(), `${id}.sock`);
-}
 
 /** `node` on the PATH, so the adapter can run as its own process. */
 function findNode(): string | null {

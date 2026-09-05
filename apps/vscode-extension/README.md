@@ -54,7 +54,7 @@ Scanline`, `Rewind One Second` from the debug toolbar and the palette.
   scalars and registers are editable.
 - **Hover and Watch** expressions: C operators, `[addr]`, `{addr}`,
   `u32(addr)`, registers, `frame`/`scanline`/`cycle`, symbols, `a.b[3].c`
-  paths, `&symbol`, labels.
+  paths, enumerators, `&symbol`, labels.
 - **GBA: Show Screen**: the display with keyboard (arrows, Z, X, Enter,
   Backspace, A, S) and gamepad input, audio, run/pause, frame step, rewind and
   input recording.

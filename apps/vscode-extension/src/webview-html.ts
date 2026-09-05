@@ -1,14 +1,27 @@
 /** The HTML shell of a panel webview: strict CSP, the theme mapped onto the panels' variables, one script. */
+import { randomBytes } from 'node:crypto';
 
 export type Root = 'screen' | 'tools';
 
+/** A fresh CSP nonce for one webview's script. */
 export function nonce(): string {
-  let out = '';
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  for (let i = 0; i < 32; i++) {
-    out += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return out;
+  return randomBytes(16).toString('base64');
+}
+
+/**
+ * Only the bundle carrying the nonce runs, plus a `blob:` script: the audio
+ * player loads its `AudioWorklet` module from a blob URL, and worklet modules
+ * are governed by `script-src` (not `worker-src`, which covers Workers only).
+ * Styles come from the extension's files and the inline sheet below.
+ */
+function csp(cspSource: string, nonce: string): string {
+  return [
+    "default-src 'none'",
+    `style-src ${cspSource} 'unsafe-inline'`,
+    `script-src 'nonce-${nonce}' blob:`,
+    `img-src ${cspSource} data:`,
+    `font-src ${cspSource}`,
+  ].join('; ');
 }
 
 export function webviewHtml(options: {
@@ -25,9 +38,9 @@ export function webviewHtml(options: {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${n}'; img-src ${cspSource} data:; font-src ${cspSource}; worker-src blob:; media-src blob:;">
+<meta http-equiv="Content-Security-Policy" content="${csp(cspSource, n)}">
 <link rel="stylesheet" href="${styleUri}">
-<style nonce="${n}">
+<style>
   html, body { height: 100%; margin: 0; }
   body { background: var(--vscode-editor-background); color: var(--vscode-foreground); }
   #root { height: 100%; }
