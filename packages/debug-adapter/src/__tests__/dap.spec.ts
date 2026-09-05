@@ -3,14 +3,14 @@
  * against the debug-core fixtures (one C program built as Thumb -O0).
  */
 import type { DebugProtocol } from '@vscode/debugprotocol';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { type Server, createServer } from 'node:net';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { type Server, type Socket, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { GbaKitRequests, StateBody } from '../protocol.js';
+import { type GbaKitRequests, LOG, STREAM, type StateBody } from '../protocol.js';
 import { StreamReader } from '../stream.js';
 import { DapClient } from './client.js';
 
@@ -181,6 +181,11 @@ describe('lifecycle', () => {
     const missing = await client.request('launch', { rom: join(fixtures, 'nope.gba') });
     expect(missing.success).toBe(false);
     expect(missing.message).toMatch(/ROM not found/);
+    // a launch that fails is the one error the user must be told about, not just the console
+    expect(missing.body?.error?.showUser).toBe(true);
+    const directory = await client.request('launch', { rom: fixtures });
+    expect(directory.message).toMatch(/ROM is not a file/);
+    expect((await client.request('launch')).message).toMatch(/"rom" is required/);
 
     const wrong = await client.request('launch', {
       rom: ROM,
@@ -216,13 +221,118 @@ describe('lifecycle', () => {
     const line = await lineOf(MAIN, 'draw();');
     const client = await launch({ breakpoints: [{ path: MAIN, lines: [line] }] });
     await stopped(client, 'continue', { threadId: 1 });
+    const epoch = (await client.body<StateBody>('gba-kit/state')).epoch;
     const restart = await stopped(client, 'restart');
     expect(restart.reason).toBe('restart');
-    expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(0);
+    const state = await client.body<StateBody>('gba-kit/state');
+    expect(state.frame).toBe(0);
+    expect(state.epoch).toBeGreaterThan(epoch);
     expect((await stopped(client, 'continue', { threadId: 1 })).reason).toBe('breakpoint');
+    // hit counts start over with the program
+    await client.body('setBreakpoints', { source: { path: MAIN }, breakpoints: [{ line, hitCondition: '== 2' }] });
+    expect((await stopped(client, 'continue', { threadId: 1 })).reason).toBe('breakpoint');
+    await stopped(client, 'restart');
+    expect((await stopped(client, 'continue', { threadId: 1 })).reason).toBe('breakpoint');
+    expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(1);
     const terminated = client.event('terminated');
     await client.body('terminate');
     await terminated;
+  });
+
+  it('restart reloads a rebuilt ROM and ELF from disk, with the breakpoints carried over', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(dir);
+    const rom = join(dir, 'game.gba');
+    const elf = join(dir, 'game.elf');
+    await Promise.all([copyFile(ROM, rom), copyFile(ELF, elf)]);
+    const line = await lineOf(MAIN, 'draw();');
+    const client = new DapClient();
+    clients.push(client);
+    await client.body('initialize', { adapterID: 'gba-kit', pathFormat: 'path' });
+    const config = { rom, elf, cwd: fixtures, stopOnEntry: true };
+    const launched = client.request('launch', config);
+    await client.event('initialized');
+    await client.body('setBreakpoints', { source: { path: MAIN }, breakpoints: [{ line }] });
+    await client.body('setFunctionBreakpoints', { breakpoints: [{ name: 'add_bonus' }] });
+    const info = await client.body<DebugProtocol.DataBreakpointInfoResponse['body']>('dataBreakpointInfo', {
+      name: 'g_bonus_calls',
+    });
+    await client.body('setDataBreakpoints', { breakpoints: [{ dataId: info.dataId!, accessType: 'write' }] });
+    await client.body('configurationDone');
+    expect((await launched).success).toBe(true);
+    const sessions: unknown[] = [];
+    client.adapter.onSession((s) => sessions.push(s));
+    const before = (await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression: '&update' }))
+      .memoryReference;
+
+    // the "build" rewrote both files: the -O2 program lays its functions out elsewhere
+    const rebuilt = await readFile(join(fixtures, 'build', 'thumb-O2.gba'));
+    await Promise.all([writeFile(rom, rebuilt), copyFile(join(fixtures, 'build', 'thumb-O2.elf'), elf)]);
+    for (const args of [undefined, { arguments: config }]) {
+      const restart = await stopped(client, 'restart', args);
+      expect(restart.reason).toBe('restart');
+      const state = await client.body<StateBody>('gba-kit/state');
+      expect(state).toMatchObject({ frame: 0, pc: 0x08000000 });
+      const memory = await client.body<DebugProtocol.ReadMemoryResponse['body']>('readMemory', {
+        memoryReference: '0x08000000',
+        count: 4096,
+      });
+      expect(Buffer.from(memory.data!, 'base64').equals(rebuilt.subarray(0, 4096))).toBe(true);
+      const after = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression: '&update' });
+      expect(after.memoryReference).not.toBe(before);
+    }
+    expect(sessions.length).toBe(3); // the launch's, and one per restart
+    // every kind of breakpoint carried over, the data breakpoint to its symbol's new address
+    const reasons = new Set<string>();
+    for (let i = 0; i < 4; i++) {
+      const stop = await stopped(client, 'continue', { threadId: 1 });
+      reasons.add(stop.reason);
+      if (stop.reason === 'breakpoint') {
+        expect((await topFrame(client)).line).toBe(line);
+      }
+    }
+    expect([...reasons]).toEqual(expect.arrayContaining(['breakpoint', 'data breakpoint']));
+
+    // a restart that cannot load says so and leaves the running program alone
+    await rm(elf);
+    const failed = await client.request('restart');
+    expect(failed.success).toBe(false);
+    expect(failed.message).toMatch(/cannot restart: ELF not found/);
+    expect(failed.body?.error?.showUser).toBe(true);
+    expect((await client.body<StateBody>('gba-kit/state')).state).toBe('stopped');
+  });
+
+  it('refuses a second launch, and disposes the session on disconnect', async () => {
+    const client = await launch();
+    const session = client.adapter.session!;
+    const dispose = vi.spyOn(session, 'dispose');
+    const again = await client.request('launch', { rom: ROM, elf: ELF, cwd: fixtures });
+    expect(again.success).toBe(false);
+    expect(again.message).toMatch(/already launched/);
+    expect(client.events('initialized').length).toBe(1);
+    expect(client.events('stopped').length).toBe(1);
+    expect(client.adapter.session).toBe(session);
+    await client.body('disconnect');
+    expect(dispose).toHaveBeenCalledTimes(1);
+    clients.splice(clients.indexOf(client), 1);
+  });
+
+  it('holds no timer after the launch has been answered', async () => {
+    const timers = (): number => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+    const idle = timers();
+    await launch();
+    // The count is process-wide, so a timer of someone else's may end while the launch
+    // runs; what this pins is that the adapter leaves none of its own behind (the
+    // configuration wait must be cleared once the launch is answered), so the count
+    // may fall but never rise.
+    expect(timers()).toBeLessThanOrEqual(idle);
+  });
+
+  it('a waiter of the test client sees an event that already arrived, unless told to look later', async () => {
+    const client = await launch();
+    const entry = await client.event<DebugProtocol.StoppedEvent>('stopped', () => true, 500);
+    expect(entry.body.reason).toBe('entry');
+    await expect(client.event('stopped', () => true, 200, client.log.length)).rejects.toThrow(/no 'stopped' event/);
   });
 });
 
@@ -325,6 +435,80 @@ describe('breakpoints', () => {
     expect(stop.description).toMatch(/^g_player\.pos\.x read .* by move_player/);
   });
 
+  it('a data breakpoint with a malformed condition is reported unverified, not as a failed request', async () => {
+    const client = await launch();
+    const info = await client.body<DebugProtocol.DataBreakpointInfoResponse['body']>('dataBreakpointInfo', {
+      name: 'g_bonus_calls',
+    });
+    const { breakpoints } = await client.body<DebugProtocol.SetDataBreakpointsResponse['body']>('setDataBreakpoints', {
+      breakpoints: [
+        { dataId: info.dataId!, accessType: 'write' },
+        { dataId: info.dataId!, accessType: 'write', condition: '1 +' },
+      ],
+    });
+    expect(breakpoints[0]).toMatchObject({ verified: true });
+    expect(breakpoints[1]).toMatchObject({ verified: false, message: expect.stringMatching(/unexpected end/) });
+    expect((await stopped(client, 'continue', { threadId: 1 })).reason).toBe('data breakpoint');
+  });
+
+  it('a local can be watched from its frame', async () => {
+    const client = await launch({
+      breakpoints: [{ path: MAIN, lines: [await lineOf(MAIN, 'move_player(&g_player')] }],
+    });
+    await stopped(client, 'continue', { threadId: 1 });
+    const locals = await scopeRef(client, 'Locals');
+    const fromView = await client.body<DebugProtocol.DataBreakpointInfoResponse['body']>('dataBreakpointInfo', {
+      name: 'bonus',
+      variablesReference: locals,
+    });
+    expect(fromView.dataId).toMatch(/^\d+:4:bonus$/);
+    expect(fromView.canPersist).toBe(false);
+    const fromFrame = await client.body<DebugProtocol.DataBreakpointInfoResponse['body']>('dataBreakpointInfo', {
+      name: 'bonus',
+      frameId: 0,
+    });
+    expect(fromFrame.dataId).toBe(fromView.dataId);
+    await client.body('setBreakpoints', { source: { path: MAIN }, breakpoints: [] });
+    await client.body('setDataBreakpoints', { breakpoints: [{ dataId: fromFrame.dataId!, accessType: 'write' }] });
+    const stop = await stopped(client, 'continue', { threadId: 1 });
+    expect(stop.reason).toBe('data breakpoint');
+    expect(stop.description).toMatch(/^bonus written/);
+  });
+
+  it('refuses a data breakpoint id it did not hand out, in place, and prints a watched word as bits', async () => {
+    const line = await lineOf(MAIN, 'draw();');
+    const client = await launch({ breakpoints: [{ path: MAIN, lines: [line] }] });
+    const { breakpoints } = await client.body<DebugProtocol.SetDataBreakpointsResponse['body']>('setDataBreakpoints', {
+      breakpoints: [
+        { dataId: 'garbage' },
+        { dataId: '' },
+        { dataId: '50331648:0:x' },
+        { dataId: '50331648:1000000000:x', accessType: 'readWrite' },
+        { dataId: '4294967295:4:w' },
+        { dataId: '50331648:4:x', accessType: 'bogus' as DebugProtocol.DataBreakpointAccessType },
+      ],
+    });
+    expect(breakpoints.map((b) => b.verified)).toEqual([false, false, false, false, false, false]);
+    expect(breakpoints[0]!.message).toMatch(/not a data breakpoint id/);
+    expect(breakpoints[2]!.message).toMatch(/cannot watch 0 bytes/);
+    expect(breakpoints[3]!.message).toMatch(/cannot watch 1000000000 bytes/);
+    expect(breakpoints[4]!.message).toMatch(/no memory at 4294967295/);
+    expect(breakpoints[5]!.message).toMatch(/unknown access type 'bogus'/);
+    // nothing watches all of memory: the run reaches the source breakpoint
+    expect((await stopped(client, 'continue', { threadId: 1 })).reason).toBe('breakpoint');
+
+    // the first ROM word, whose top bit is set, reads as its bits rather than a negative number
+    await stopped(client, 'restart');
+    const rom = await client.body<DebugProtocol.SetDataBreakpointsResponse['body']>('setDataBreakpoints', {
+      breakpoints: [{ dataId: '134217728:4:0x8000000', accessType: 'read' }],
+    });
+    expect(rom.breakpoints[0]!.verified).toBe(true);
+    const stop = await stopped(client, 'continue', { threadId: 1 });
+    expect(stop.reason).toBe('data breakpoint');
+    expect(stop.description).toMatch(/^0x8000000 read \(0x[0-9a-f]{1,8}, 4 bytes at 0x8000000\)/);
+    expect(stop.description).not.toContain('0x-');
+  });
+
   it('hardware events are exception filters', async () => {
     const client = await launch();
     const set = await client.body<DebugProtocol.SetExceptionBreakpointsResponse['body']>('setExceptionBreakpoints', {
@@ -350,6 +534,23 @@ describe('breakpoints', () => {
       },
     );
     expect(breakpoints.map((b) => b.line)).toEqual([from, from + 1, from + 2, from + 3]);
+    // a range far past the file costs the file's lines, not the range's
+    const lines = (await readFile(MAIN, 'utf8')).split('\n').length;
+    const started = performance.now();
+    const whole = await client.body<DebugProtocol.BreakpointLocationsResponse['body']>('breakpointLocations', {
+      source: { path: MAIN },
+      line: 1,
+      endLine: 10_000_000,
+    });
+    expect(performance.now() - started).toBeLessThan(1000);
+    const file = await client.body<DebugProtocol.BreakpointLocationsResponse['body']>('breakpointLocations', {
+      source: { path: MAIN },
+      line: 1,
+      endLine: lines,
+    });
+    expect(whole).toEqual(file);
+    expect(whole.breakpoints.length).toBeGreaterThan(20);
+    expect(whole.breakpoints.every((b) => b.line >= 1 && b.line <= lines)).toBe(true);
     const { sources } = await client.body<DebugProtocol.LoadedSourcesResponse['body']>('loadedSources');
     expect(sources.map((s) => s.path)).toEqual(expect.arrayContaining([MAIN, UTIL]));
   });
@@ -409,6 +610,29 @@ describe('stepping', () => {
     expect(stop).toMatchObject({ reason: 'step', description: 'no earlier history' });
   });
 
+  it('says when a rewind cannot move, instead of stopping in place as if it had', async () => {
+    const client = await launch();
+    for (const [command, args] of [
+      ['gba-kit/rewindToFrame', { frame: 1_000_000_000 }],
+      ['gba-kit/rewindToFrame', { frame: -1 }],
+      ['gba-kit/rewind', { frames: 1 }],
+    ] as const) {
+      const at = client.log.length;
+      const stop = await client.stopAfter(async () => {
+        const r = await client.body<{ rewound: boolean }>(command, args);
+        expect(r.rewound).toBe(false);
+      });
+      expect(stop.body).toMatchObject({ reason: 'step', description: 'nothing earlier to rewind to' });
+      expect(client.kinds(at)[0]).toBe(`response:${command}`);
+    }
+    expect((await client.body<StateBody>('gba-kit/state')).position).toMatchObject({ frame: 0, instruction: 0 });
+    // from inside a frame, the start of that frame is a move
+    await stopped(client, 'next', { threadId: 1, granularity: 'instruction' });
+    const back = await stopped(client, 'gba-kit/rewindToFrame', { frame: 0 });
+    expect(back.reason).toBe('rewind');
+    expect((await client.body<StateBody>('gba-kit/state')).position).toMatchObject({ frame: 0, instruction: 0 });
+  });
+
   it('refuses to step while running, and pauses', async () => {
     const client = await launch();
     await client.body('continue', { threadId: 1 });
@@ -431,6 +655,9 @@ describe('stepping', () => {
     const rewound = await stopped(client, 'gba-kit/rewind', { frames: 2 });
     expect(rewound.reason).toBe('rewind');
     expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(1);
+    // a rewind is at least one frame: 0 does not stop in place as if it had moved
+    expect((await stopped(client, 'gba-kit/rewind', { frames: 0 })).reason).toBe('rewind');
+    expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(0);
   });
 });
 
@@ -475,6 +702,20 @@ describe('inspection', () => {
     expect(machine.find((v) => v.name === 'function')!.evaluateName).toBeUndefined();
   });
 
+  it('refuses a frame the stack does not have, and an empty expression', async () => {
+    const client = await launch({ breakpoints: [{ path: UTIL, lines: [await lineOf(UTIL, 'g_bonus_calls++;')] }] });
+    await stopped(client, 'continue', { threadId: 1 });
+    const sp = await client.request('evaluate', { expression: 'sp', frameId: 7 });
+    expect(sp.success).toBe(false);
+    expect(sp.message).toMatch(/no frame 7/);
+    const bonus = await client.request('evaluate', { expression: 'bonus', frameId: 7 });
+    expect(bonus.message).toMatch(/no frame 7/);
+    expect((await client.request('evaluate', { expression: 'sp', frameId: -1 })).success).toBe(false);
+    expect((await client.request('evaluate', { frameId: 0 })).message).toMatch(/empty expression/);
+    expect((await client.request('scopes', { frameId: 7 })).success).toBe(false);
+    expect((await client.request('evaluate', { expression: 'bonus', frameId: 1 })).success).toBe(true);
+  });
+
   it('evaluates for hover, watch and the console, and expands results', async () => {
     const client = await launch({ breakpoints: [{ path: MAIN, lines: [await lineOf(MAIN, 'draw();')] }] });
     await stopped(client, 'continue', { threadId: 1 });
@@ -492,9 +733,47 @@ describe('inspection', () => {
       context: 'watch',
     });
     expect(watch.result).toBe('3 (0x3)');
+    const constant = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: 'MODE_PLAY',
+      context: 'watch',
+    });
+    expect(constant).toMatchObject({ result: 'MODE_PLAY (1)', type: 'enum Mode (constant)' });
+    // a member evaluates as the tree shows it
+    const y = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: 'g_player.pos.y',
+      context: 'watch',
+    });
+    expect(y).toMatchObject({ result: '-7', type: 'int' });
     const bad = await client.request('evaluate', { expression: 'g_nope', context: 'repl' });
     expect(bad.success).toBe(false);
     expect(bad.message).toMatch(/g_nope/);
+    expect(bad.body?.error?.showUser).toBeFalsy();
+  });
+
+  it('answers a failed evaluation where it was asked, never as a notification', async () => {
+    const client = await launch({ breakpoints: [{ path: MAIN, lines: [await lineOf(MAIN, 'draw();')] }] });
+    await stopped(client, 'continue', { threadId: 1 });
+    // an editor's hover sends whatever is under the mouse: a space, a keyword, a type name
+    for (const [expression, context, message] of [
+      ['', 'hover', /empty expression/],
+      [' ', 'hover', /empty expression/],
+      ['if', 'hover', /unknown symbol 'if'/],
+      ['u16', 'hover', /unknown symbol 'u16'/],
+      ['nosuch', 'watch', /unknown symbol 'nosuch'/],
+    ] as const) {
+      const r = await client.request('evaluate', { expression, context, frameId: 0 });
+      expect(r.success).toBe(false);
+      expect(r.message).toMatch(message);
+      expect(r.body?.error?.showUser).toBeFalsy();
+    }
+    const registers = await scopeRef(client, 'Registers');
+    const empty = await client.request('setVariable', { variablesReference: registers, name: 'r0', value: '' });
+    expect(empty.success).toBe(false);
+    expect(empty.message).toMatch(/empty expression/);
+    expect(empty.body?.error?.showUser).toBeFalsy();
+    const unknown = await client.request('gba-kit/nope');
+    expect(unknown.success).toBe(false);
+    expect(unknown.body?.error?.showUser).toBeFalsy();
   });
 
   it('writes variables and registers', async () => {
@@ -507,7 +786,15 @@ describe('inspection', () => {
       name: 'x',
       value: '0xc8',
     });
-    expect(set.value).toBe('200 (0xc8)');
+    expect(set.value).toBe('200 (0x000000c8)');
+    // a write does not invalidate the references the view still holds: they read again
+    const y = await client.body<DebugProtocol.SetVariableResponse['body']>('setVariable', {
+      variablesReference: pos.variablesReference,
+      name: 'y',
+      value: '7',
+    });
+    expect(y.value).toBe('7');
+    expect((await variables(client, pos.variablesReference)).map((m) => m.value)).toEqual(['200 (0x000000c8)', '7']);
     const registers = await scopeRef(client, 'Registers');
     const r0 = await client.body<DebugProtocol.SetVariableResponse['body']>('setVariable', {
       variablesReference: registers,
@@ -515,13 +802,42 @@ describe('inspection', () => {
       value: 'g_player.pos.x + 1',
     });
     expect(r0.value).toBe('0x000000c9');
+    const at = client.log.length;
+    const r1 = await client.body<DebugProtocol.SetVariableResponse['body']>('setVariable', {
+      variablesReference: registers,
+      name: 'r1',
+      value: '9',
+    });
+    expect(r1.value).toBe('0x00000009');
+    // the state event follows the response, as after every write
+    expect(client.kinds(at)).toEqual(['response:setVariable', 'event:gba-kit/state']);
+    for (const [value, shown] of [
+      ['-0x10', '0xfffffff0'],
+      ['-16', '0xfffffff0'],
+      ['0xfffffff0', '0xfffffff0'],
+      ['0b101', '0x00000005'],
+      ['MODE_PLAY', '0x00000001'],
+      ['sp', undefined],
+    ] as const) {
+      const r2 = await client.body<DebugProtocol.SetVariableResponse['body']>('setVariable', {
+        variablesReference: registers,
+        name: 'r2',
+        value,
+      });
+      expect(r2.value).toBe(shown ?? (await variables(client, registers)).find((r) => r.name === 'sp')!.value);
+    }
     const cpsr = await client.request('setVariable', { variablesReference: registers, name: 'cpsr', value: '0' });
     expect(cpsr.success).toBe(false);
-    // the machine moved: the old reference is stale
+    expect(cpsr.message).toMatch(/not writable/);
+    expect(cpsr.body?.error?.id).toBe(1007);
+    expect(cpsr.body?.error?.showUser).toBeFalsy();
+    // the machine moved: the old reference is stale, and says so by its own code
     await stopped(client, 'next', { threadId: 1 });
     const stale = await client.request('variables', { variablesReference: pos.variablesReference });
     expect(stale.success).toBe(false);
     expect(stale.message).toMatch(/stale/);
+    expect(stale.body?.error?.id).toBe(1008);
+    expect(stale.body?.error?.showUser).toBeFalsy();
   });
 
   it('disassembles with symbols, labels and source, and reads and writes memory', async () => {
@@ -571,18 +887,66 @@ describe('inspection', () => {
       count: 8,
     });
     expect(Array.from(Buffer.from(mem.data!, 'base64'))).toEqual([8, 0, 0, 0, 13, 0, 0, 0]); // g_samples[2], [3]: untouched by the first frame
+    const globals = await scopeRef(client, 'Globals');
+    const at = client.log.length;
     const write = await client.body<DebugProtocol.WriteMemoryResponse['body']>('writeMemory', {
       memoryReference: samples.memoryReference,
       offset: 8,
       data: Buffer.from([9, 0, 0, 0]).toString('base64'),
     });
     expect(write.bytesWritten).toBe(4);
+    expect(client.kinds(at)).toEqual(['response:writeMemory', 'event:gba-kit/state']);
     expect(await num(client, 'g_samples[2]')).toBe(9);
+    // a reference from before the write still reads, and shows it
+    const shown = (await variables(client, globals)).find((v) => v.name === 'g_samples')!;
+    expect((await variables(client, shown.variablesReference))[2]!.value).toMatch(/^9\b/);
     const edge = await client.body<DebugProtocol.ReadMemoryResponse['body']>('readMemory', {
       memoryReference: '0x00003ffc',
       count: 8,
     }); // the BIOS ends at 0x4000
     expect(edge.unreadableBytes).toBe(4);
+    const backwards = await client.body<DebugProtocol.ReadMemoryResponse['body']>('readMemory', {
+      memoryReference: '0x03000004',
+      offset: -4,
+      count: 4,
+    }); // a negative offset is the protocol's
+    expect(backwards).toMatchObject({ address: '0x03000000', unreadableBytes: 0 });
+  });
+
+  it('refuses a memory or disassembly request it cannot answer, by the field at fault', async () => {
+    const client = await launch();
+    const refuse = async (command: string, args: unknown, message: RegExp): Promise<void> => {
+      const r = await client.request(command, args);
+      expect(r.success, `${command} ${JSON.stringify(args)}`).toBe(false);
+      expect(r.message).toMatch(message);
+      expect(r.message).not.toMatch(/Cannot read properties|is not a function|Invalid typed array/);
+    };
+    await refuse('readMemory', { memoryReference: '0x03000000', count: -4 }, /'count' must be an integer/);
+    await refuse('readMemory', { memoryReference: '0x03000000' }, /'count' must be an integer/);
+    await refuse('readMemory', { memoryReference: '0x03000000', count: 2.5 }, /'count' must be an integer/);
+    await refuse('readMemory', { memoryReference: '0x03000000', count: 1e9 }, /'count' must be an integer/);
+    await refuse('readMemory', { memoryReference: '', count: 4 }, /not an address/);
+    await refuse('readMemory', { count: 4 }, /not an address/);
+    await refuse('readMemory', { memoryReference: '0x1p3', count: 4 }, /not an address/);
+    await refuse('readMemory', { memoryReference: '0x03000000', offset: 4294967296, count: 4 }, /out of range/);
+    await refuse('writeMemory', { memoryReference: '0x03000000' }, /missing 'data'/);
+    await refuse('writeMemory', { memoryReference: '0x03000000', data: '!!!not base64!!!' }, /not base64/);
+    await refuse('disassemble', { memoryReference: '0x08000000', instructionCount: -5 }, /instructionCount/);
+    await refuse('disassemble', { memoryReference: '0x08000000' }, /instructionCount/);
+    // a count no editor asks for is answered in bounds, and the adapter is not busy for minutes
+    const started = performance.now();
+    const { instructions } = await client.body<DebugProtocol.DisassembleResponse['body']>('disassemble', {
+      memoryReference: '0x08000000',
+      instructionCount: 10_000_000,
+    });
+    expect(instructions.length).toBe(4096);
+    expect(performance.now() - started).toBeLessThan(5000);
+    expect((await client.request('threads')).success).toBe(true);
+    const zero = await client.body<DebugProtocol.ReadMemoryResponse['body']>('readMemory', {
+      memoryReference: '0x03000000',
+      count: 0,
+    });
+    expect(zero).toMatchObject({ data: '', unreadableBytes: 0 });
   });
 });
 
@@ -591,7 +955,21 @@ describe('emulator requests', () => {
     const client = await launch();
     expect((await client.body<{ buttons: number }>('gba-kit/input', { button: 0, down: true })).buttons).toBe(1);
     expect((await client.body<{ buttons: number }>('gba-kit/buttons', { mask: 0b110 })).buttons).toBe(0b110);
+    expect((await client.body<{ buttons: number }>('gba-kit/buttons', { mask: 0b1000000011 })).buttons).toBe(
+      0b1000000011,
+    );
+    expect((await client.body<{ buttons: number }>('gba-kit/buttons', { mask: 0b110 })).buttons).toBe(0b110);
+    let at = client.log.length;
+    const toggled = await client.body<GbaKitRequests['gba-kit/trace']['body']>('gba-kit/trace', {
+      enabled: true,
+      count: 0,
+    });
+    expect(toggled).toEqual({ enabled: true, entries: [] }); // an explicit 0: the flag alone
+    expect(client.kinds(at)).toEqual(['response:gba-kit/trace', 'event:gba-kit/state']);
+    expect((client.events('gba-kit/state').at(-1)!.body as StateBody).tracing).toBe(true);
+    at = client.log.length;
     await client.body('gba-kit/trace', { enabled: true });
+    expect(client.kinds(at)).toEqual(['response:gba-kit/trace']); // already on: nothing changed
     await stopped(client, 'gba-kit/stepFrame');
     await stopped(client, 'gba-kit/stepFrame');
     const palette = await client.body<GbaKitRequests['gba-kit/ppu']['body']>('gba-kit/ppu', { kind: 'palette' });
@@ -626,10 +1004,107 @@ describe('emulator requests', () => {
     expect(trace.entries[4]!.pc).toBeGreaterThanOrEqual(0x08000000);
     const events = await client.body<GbaKitRequests['gba-kit/events']['body']>('gba-kit/events', { count: 1000 });
     expect(events.entries.some((e) => e.event.kind === 'vblank')).toBe(true);
+    expect(
+      (await client.body<GbaKitRequests['gba-kit/events']['body']>('gba-kit/events', { count: 0 })).entries,
+    ).toEqual([]);
+    expect(
+      (await client.body<GbaKitRequests['gba-kit/trace']['body']>('gba-kit/trace', { count: 1e9 })).entries.length,
+    ).toBeLessThanOrEqual(LOG.max);
     const frame = await client.body<GbaKitRequests['gba-kit/frame']['body']>('gba-kit/frame');
-    expect(Buffer.from(frame.rgba, 'base64').length).toBe(240 * 160 * 4);
+    expect(frame).toMatchObject({ width: STREAM.width, height: STREAM.height });
+    expect(Buffer.from(frame.rgba, 'base64').length).toBe(STREAM.width * STREAM.height * 4);
     const unknown = await client.request('gba-kit/nope');
     expect(unknown.success).toBe(false);
+    expect(unknown.message).toMatch(/unknown request 'gba-kit\/nope'/);
+  });
+
+  it('refuses a malformed request by the field at fault, changing nothing', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(projectDir);
+    const client = await launch({ projectDir });
+    const cases: Array<[string, unknown, RegExp]> = [
+      ['setBreakpoints', {}, /missing 'source'/],
+      ['setBreakpoints', { source: { path: MAIN }, breakpoints: [{}] }, /'line' must be an integer/],
+      ['setFunctionBreakpoints', { breakpoints: [{}] }, /missing 'name'/],
+      ['setInstructionBreakpoints', { breakpoints: [{}] }, /not an address: undefined/],
+      ['dataBreakpointInfo', {}, /missing 'name'/],
+      ['dataBreakpointInfo', { name: 42 }, /'name' must be a string/],
+      ['evaluate', { frameId: 0 }, /empty expression/],
+      ['setVariable', { variablesReference: 1, value: '1' }, /missing 'name'/],
+      ['gba-kit/setLabel', { address: 'abc', label: 'x' }, /not an address: abc/],
+      ['gba-kit/setLabel', { address: 0x03000000, label: 42 }, /'label' must be a string/],
+      ['gba-kit/setLabel', {}, /not an address: undefined/],
+      ['gba-kit/setLabel', { address: 0x03000000, label: 'x', size: 0 }, /'size' must be an integer/],
+      ['gba-kit/importLabels', {}, /missing 'text'/],
+      ['gba-kit/importLabels', { text: 42 }, /'text' must be a string/],
+      ['gba-kit/searchMemory', { value: 0, size: 3 }, /'size' must be 1, 2 or 4/],
+      ['gba-kit/searchMemory', { value: 'x', size: 4 }, /'value' must be a number/],
+      ['gba-kit/searchMemory', { value: 0, size: 4, region: 'vram' }, /unknown region 'vram'/],
+      ['gba-kit/filterMemory', {}, /'value' must be a number/],
+      ['gba-kit/filterMemory', { value: 0, size: 4, addresses: 'x' }, /'addresses' must be a list/],
+      ['gba-kit/input', { button: 99, down: true }, /'button' must be an integer from 0 to 9/],
+      ['gba-kit/buttons', {}, /'mask' must be an integer/],
+      ['gba-kit/saveState', { name: 42 }, /'name' must be a string/],
+      ['gba-kit/replay', {}, /missing 'recording'/],
+      ['gba-kit/replay', { recording: { romHash: 'x' } }, /not an input recording/],
+      ['gba-kit/stream', {}, /missing 'path'/],
+      ['gba-kit/stream', { path: '' }, /'path' is empty/],
+      ['gba-kit/loadState', {}, /give a state name or path/],
+    ];
+    for (const [command, args, message] of cases) {
+      const r = await client.request(command, args);
+      expect(r.success, `${command} ${JSON.stringify(args)}`).toBe(false);
+      expect(r.message, command).toMatch(message);
+      expect(r.message).not.toMatch(/Cannot read properties|is not a function|is not iterable|Received/);
+      expect(r.body?.error?.showUser).toBeFalsy();
+    }
+    // a missing list of breakpoints clears them, as the protocol's empty list does
+    expect((await client.request('setExceptionBreakpoints', {})).success).toBe(true);
+    expect((await client.request('setFunctionBreakpoints', {})).success).toBe(true);
+    expect((await client.body<{ labels: unknown[] }>('gba-kit/labels')).labels).toEqual([]);
+    await expect(readFile(join(projectDir, '.gba-kit', 'labels.json'))).rejects.toThrow();
+    expect((await client.body<{ buttons: number }>('gba-kit/state')) as unknown).toMatchObject({ frame: 0 });
+  });
+
+  it('reads only the states directory for a load, and lists states without reading their snapshots', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(projectDir);
+    const client = await launch({ projectDir });
+    const statesDir = join(projectDir, '.gba-kit', 'states');
+    await mkdir(statesDir, { recursive: true });
+    await writeFile(join(projectDir, 'outside.txt'), 'SECRET_TOKEN=abc123');
+    await writeFile(join(statesDir, 'junk.json'), 'not json');
+    await writeFile(join(statesDir, 'other.json'), JSON.stringify({ format: 'something-else', name: 'x' }));
+    for (const [args, message] of [
+      [{ path: '/etc/hosts' }, /state files live under/],
+      [{ path: join(projectDir, 'outside.txt') }, /state files live under/],
+      [{ path: '../outside.txt' }, /state files live under/],
+      [{ path: tmpdir() }, /state files live under/],
+      [{ path: statesDir }, /state files live under/],
+      [{ name: '../../outside' }, /no such state/],
+      [{ name: 'junk' }, /^gba-kit\/loadState: not a gba-kit save state$/],
+      [{ name: 'other' }, /^gba-kit\/loadState: not a gba-kit save state$/],
+    ] as const) {
+      const r = await client.request('gba-kit/loadState', args);
+      expect(r.success, JSON.stringify(args)).toBe(false);
+      expect(r.message).toMatch(message);
+      expect(r.message).not.toMatch(/SECRET|Host|EISDIR|Unexpected token/);
+    }
+    await stopped(client, 'gba-kit/stepFrame');
+    const saved = await client.body<GbaKitRequests['gba-kit/saveState']['body']>('gba-kit/saveState', { name: 'one' });
+    await stopped(client, 'gba-kit/stepFrame');
+    const files = client.adapter.session!.host.files!;
+    const readText = vi.spyOn(files, 'readText');
+    const readHead = vi.spyOn(files, 'readHead');
+    const { states } = await client.body<GbaKitRequests['gba-kit/listStates']['body']>('gba-kit/listStates');
+    expect(states.map((s) => ({ name: s.name, frame: s.frame, path: s.path }))).toEqual([
+      { name: 'one', frame: 1, path: saved.path },
+    ]);
+    expect(readHead).toHaveBeenCalledWith(saved.path, expect.any(Number));
+    // only the files not laid out as save states are read whole
+    expect(readText.mock.calls.map((c) => c[0])).not.toContain(saved.path);
+    expect((await stopped(client, 'gba-kit/loadState', { path: saved.path })).reason).toBe('restart');
+    expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(1);
   });
 
   it('labels persist under the project directory and import symbol files', async () => {
@@ -660,7 +1135,12 @@ describe('emulator requests', () => {
     const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
     tempDirs.push(projectDir);
     const client = await launch({ projectDir });
+    expect(await client.body('gba-kit/lastRecording')).toEqual({ last: null });
+    let at = client.log.length;
     await client.body('gba-kit/recordStart');
+    expect(client.kinds(at)).toEqual(['response:gba-kit/recordStart', 'event:gba-kit/state']);
+    expect((client.events('gba-kit/state').at(-1)!.body as StateBody).recording).toBe(true);
+    expect((client.events('gba-kit/state').at(-1)!.body as StateBody).history.recordingStart).toBe(0);
     await client.body('gba-kit/input', { button: 0, down: true });
     await stopped(client, 'gba-kit/stepFrame');
     await stopped(client, 'gba-kit/stepFrame');
@@ -674,8 +1154,13 @@ describe('emulator requests', () => {
       frame: 3,
       path: join(projectDir, '.gba-kit', 'states', 'three_frames.json'),
     });
+    at = client.log.length;
     const rec = await client.body<GbaKitRequests['gba-kit/recordStop']['body']>('gba-kit/recordStop');
+    expect(client.kinds(at)).toEqual(['response:gba-kit/recordStop', 'event:gba-kit/state']);
+    expect((client.events('gba-kit/state').at(-1)!.body as StateBody).recording).toBe(false);
+    expect((client.events('gba-kit/state').at(-1)!.body as StateBody).history.recordingStart).toBeNull();
     expect(rec.recording.frames).toEqual([1, 1, 0]);
+    expect(await client.body('gba-kit/lastRecording')).toEqual({ last: rec }); // whoever stopped it
     expect(rec.script).toContain("press('a', { hold: 2 })");
     const keysAfter = await num(client, 'g_keys');
 
@@ -699,24 +1184,75 @@ describe('emulator requests', () => {
     tempDirs.push(dir);
     const pipe = process.platform === 'win32' ? `\\\\.\\pipe\\gba-kit-test-${process.pid}` : join(dir, 'frames.sock');
     const frames: Array<{ frame: number; width: number; height: number; rgba: Uint8Array }> = [];
+    // what each connection carried: the adapter connects anew for every `gba-kit/stream`
+    const connections: Array<{ frames: number[]; audio: number }> = [];
+    const sockets: Socket[] = [];
     const server: Server = createServer((socket) => {
-      const reader = new StreamReader((f) => frames.push(f));
+      sockets.push(socket);
+      const seen = { frames: [] as number[], audio: 0 };
+      connections.push(seen);
+      const reader = new StreamReader(
+        (f) => {
+          frames.push(f);
+          seen.frames.push(f.frame);
+        },
+        () => seen.audio++,
+      );
       socket.on('data', (chunk: Buffer) => reader.push(chunk));
     });
     await new Promise<void>((resolve) => server.listen(pipe, resolve));
+    const until = async (ok: () => boolean): Promise<void> => {
+      for (let i = 0; i < 400 && !ok(); i++) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      expect(ok()).toBe(true);
+    };
     try {
       const client = await launch();
       expect((await client.body<{ connected: boolean }>('gba-kit/stream', { path: pipe })).connected).toBe(true);
       await stopped(client, 'gba-kit/stepFrame');
-      await new Promise((r) => setTimeout(r, 50));
-      expect(frames.length).toBeGreaterThanOrEqual(2);
+      await until(() => frames.some((f) => f.frame === 1));
+      expect(frames[0]!.frame).toBe(0); // connecting sends the screen as it is
       const last = frames[frames.length - 1]!;
       expect(last).toMatchObject({ width: 240, height: 160, frame: 1 });
       expect(last.rgba.length).toBe(240 * 160 * 4);
+
+      // audio only when asked for: a run's audio follows its frame, so the next frame proves none came
+      await stopped(client, 'gba-kit/stepFrame');
+      await until(() => connections[0]!.frames.includes(2));
+      expect(connections[0]!.audio).toBe(0);
+      expect((await client.body<{ connected: boolean }>('gba-kit/stream', { path: pipe, audio: true })).connected).toBe(
+        true,
+      );
+      await stopped(client, 'gba-kit/stepFrame');
+      await until(() => connections[1]!.audio > 0);
+      expect(
+        (await client.body<{ connected: boolean }>('gba-kit/stream', { path: pipe, audio: false })).connected,
+      ).toBe(true);
+      await stopped(client, 'gba-kit/stepFrame');
+      await stopped(client, 'gba-kit/stepFrame');
+      await until(() => connections[2]!.frames.includes(5));
+      expect(connections[2]!.audio).toBe(0);
+      expect(connections.length).toBe(3);
+
       const missing = await client.request('gba-kit/stream', { path: join(dir, 'nope.sock') });
       expect(missing.success).toBe(false);
     } finally {
+      // the adapter keeps its end open until it disconnects, which happens after this
+      for (const s of sockets) {
+        s.destroy();
+      }
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it('is the executable `npx @gba-kit/debug-adapter` picks', async () => {
+    // npm runs the bin named after the (unscoped) package when there are several
+    const pkg = JSON.parse(await readFile(join(here, '..', '..', 'package.json'), 'utf8')) as {
+      name: string;
+      bin: Record<string, string>;
+    };
+    expect(pkg.bin[pkg.name.replace(/^@[^/]+\//, '')]).toBe('dist/cli.js');
+    expect(pkg.bin['gba-kit-screen']).toBe('dist/screen.js');
   });
 });

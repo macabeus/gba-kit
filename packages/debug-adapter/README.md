@@ -28,20 +28,22 @@ Standard DAP, as an editor expects it:
   refused as stale.
 - **Evaluate** for hover, Watch and the console: C operators, `[addr]`,
   `{addr}`, `u32(addr)`, registers, `frame`/`scanline`/`cycle`, symbols,
-  `a.b[3].c` paths, `&symbol`, labels.
+  `a.b[3].c` paths, enumerators, `&symbol`, labels.
 - **Disassembly** with symbols, labels and source lines, in the instruction set
   the ELF's mapping symbols state; **memory** read and write; **loaded sources**;
-  **restart**.
+  **restart**, which reads the ROM and ELF from disk again (so an edit, a rebuild
+  and a restart debug the new program) with the breakpoints carried over.
 
 Emulator operations are `gba-kit/*` custom requests, typed in
-`@gba-kit/debug-adapter/protocol`: buttons, `stepFrame` / `stepScanline`,
+`@gba-kit/debug-adapter/protocol` (the same module as
+`@gba-kit/debug-core/protocol`, where they are defined): buttons, `stepFrame` / `stepScanline`,
 `rewind` by frames, save states under `<project>/.gba-kit/states/`, input
 recordings (and the `press`/`wait` script they amount to), the palette / tiles /
 tilemap / sprites / backgrounds views, decoded I/O registers, the instruction
 trace and hardware event log, labels (persisted to `.gba-kit/labels.json`,
 importable from `.sym` files), memory search, and a frame/audio stream over a
 pipe the client owns. Every stop, resume and rewind is also a `gba-kit/state`
-event.
+event, as is every recording start or stop and every tracing toggle.
 
 ## Launch configuration
 
@@ -88,7 +90,8 @@ The screen is not part of DAP. `gba-kit-screen` serves a browser page with the
 display and a keyboard gamepad, fed by the adapter over a pipe it owns:
 
 ```bash
-npx gba-kit-screen            # prints http://localhost:4712/ and the pipe path
+npx -p @gba-kit/debug-adapter gba-kit-screen   # prints http://localhost:4712/ and the pipe path
+# or: pnpm --package=@gba-kit/debug-adapter dlx gba-kit-screen
 ```
 
 then, in the debug session, send the request it prints:
@@ -109,7 +112,8 @@ with a launch configuration of `type: "gba-kit"`, `request: "launch"` and the
 `dap-register-debug-provider`; Zed's `debug.json` and JetBrains' generic DAP
 support (2025.1+) take the same command line and arguments. Exception filters
 show up as the hardware events, custom requests are available wherever the
-client exposes `request`, and `gba-kit-screen` provides the display.
+client exposes `request`, and `gba-kit-screen` (installed globally, or through
+`npx -p @gba-kit/debug-adapter gba-kit-screen`) provides the display.
 
 ## In-process
 

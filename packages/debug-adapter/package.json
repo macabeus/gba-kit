@@ -7,6 +7,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
+    "debug-adapter": "dist/cli.js",
     "gba-kit-debug-adapter": "dist/cli.js",
     "gba-kit-screen": "dist/screen.js"
   },

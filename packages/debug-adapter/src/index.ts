@@ -7,6 +7,6 @@
  * extensions to the protocol are described in `./protocol`.
  */
 export { GbaDebugSession, type LaunchArguments } from './session.js';
-export { FrameStream, StreamReader, encodeInput, encodeStreamMessage } from './stream.js';
+export { FrameStream, StreamReader, encodeInput, encodeStreamMessage, newPipePath } from './stream.js';
 export { ScreenServer, decodeWebSocketFrames, encodeWebSocketFrame } from './screen-server.js';
 export * from './protocol.js';

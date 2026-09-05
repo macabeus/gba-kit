@@ -50,23 +50,36 @@ export class DapClient {
     return r.body as B;
   }
 
-  /** The next event named `event` (optionally matching `predicate`), already received or still to come. */
+  /**
+   * The first event named `event` (optionally matching `predicate`) at or after log
+   * index `since`: one already received, or the next to come. Pass `log.length`
+   * from before an action to wait for what that action causes.
+   */
   event<E extends DebugProtocol.Event = DebugProtocol.Event>(
     event: string,
     predicate: (e: E) => boolean = () => true,
     timeoutMs = 10_000,
+    since = 0,
   ): Promise<E> {
     const match = (m: Message): boolean =>
       m.type === 'event' && (m as DebugProtocol.Event).event === event && predicate(m as unknown as E);
+    const received = this.log.slice(since).find(match);
+    if (received) {
+      return Promise.resolve(received as unknown as E);
+    }
     return new Promise<E>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`no '${event}' event within ${timeoutMs}ms`)), timeoutMs);
-      this.#waiters.push({
+      const waiter = {
         match,
-        resolve: (m) => {
+        resolve: (m: Message) => {
           clearTimeout(timer);
           resolve(m as unknown as E);
         },
-      });
+      };
+      const timer = setTimeout(() => {
+        this.#waiters.splice(this.#waiters.indexOf(waiter), 1);
+        reject(new Error(`no '${event}' event within ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.#waiters.push(waiter);
     });
   }
 
@@ -121,7 +134,7 @@ export class DapClient {
       this.#pending.get(response.request_seq)?.resolve(response);
       this.#pending.delete(response.request_seq);
     }
-    // Waiters see events in order; a waiter registered after the event finds it in the log.
+    // Waiters only see messages dispatched after they were registered; `event()` scans the log for earlier ones.
     for (let i = 0; i < this.#waiters.length; i++) {
       if (this.#waiters[i]!.match(message)) {
         const [w] = this.#waiters.splice(i, 1);
@@ -133,8 +146,7 @@ export class DapClient {
 
   /** Wait for a stop after `action`, returning its event. */
   async stopAfter(action: () => Promise<unknown>): Promise<DebugProtocol.StoppedEvent> {
-    const before = this.events('stopped').length;
-    const stopped = this.event<DebugProtocol.StoppedEvent>('stopped', () => this.events('stopped').length > before);
+    const stopped = this.event<DebugProtocol.StoppedEvent>('stopped', () => true, 10_000, this.log.length);
     await action();
     return stopped;
   }

@@ -9,12 +9,14 @@
  * editor, or in-process where a host prefers that.
  */
 import {
+  BUTTON_COUNT,
   type DataAccess,
   EVENT_BREAKPOINT_KINDS,
   type EventBreakpointKind,
   type InputRecording,
   REGISTER_NAMES,
   type Scope,
+  type SearchOptions,
   Session,
   type StopInfo,
   type VarNode,
@@ -24,10 +26,24 @@ import {
 import { createNodeHost, fileExists } from '@gba-kit/debug-core/node';
 import { DebugSession, Event, Handles, InitializedEvent, OutputEvent, TerminatedEvent } from '@vscode/debugadapter';
 import type { DebugProtocol } from '@vscode/debugprotocol';
+import { statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { GbaKitCommand, GbaKitRequests, PpuArguments, PpuBody, SavedStateInfo, StateBody } from './protocol.js';
+import {
+  AUDIO_SAMPLE_RATE,
+  type GbaKitCommand,
+  type GbaKitRequests,
+  LOG,
+  type PpuArguments,
+  type PpuBody,
+  STREAM,
+  type SavedStateInfo,
+  type StateBody,
+  entryCount,
+  rewindFrameCount,
+  tileCount,
+} from './protocol.js';
 import { FrameStream } from './stream.js';
 
 export interface LaunchArguments extends DebugProtocol.LaunchRequestArguments {
@@ -50,19 +66,46 @@ export interface LaunchArguments extends DebugProtocol.LaunchRequestArguments {
 
 /** What a `variablesReference` stands for. */
 interface HandleTarget {
-  /** the machine revision and epoch the values belong to; older handles are stale */
+  /** the machine revision the cached nodes were read at (a write bumps it: read again) and the epoch (a restart: stale) */
   revision: number;
   epoch: number;
   scope?: Scope['kind'];
+  /** the stack frame a scope belongs to, so a local can be named from its handle */
+  frameId?: number;
   /** expression naming the container, when its children can be named (`g_player.pos`) */
   prefix: string | null;
   expand: () => VarNode[];
   nodes: VarNode[] | null;
 }
 
+/** What every breakpoint request last asked for, so a restart's new session gets the same set. */
+interface BreakpointSet {
+  source: Map<string, Parameters<Session['setSourceBreakpoints']>[1]>;
+  functions: Parameters<Session['setFunctionBreakpoints']>[0];
+  instructions: Parameters<Session['setInstructionBreakpoints']>[0];
+  data: Parameters<Session['setDataBreakpoints']>[0];
+  events: EventBreakpointKind[];
+}
+
+type DataSpec = BreakpointSet['data'][number];
+
 const THREAD_ID = 1;
-const AUDIO_SAMPLE_RATE = 32768;
 const CONFIGURATION_TIMEOUT_MS = 5000;
+/** instructions one `disassemble` answers at most; an editor pages by a few dozen, so the cap is never seen */
+const MAX_DISASSEMBLE = 4096;
+/** bytes one `readMemory` answers at most, so a count cannot allocate gigabytes */
+const MAX_READ_MEMORY = 16 * 1024 * 1024;
+/** bytes one data breakpoint may watch: a whole RAM region at most, never all of memory */
+const MAX_WATCH_BYTES = 0x40000;
+/** how much of a save state holds its metadata (the snapshot follows; see `encodeSaveState`) */
+const STATE_HEAD_BYTES = 1024;
+const DATA_ACCESS: readonly DataAccess[] = ['read', 'write', 'readWrite'];
+
+/**
+ * Error ids. Only a launch failure is shown to the user as a notification; every
+ * other error is answered in place (a hover, a Watch row, an input box), where the
+ * editor already renders it.
+ */
 const ERR = {
   launch: 1000,
   noSession: 1001,
@@ -71,8 +114,12 @@ const ERR = {
   unknownRequest: 1004,
   request: 1005,
   setVariable: 1007,
+  /** a `variablesReference` from before the machine moved or was restarted: expand again */
   stale: 1008,
 } as const;
+
+/** A `variablesReference` the machine has moved away from. */
+class StaleReferenceError extends Error {}
 
 /** A stop reason the protocol names, or one of ours (clients show `description`). */
 function dapReason(info: StopInfo): string {
@@ -97,12 +144,69 @@ function childExpression(prefix: string | null, name: string): string | null {
   return null;
 }
 
-function parseAddress(reference: string, offset = 0): number {
-  const base = reference.startsWith('0x') || reference.startsWith('0X') ? parseInt(reference, 16) : Number(reference);
-  if (!Number.isFinite(base)) {
-    throw new Error(`not an address: ${reference}`);
+// ─── argument checks: a malformed request is refused by name, never as a TypeError ───
+
+function need<T>(value: T | null | undefined, what: string): T {
+  if (value === undefined || value === null) {
+    throw new Error(`missing '${what}'`);
   }
-  return (base + offset) >>> 0;
+  return value;
+}
+
+function needString(value: unknown, what: string): string {
+  if (typeof need(value, what) !== 'string') {
+    throw new Error(`'${what}' must be a string`);
+  }
+  return value as string;
+}
+
+function optionalString(value: unknown, what: string): string | undefined {
+  return value === undefined || value === null ? undefined : needString(value, what);
+}
+
+function needInteger(value: unknown, what: string, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`'${what}' must be an integer from ${min} to ${max}, not ${String(value)}`);
+  }
+  return value;
+}
+
+/** A memory reference the adapter handed out (`0x03001234`) or a decimal address, plus an offset, within the bus. */
+function parseAddress(reference: unknown, offset?: number): number {
+  if (typeof reference !== 'string' || !/^(0x[0-9a-f]{1,8}|\d{1,10})$/i.test(reference)) {
+    throw new Error(`not an address: ${String(reference)}`);
+  }
+  if (offset !== undefined && !Number.isInteger(offset)) {
+    throw new Error(`not an offset: ${String(offset)}`);
+  }
+  const base = /^0x/i.test(reference) ? parseInt(reference, 16) : Number(reference);
+  const address = base + (offset ?? 0);
+  if (address < 0 || address > 0xffffffff) {
+    throw new Error(`address out of range: ${reference}${offset ? ` + ${offset}` : ''}`);
+  }
+  return address;
+}
+
+function isBase64(text: string): boolean {
+  return text.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(text);
+}
+
+/** The search options of a `searchMemory` / `filterMemory`, checked: a bad size would step memory wrongly. */
+function searchOptions(args: { value?: unknown; size?: unknown; region?: unknown; limit?: unknown }): SearchOptions {
+  if (typeof args.value !== 'number' || !Number.isFinite(args.value)) {
+    throw new Error(`'value' must be a number, not ${String(args.value)}`);
+  }
+  if (args.size !== 1 && args.size !== 2 && args.size !== 4) {
+    throw new Error(`'size' must be 1, 2 or 4, not ${String(args.size)}`);
+  }
+  if (args.region !== undefined && args.region !== 'iwram' && args.region !== 'ewram' && args.region !== 'both') {
+    throw new Error(`unknown region '${String(args.region)}' (iwram, ewram or both)`);
+  }
+  const options: SearchOptions = { value: args.value, size: args.size, region: args.region };
+  if (args.limit !== undefined) {
+    options.limit = needInteger(args.limit, 'limit', 1, Number.MAX_SAFE_INTEGER);
+  }
+  return options;
 }
 
 /** r0–r15 by name; -1 for anything else (cpsr is not written directly). */
@@ -115,21 +219,63 @@ function safeName(name: string): string {
   return name.replace(/[^\w.-]+/g, '_').slice(0, 80) || 'state';
 }
 
+function fileKind(file: string): 'file' | 'directory' | 'missing' {
+  try {
+    return statSync(file).isFile() ? 'file' : 'directory';
+  } catch {
+    return 'missing';
+  }
+}
+
+/** The path of `what` from the launch configuration, which must name a file. */
+function existingFile(file: string, what: string): string {
+  const kind = fileKind(file);
+  if (kind === 'missing') {
+    throw new Error(`${what} not found: ${file}`);
+  }
+  if (kind === 'directory') {
+    throw new Error(`${what} is not a file: ${file}`);
+  }
+  return file;
+}
+
+interface StateMeta {
+  format?: string;
+  name?: string;
+  frame?: number;
+  createdAt?: string;
+  romHash?: string;
+}
+
 export class GbaDebugSession extends DebugSession {
   #session: Session | null = null;
-  #sessionReady: Array<(session: Session) => void> = [];
+  /** told of every session: the launch's, and each restart's */
+  readonly #sessionListeners: Array<(session: Session) => void> = [];
+  #launchArgs: LaunchArguments | null = null;
+  #unwire: (() => void) | null = null;
   #configurationDone: (() => void) | null = null;
   #stopOnEntry = true;
+  /** epochs of the sessions a restart replaced, so `epoch` keeps growing across restarts */
+  #epochBase = 0;
   readonly #handles = new Handles<HandleTarget>();
   readonly #stream = new FrameStream();
   #audioOff: (() => void) | null = null;
+  /** whether the stream's client asked for audio (a restart's session subscribes again) */
+  #audioWanted = false;
   /** while set, session events queue here so a response can go out first */
   #deferred: DebugProtocol.Event[] | null = null;
+  readonly #breakpoints: BreakpointSet = { source: new Map(), functions: [], instructions: [], data: [], events: [] };
 
   constructor() {
     super();
     this.setDebuggerLinesStartAt1(true);
     this.setDebuggerColumnsStartAt1(true);
+    this.#stream.onInput = (mask) => {
+      const s = this.#session;
+      if (s && s.state !== 'disposed') {
+        s.setButtons(mask);
+      }
+    };
   }
 
   /** The core session, once `launch` has created it (for an in-process host that wants the frames directly). */
@@ -137,11 +283,11 @@ export class GbaDebugSession extends DebugSession {
     return this.#session;
   }
 
+  /** Called with the session once launched, and again with each session a restart creates. */
   onSession(cb: (session: Session) => void): void {
+    this.#sessionListeners.push(cb);
     if (this.#session) {
       cb(this.#session);
-    } else {
-      this.#sessionReady.push(cb);
     }
   }
 
@@ -165,6 +311,7 @@ export class GbaDebugSession extends DebugSession {
       supportsWriteMemoryRequest: true,
       supportsDataBreakpoints: true,
       supportsSetVariable: true,
+      // A restart reloads the ROM and ELF from disk, so a rebuilt program is picked up.
       supportsRestartRequest: true,
       supportsTerminateRequest: true,
       supportsLoadedSourcesRequest: true,
@@ -181,33 +328,30 @@ export class GbaDebugSession extends DebugSession {
   }
 
   protected override async launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchArguments): Promise<void> {
+    if (this.#session) {
+      this.sendErrorResponse(response, ERR.launch, 'gba-kit: already launched; restart, or disconnect first');
+      return;
+    }
     try {
-      const session = await this.#createSession(args);
-      this.#session = session;
-      this.#stopOnEntry = args.stopOnEntry ?? true;
-      this.#wire(session);
-      for (const cb of this.#sessionReady) {
-        cb(session);
-      }
-      this.#sessionReady = [];
+      const launch = args ?? ({} as LaunchArguments);
+      const session = await this.#createSession(launch);
+      this.#adopt(session, launch);
 
       // Breakpoints arrive between `initialized` and `configurationDone`; the session
       // exists now, so they apply directly. The launch response waits for them, so
       // the first run already honors them.
       this.sendEvent(new InitializedEvent());
+      let timer: ReturnType<typeof setTimeout> | undefined;
       await new Promise<void>((resolve) => {
         this.#configurationDone = resolve;
-        setTimeout(resolve, CONFIGURATION_TIMEOUT_MS);
+        timer = setTimeout(resolve, CONFIGURATION_TIMEOUT_MS);
+        timer.unref?.();
       });
+      clearTimeout(timer);
       this.#configurationDone = null;
 
       this.sendResponse(response);
-      if (this.#stopOnEntry) {
-        this.#sendStopped({ reason: 'entry', address: session.pc, description: 'at the entry point' });
-        session.requestFrame();
-      } else {
-        session.continue();
-      }
+      this.#begin(session, { reason: 'entry', address: session.pc, description: 'at the entry point' });
     } catch (err) {
       this.sendErrorResponse(response, ERR.launch, `gba-kit: ${(err as Error).message}`);
     }
@@ -217,21 +361,16 @@ export class GbaDebugSession extends DebugSession {
     if (!args.rom) {
       throw new Error('"rom" is required in the launch configuration');
     }
-    if (!fileExists(args.rom)) {
-      throw new Error(`ROM not found: ${args.rom}`);
-    }
+    existingFile(args.rom, 'ROM');
     const cwd = args.cwd ?? path.dirname(args.rom);
     let elfPath: string | undefined;
     if (args.elf === null) {
       elfPath = undefined; // explicitly none
     } else if (args.elf) {
-      elfPath = args.elf;
-      if (!fileExists(elfPath)) {
-        throw new Error(`ELF not found: ${elfPath}`);
-      }
+      elfPath = existingFile(args.elf, 'ELF');
     } else {
       const sibling = args.rom.replace(/\.gba$/i, '') + '.elf';
-      if (fileExists(sibling)) {
+      if (fileKind(sibling) === 'file') {
         elfPath = sibling;
         this.#log(`gba-kit: using ${sibling} (set "elf" in the launch configuration to choose another)\n`);
       }
@@ -284,17 +423,42 @@ export class GbaDebugSession extends DebugSession {
     return session;
   }
 
-  #wire(session: Session): void {
-    session.on({
+  /** Make `session` the one every request goes to. */
+  #adopt(session: Session, args: LaunchArguments): void {
+    this.#session = session;
+    this.#launchArgs = args;
+    this.#stopOnEntry = args.stopOnEntry ?? true;
+    this.#unwire = session.on({
       stopped: (info) => this.#sendStopped(info),
       continued: () => {
         this.#handles.reset();
         this.#emit(new Event('continued', { threadId: THREAD_ID, allThreadsContinued: true }));
         this.#emit(new Event('gba-kit/state', this.#stateBody()));
       },
+      // the body changed in place: a client keys its record and trace toggles on it
+      recording: () => this.#emit(new Event('gba-kit/state', this.#stateBody())),
+      tracing: () => this.#emit(new Event('gba-kit/state', this.#stateBody())),
       output: (text, category) => this.#emit(new OutputEvent(text, category === 'log' ? 'console' : category)),
       frame: (rgba, frame) => this.#stream.sendFrame(rgba, frame),
     });
+    for (const cb of this.#sessionListeners) {
+      cb(session);
+    }
+  }
+
+  /** Start a freshly booted session the way the launch configuration says: stopped at entry, or running. */
+  #begin(session: Session, entry: StopInfo): void {
+    if (this.#stopOnEntry) {
+      this.#sendStopped(entry);
+      session.requestFrame();
+    } else {
+      session.continue();
+    }
+  }
+
+  #listenAudio(session: Session): void {
+    this.#audioOff?.();
+    this.#audioOff = session.on({ audio: (samples) => this.#stream.sendAudio(samples, AUDIO_SAMPLE_RATE) });
   }
 
   #sendStopped(info: StopInfo): void {
@@ -331,7 +495,7 @@ export class GbaDebugSession extends DebugSession {
       pc: s.pc,
       position: s.position,
       revision: s.revision,
-      epoch: s.epoch,
+      epoch: s.epoch + this.#epochBase,
       history: s.historyInfo(),
       recording: s.recording,
       tracing: s.tracing,
@@ -343,6 +507,11 @@ export class GbaDebugSession extends DebugSession {
       throw new Error('no emulator session');
     }
     return this.#session;
+  }
+
+  /** An error the editor renders where the request was made (a hover, a Watch row, an input box), not as a notification. */
+  #fail(response: DebugProtocol.Response, id: number, message: string): void {
+    this.sendErrorResponse(response, { id, format: message, showUser: false });
   }
 
   protected override configurationDoneRequest(response: DebugProtocol.ConfigurationDoneResponse): void {
@@ -368,49 +537,101 @@ export class GbaDebugSession extends DebugSession {
     this.#session = null;
     this.#stream.close();
     if (session) {
-      try {
-        if (session.labels.dirty) {
-          await session.saveLabels();
-        }
-      } catch (err) {
-        this.#log(`gba-kit: could not save labels: ${(err as Error).message}\n`, 'stderr');
-      }
-      session.dispose();
+      await this.#retire(session);
     }
   }
 
-  protected override restartRequest(response: DebugProtocol.RestartResponse): void {
-    this.#exec(response, (s) => {
-      s.restart();
-      if (!this.#stopOnEntry) {
-        setImmediate(() => s.state === 'stopped' && s.continue());
+  /** Let go of a session: its labels are saved, its events no longer ours. */
+  async #retire(session: Session): Promise<void> {
+    this.#unwire?.();
+    this.#unwire = null;
+    this.#audioOff?.();
+    this.#audioOff = null;
+    await this.#saveLabels(session);
+    session.dispose();
+  }
+
+  async #saveLabels(session: Session): Promise<void> {
+    try {
+      if (session.labels.dirty) {
+        await session.saveLabels();
       }
-    });
+    } catch (err) {
+      this.#log(`gba-kit: could not save labels: ${(err as Error).message}\n`, 'stderr');
+    }
+  }
+
+  /**
+   * Restart is a fresh launch: the ROM and ELF are read from disk again (the
+   * editor's build task has usually just rewritten them), with the configuration
+   * the client passes or the one it launched with. Breakpoints carry over, set on
+   * the new program by the same names and lines; history, trace and events do not.
+   */
+  protected override async restartRequest(
+    response: DebugProtocol.RestartResponse,
+    args: DebugProtocol.RestartArguments,
+  ): Promise<void> {
+    const current = this.#session;
+    if (!current || !this.#launchArgs) {
+      this.#fail(response, ERR.noSession, 'no emulator session');
+      return;
+    }
+    const next = (args?.arguments as LaunchArguments | undefined) ?? this.#launchArgs;
+    let session: Session;
+    try {
+      // the new session reads the labels file: the old one's edits go there first
+      await this.#saveLabels(current);
+      session = await this.#createSession(next);
+    } catch (err) {
+      this.sendErrorResponse(response, ERR.launch, `gba-kit: cannot restart: ${(err as Error).message}`);
+      return;
+    }
+    this.#epochBase += current.epoch + 1;
+    await this.#retire(current);
+    this.#adopt(session, next);
+    this.#restoreBreakpoints(session);
+    if (this.#stream.connected && this.#audioWanted) {
+      this.#listenAudio(session);
+    }
+    this.#handles.reset();
+    this.sendResponse(response);
+    this.#begin(session, { reason: 'restart', address: session.pc, description: 'restarted from the ROM on disk' });
+  }
+
+  /** Set on a new session what the client last asked for; a data breakpoint follows its name to the rebuilt address. */
+  #restoreBreakpoints(session: Session): void {
+    const bps = this.#breakpoints;
+    for (const [file, specs] of bps.source) {
+      session.setSourceBreakpoints(file, specs);
+    }
+    session.setFunctionBreakpoints(bps.functions);
+    session.setInstructionBreakpoints(bps.instructions);
+    session.setDataBreakpoints(
+      bps.data.map((spec) => {
+        const target = session.dataBreakpointTarget(spec.name, spec.length);
+        return target ? { ...spec, address: target.address } : spec;
+      }),
+    );
+    session.setEventBreakpoints(bps.events);
   }
 
   // ─── execution control ─────────────────────────────────────────────
 
   /**
-   * Run an action that moves the machine. The events it raises (`continued`, a
-   * synchronous step's `stopped`) are held until the response has gone out: the
-   * protocol, and VS Code's bookkeeping, expect response → stopped.
+   * Run `action`, then answer: the response first, then the events it raised (a
+   * `continued`, a synchronous step's `stopped`, the `gba-kit/state` after a
+   * write) — the protocol, and VS Code's bookkeeping, expect response → event.
+   * An error becomes an error response with `code` (a stale reference its own),
+   * shown by the editor in place, never as a notification.
    */
-  #exec(response: DebugProtocol.Response, action: (session: Session) => void, requireStopped = true): void {
-    const session = this.#session;
-    if (!session) {
-      this.sendErrorResponse(response, ERR.noSession, 'no emulator session');
-      return;
-    }
-    if (requireStopped && session.state !== 'stopped') {
-      this.sendErrorResponse(response, ERR.state, `cannot ${response.command} while the machine is ${session.state}`);
-      return;
-    }
+  #answer(response: DebugProtocol.Response, action: () => void, code: number, prefix = ''): void {
     this.#deferred = [];
     try {
-      action(session);
+      action();
     } catch (err) {
       this.#deferred = null;
-      this.sendErrorResponse(response, ERR.request, `${response.command}: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      this.#fail(response, err instanceof StaleReferenceError ? ERR.stale : code, `${prefix}${message}`);
       return;
     }
     const events = this.#deferred;
@@ -419,6 +640,20 @@ export class GbaDebugSession extends DebugSession {
     for (const e of events) {
       this.sendEvent(e);
     }
+  }
+
+  /** Run an action that moves the machine, which (unless told otherwise) must be stopped. */
+  #exec(response: DebugProtocol.Response, action: (session: Session) => void, requireStopped = true): void {
+    const session = this.#session;
+    if (!session) {
+      this.#fail(response, ERR.noSession, 'no emulator session');
+      return;
+    }
+    if (requireStopped && session.state !== 'stopped') {
+      this.#fail(response, ERR.state, `cannot ${response.command} while the machine is ${session.state}`);
+      return;
+    }
+    this.#answer(response, () => action(session), ERR.request, `${response.command}: `);
   }
 
   protected override continueRequest(response: DebugProtocol.ContinueResponse): void {
@@ -500,7 +735,13 @@ export class GbaDebugSession extends DebugSession {
           (scope): DebugProtocol.Scope => ({
             name: scope.name,
             presentationHint: scope.kind === 'locals' ? 'locals' : scope.kind === 'registers' ? 'registers' : undefined,
-            variablesReference: this.#handle(s, { scope: scope.kind, prefix: '', expand: () => scope.nodes }),
+            variablesReference: this.#handle(s, {
+              scope: scope.kind,
+              frameId: args.frameId,
+              prefix: '',
+              // read again on expansion, so a write made meanwhile shows
+              expand: () => s.scopes(args.frameId).find((sc) => sc.kind === scope.kind)?.nodes ?? [],
+            }),
             namedVariables: scope.nodes.length,
             expensive: scope.expensive,
           }),
@@ -513,11 +754,19 @@ export class GbaDebugSession extends DebugSession {
     return this.#handles.create({ ...target, revision: session.revision, epoch: session.epoch, nodes: null });
   }
 
-  /** The nodes behind a reference, refusing one from before the machine last moved. */
+  /**
+   * The nodes behind a reference, refusing one from before the machine last moved
+   * (handles are dropped on every stop and resume) or was restarted. A write in
+   * between does not invalidate the handle; its nodes are read again.
+   */
   #resolveHandle(session: Session, reference: number): HandleTarget {
     const target = this.#handles.get(reference);
-    if (!target || target.revision !== session.revision || target.epoch !== session.epoch) {
-      throw new Error('stale variables reference: the machine has moved on; expand again');
+    if (!target || target.epoch !== session.epoch) {
+      throw new StaleReferenceError('stale variables reference: the machine has moved on; expand again');
+    }
+    if (target.revision !== session.revision) {
+      target.nodes = null;
+      target.revision = session.revision;
     }
     target.nodes ??= target.expand();
     return target;
@@ -539,7 +788,12 @@ export class GbaDebugSession extends DebugSession {
       value: node.value,
       type: node.type,
       variablesReference: node.children
-        ? this.#handle(session, { scope: target.scope, prefix: expression, expand: node.children })
+        ? this.#handle(session, {
+            scope: target.scope,
+            frameId: target.frameId,
+            prefix: expression,
+            expand: node.children,
+          })
         : 0,
       evaluateName: expression ?? undefined,
     };
@@ -559,11 +813,7 @@ export class GbaDebugSession extends DebugSession {
   ): void {
     this.#inspect(response, (s) => {
       const target = this.#resolveHandle(s, args.variablesReference);
-      let nodes = target.nodes!;
-      if (args.filter === 'indexed' || args.start !== undefined || args.count !== undefined) {
-        nodes = nodes.slice(args.start ?? 0, args.count !== undefined ? (args.start ?? 0) + args.count : undefined);
-      }
-      response.body = { variables: nodes.map((n) => this.#variable(s, n, target)) };
+      response.body = { variables: target.nodes!.map((n) => this.#variable(s, n, target)) };
     });
   }
 
@@ -571,54 +821,69 @@ export class GbaDebugSession extends DebugSession {
     response: DebugProtocol.SetVariableResponse,
     args: DebugProtocol.SetVariableArguments,
   ): void {
-    this.#inspect(response, (s) => {
-      const target = this.#resolveHandle(s, args.variablesReference);
-      const node = target.nodes!.find((n) => n.name === args.name);
-      if (!node) {
-        throw new Error(`no variable '${args.name}' here`);
-      }
-      if (node.writable) {
-        const value = s.setVariable(node, args.value);
-        response.body = { value, type: node.type, variablesReference: 0 };
-        return;
-      }
-      const index = target.scope === 'registers' ? registerIndex(node.name) : -1;
-      if (index < 0) {
-        throw new Error(`'${args.name}' is not writable`);
-      }
-      s.setRegister(index, this.#number(s, args.value));
-      response.body = { value: `0x${hex8(s.machine.registers[index]!)}`, type: 'u32', variablesReference: 0 };
-      this.#emit(new Event('gba-kit/state', this.#stateBody()));
-    });
+    this.#inspect(
+      response,
+      (s) => {
+        const name = needString(args.name, 'name');
+        const value = needString(args.value, 'value');
+        const target = this.#resolveHandle(s, args.variablesReference);
+        const node = target.nodes!.find((n) => n.name === name);
+        if (!node) {
+          throw new Error(`no variable '${name}' here`);
+        }
+        if (node.writable) {
+          const written = s.setVariable(node, value);
+          response.body = { value: written, type: node.type, variablesReference: 0 };
+        } else {
+          const index = target.scope === 'registers' ? registerIndex(node.name) : -1;
+          if (index < 0) {
+            throw new Error(`'${name}' is not writable`);
+          }
+          s.setRegister(index, this.#number(s, value));
+          response.body = { value: `0x${hex8(s.machine.registers[index]!)}`, type: 'u32', variablesReference: 0 };
+        }
+        this.#emit(new Event('gba-kit/state', this.#stateBody()));
+      },
+      ERR.setVariable,
+    );
   }
 
-  /** A number from the user: a literal, or any expression the grammar evaluates. */
+  /**
+   * A number from the user, as 32 bits: a literal in any base the grammar knows,
+   * signed (`-0x10` is 0xfffffff0), or an expression it evaluates (`g_frame + 1`,
+   * an enumerator, a register).
+   */
   #number(session: Session, text: string): number {
     const t = text.trim();
-    if (/^-?(0x[0-9a-f]+|\d+)$/i.test(t)) {
-      return Number(t) >>> 0;
+    if (/^-?(0x[0-9a-f]+|0b[01]+|\d+)$/i.test(t)) {
+      const negative = t.startsWith('-');
+      const body = negative ? t.slice(1) : t;
+      const magnitude = /^0b/i.test(body) ? parseInt(body.slice(2), 2) : Number(body);
+      if (magnitude > 0xffffffff) {
+        throw new Error(`number ${t} does not fit in 32 bits`);
+      }
+      return (negative ? -magnitude : magnitude) >>> 0;
     }
-    const value = session.evaluate(t).node.value;
-    const m = /^-?\d+/.exec(value);
-    if (!m) {
+    const { node, address } = session.evaluate(t);
+    const value = node.scalar?.value ?? address;
+    if (value === undefined) {
       throw new Error(`'${text}' is not a number`);
     }
-    return Number(m[0]) >>> 0;
+    return value >>> 0;
   }
 
   /** Answer an inspection request; errors become error responses, never a dead client. */
-  #inspect<R extends DebugProtocol.Response>(response: R, fill: (session: Session) => void): void {
+  #inspect<R extends DebugProtocol.Response>(
+    response: R,
+    fill: (session: Session) => void,
+    code: number = ERR.request,
+  ): void {
     const session = this.#session;
     if (!session) {
-      this.sendErrorResponse(response, ERR.noSession, 'no emulator session');
+      this.#fail(response, ERR.noSession, 'no emulator session');
       return;
     }
-    try {
-      fill(session);
-      this.sendResponse(response);
-    } catch (err) {
-      this.sendErrorResponse(response, ERR.request, (err as Error).message);
-    }
+    this.#answer(response, () => fill(session), code);
   }
 
   #source(localPath: string): DebugProtocol.Source {
@@ -632,13 +897,14 @@ export class GbaDebugSession extends DebugSession {
     args: DebugProtocol.SetBreakpointsArguments,
   ): void {
     this.#inspect(response, (s) => {
-      const localPath = args.source.path ?? '';
+      const localPath = need(args.source, 'source').path ?? '';
       const specs = (args.breakpoints ?? []).map((b) => ({
-        line: b.line,
+        line: needInteger(b.line, 'line', 1, Number.MAX_SAFE_INTEGER),
         condition: b.condition,
         hitCondition: b.hitCondition,
         logMessage: b.logMessage,
       }));
+      this.#breakpoints.source.set(localPath, specs);
       const results = s.setSourceBreakpoints(localPath, specs);
       response.body = {
         breakpoints: results.map((bp, i) => ({
@@ -658,9 +924,13 @@ export class GbaDebugSession extends DebugSession {
     args: DebugProtocol.SetFunctionBreakpointsArguments,
   ): void {
     this.#inspect(response, (s) => {
-      const results = s.setFunctionBreakpoints(
-        args.breakpoints.map((b) => ({ functionName: b.name, condition: b.condition, hitCondition: b.hitCondition })),
-      );
+      const specs = (args.breakpoints ?? []).map((b) => ({
+        functionName: needString(b.name, 'name'),
+        condition: b.condition,
+        hitCondition: b.hitCondition,
+      }));
+      this.#breakpoints.functions = specs;
+      const results = s.setFunctionBreakpoints(specs);
       response.body = {
         breakpoints: results.map((bp) => ({
           id: bp.id,
@@ -677,13 +947,13 @@ export class GbaDebugSession extends DebugSession {
     args: DebugProtocol.SetInstructionBreakpointsArguments,
   ): void {
     this.#inspect(response, (s) => {
-      const results = s.setInstructionBreakpoints(
-        args.breakpoints.map((b) => ({
-          address: parseAddress(b.instructionReference, b.offset),
-          condition: b.condition,
-          hitCondition: b.hitCondition,
-        })),
-      );
+      const specs = (args.breakpoints ?? []).map((b) => ({
+        address: parseAddress(b.instructionReference, b.offset),
+        condition: b.condition,
+        hitCondition: b.hitCondition,
+      }));
+      this.#breakpoints.instructions = specs;
+      const results = s.setInstructionBreakpoints(specs);
       response.body = {
         breakpoints: results.map((bp) => ({
           id: bp.id,
@@ -700,11 +970,13 @@ export class GbaDebugSession extends DebugSession {
     args: DebugProtocol.SetExceptionBreakpointsArguments,
   ): void {
     this.#inspect(response, (s) => {
+      const filters = args.filters ?? [];
       const known = new Set<string>(EVENT_BREAKPOINT_KINDS.map((k) => k.kind));
-      const kinds = args.filters.filter((f): f is EventBreakpointKind => known.has(f));
+      const kinds = filters.filter((f): f is EventBreakpointKind => known.has(f));
+      this.#breakpoints.events = kinds;
       s.setEventBreakpoints(kinds);
       response.body = {
-        breakpoints: args.filters.map((f) => ({
+        breakpoints: filters.map((f) => ({
           verified: known.has(f),
           message: known.has(f) ? undefined : `unknown event '${f}'`,
         })),
@@ -717,14 +989,16 @@ export class GbaDebugSession extends DebugSession {
     args: DebugProtocol.BreakpointLocationsArguments,
   ): void {
     this.#inspect(response, (s) => {
-      const localPath = args.source.path ?? '';
-      const breakpoints: DebugProtocol.BreakpointLocation[] = [];
-      for (let line = args.line; line <= (args.endLine ?? args.line); line++) {
-        if (s.program.hasCodeAt(localPath, line)) {
-          breakpoints.push({ line });
-        }
-      }
-      response.body = { breakpoints };
+      const localPath = need(args.source, 'source').path ?? '';
+      const first = args.line;
+      const last = args.endLine ?? first;
+      // the file's lines with code, not the range: a client may ask for the whole file
+      response.body = {
+        breakpoints: s.program
+          .codeLines(localPath)
+          .filter((line) => line >= first && line <= last)
+          .map((line) => ({ line })),
+      };
     });
   }
 
@@ -733,7 +1007,8 @@ export class GbaDebugSession extends DebugSession {
     args: DebugProtocol.DataBreakpointInfoArguments,
   ): void {
     this.#inspect(response, (s) => {
-      let name = args.name.trim();
+      let name = needString(args.name, 'name').trim();
+      let frameId = args.frameId;
       if (args.variablesReference) {
         const target = this.#handles.get(args.variablesReference);
         const named = target ? childExpression(target.prefix === '' ? null : target.prefix, name) : null;
@@ -746,12 +1021,13 @@ export class GbaDebugSession extends DebugSession {
           };
           return;
         }
+        frameId ??= target?.frameId;
       }
-      const target = s.dataBreakpointTarget(name);
+      const target = s.dataBreakpointTarget(name, undefined, frameId);
       if (!target) {
         response.body = {
           dataId: null,
-          description: `cannot watch '${name}': not a variable, symbol, label or address`,
+          description: `cannot watch '${name}': not a variable, symbol, label or address (a local held in a register has none)`,
         };
         return;
       }
@@ -770,19 +1046,21 @@ export class GbaDebugSession extends DebugSession {
     args: DebugProtocol.SetDataBreakpointsArguments,
   ): void {
     this.#inspect(response, (s) => {
-      const specs = args.breakpoints.map((b) => {
-        const [address, length, ...rest] = b.dataId.split(':');
-        return {
-          address: Number(address),
-          length: Number(length),
-          name: rest.join(':'),
-          access: (b.accessType ?? 'write') as DataAccess,
-          condition: b.condition,
-          hitCondition: b.hitCondition,
-        };
-      });
+      // an id the adapter did not hand out is answered unverified, with why, in its place
+      const wanted = (args.breakpoints ?? []).map((b) => dataSpec(b));
+      const specs = wanted.filter((w): w is DataSpec => typeof w !== 'string');
+      this.#breakpoints.data = specs;
       const results = s.setDataBreakpoints(specs);
-      response.body = { breakpoints: results.map((bp) => ({ id: bp.id, verified: true })) };
+      let i = 0;
+      response.body = {
+        breakpoints: wanted.map((w): DebugProtocol.Breakpoint => {
+          if (typeof w === 'string') {
+            return { verified: false, message: w };
+          }
+          const bp = results[i++]!;
+          return { id: bp.id, verified: bp.verified, message: bp.message };
+        }),
+      };
     });
   }
 
@@ -794,25 +1072,25 @@ export class GbaDebugSession extends DebugSession {
   ): void {
     const session = this.#session;
     if (!session) {
-      this.sendErrorResponse(response, ERR.noSession, 'no emulator session');
+      this.#fail(response, ERR.noSession, 'no emulator session');
       return;
     }
-    try {
-      const { node, address } = session.evaluate(args.expression, args.frameId ?? 0);
-      const prefix =
-        isIdentifier(args.expression.trim()) || /^[A-Za-z_][\w.[\]]*$/.test(args.expression.trim())
-          ? args.expression.trim()
-          : null;
-      response.body = {
-        result: node.value,
-        type: node.type,
-        variablesReference: node.children ? this.#handle(session, { prefix, expand: node.children }) : 0,
-        memoryReference: address !== undefined ? `0x${hex8(address)}` : undefined,
-      };
-      this.sendResponse(response);
-    } catch (err) {
-      this.sendErrorResponse(response, ERR.evaluate, (err as Error).message);
-    }
+    this.#answer(
+      response,
+      () => {
+        // an editor's hover sends whatever is under the mouse, an empty string included
+        const expression = typeof args.expression === 'string' ? args.expression.trim() : '';
+        const { node, address } = session.evaluate(expression, args.frameId ?? 0);
+        const prefix = /^[A-Za-z_][\w.[\]]*$/.test(expression) ? expression : null;
+        response.body = {
+          result: node.value,
+          type: node.type,
+          variablesReference: node.children ? this.#handle(session, { prefix, expand: node.children }) : 0,
+          memoryReference: address !== undefined ? `0x${hex8(address)}` : undefined,
+        };
+      },
+      ERR.evaluate,
+    );
   }
 
   protected override disassembleRequest(
@@ -821,11 +1099,19 @@ export class GbaDebugSession extends DebugSession {
   ): void {
     this.#inspect(response, (s) => {
       const base = parseAddress(args.memoryReference, args.offset);
+      const count = Math.trunc(Number(args.instructionCount));
+      if (!Number.isFinite(count) || count < 0) {
+        throw new Error(`instructionCount must be a non-negative integer, not ${String(args.instructionCount)}`);
+      }
+      const instructionOffset = args.instructionOffset ?? 0;
+      if (!Number.isInteger(instructionOffset)) {
+        throw new Error(`instructionOffset must be an integer, not ${String(args.instructionOffset)}`);
+      }
       // The instruction set at the base decides how far an instruction offset reaches.
       const mode = s.program.modeAt(base) ?? (base === s.pc ? (s.machine.thumb ? 'thumb' : 'arm') : 'thumb');
       const size = mode === 'arm' ? 4 : 2;
-      const start = (base + (args.instructionOffset ?? 0) * size) >>> 0;
-      const lines = s.disassemble(start, args.instructionCount);
+      const start = (base + instructionOffset * size) >>> 0;
+      const lines = s.disassemble(start, Math.min(count, MAX_DISASSEMBLE));
       response.body = {
         instructions: lines.map((l): DebugProtocol.DisassembledInstruction => {
           const label = s.labels.at(l.address);
@@ -854,11 +1140,12 @@ export class GbaDebugSession extends DebugSession {
   ): void {
     this.#inspect(response, (s) => {
       const address = parseAddress(args.memoryReference, args.offset);
-      const { data, readable } = s.readMemory(address, args.count);
+      const count = needInteger(args.count, 'count', 0, MAX_READ_MEMORY);
+      const { data, readable } = s.readMemory(address, count);
       response.body = {
         address: `0x${hex8(address)}`,
         data: Buffer.from(data.subarray(0, readable)).toString('base64'),
-        unreadableBytes: args.count - readable,
+        unreadableBytes: count - readable,
       };
     });
   }
@@ -869,7 +1156,11 @@ export class GbaDebugSession extends DebugSession {
   ): void {
     this.#inspect(response, (s) => {
       const address = parseAddress(args.memoryReference, args.offset);
-      const bytes = new Uint8Array(Buffer.from(args.data, 'base64'));
+      const data = needString(args.data, 'data');
+      if (!isBase64(data)) {
+        throw new Error("'data' is not base64");
+      }
+      const bytes = new Uint8Array(Buffer.from(data, 'base64'));
       const bytesWritten = s.writeMemory(address, bytes);
       if (bytesWritten < bytes.length && !args.allowPartial) {
         throw new Error(`only ${bytesWritten} of ${bytes.length} bytes are writable at 0x${hex8(address)}`);
@@ -894,7 +1185,7 @@ export class GbaDebugSession extends DebugSession {
   ): Promise<void> {
     const session = this.#session;
     if (!session) {
-      this.sendErrorResponse(response, ERR.noSession, 'no emulator session');
+      this.#fail(response, ERR.noSession, 'no emulator session');
       return;
     }
     try {
@@ -904,7 +1195,7 @@ export class GbaDebugSession extends DebugSession {
         this.sendResponse(response);
       }
     } catch (err) {
-      this.sendErrorResponse(response, ERR.request, `${command}: ${(err as Error).message}`);
+      this.#fail(response, ERR.request, `${command}: ${(err as Error).message}`);
     }
   }
 
@@ -920,14 +1211,15 @@ export class GbaDebugSession extends DebugSession {
         return this.#stateBody();
       case 'gba-kit/input': {
         const a = args as Args<'gba-kit/input'>;
-        s.setButton(Number(a.button), Boolean(a.down));
+        s.setButton(needInteger(a.button, 'button', 0, BUTTON_COUNT - 1), Boolean(a.down));
         return { buttons: s.buttons };
       }
       case 'gba-kit/buttons': {
         const a = args as Args<'gba-kit/buttons'>;
-        for (let b = 0; b < 10; b++) {
-          s.setButton(b, ((a.mask >>> b) & 1) === 1);
+        if (!Number.isInteger(a.mask)) {
+          throw new Error(`'mask' must be an integer, not ${String(a.mask)}`);
         }
+        s.setButtons(a.mask);
         return { buttons: s.buttons };
       }
       case 'gba-kit/stepFrame':
@@ -939,10 +1231,10 @@ export class GbaDebugSession extends DebugSession {
       case 'gba-kit/rewind': {
         const a = args as Args<'gba-kit/rewind'>;
         this.#exec(response, () => {
-          const rewound = s.rewindFrames(Math.max(1, Math.floor(Number(a.frames) || 1)));
+          const rewound = s.rewindFrames(rewindFrameCount(a.frames));
           response.body = { rewound };
           if (!rewound) {
-            this.#stayStopped(s, 'no earlier history');
+            this.#stayStopped(s, 'nothing earlier to rewind to');
           }
         });
         return SENT;
@@ -953,30 +1245,33 @@ export class GbaDebugSession extends DebugSession {
           const rewound = s.rewindToFrame(Math.max(0, Math.floor(Number(a.frame) || 0)));
           response.body = { rewound };
           if (!rewound) {
-            this.#stayStopped(s, 'no earlier history');
+            this.#stayStopped(s, 'nothing earlier to rewind to');
           }
         });
         return SENT;
       }
       case 'gba-kit/frame': {
         const rgba = s.machine.framebufferRgba();
-        return { width: 240, height: 160, frame: s.frame, rgba: Buffer.from(rgba).toString('base64') };
+        return {
+          width: STREAM.width,
+          height: STREAM.height,
+          frame: s.frame,
+          rgba: Buffer.from(rgba).toString('base64'),
+        };
       }
       case 'gba-kit/stream': {
         const a = args as Args<'gba-kit/stream'>;
-        await this.#stream.connect(String(a.path));
-        this.#stream.onInput = (mask) => {
-          if (s.state === 'disposed') {
-            return;
-          }
-          for (let b = 0; b < 10; b++) {
-            s.setButton(b, ((mask >>> b) & 1) === 1);
-          }
-        };
+        const pipe = needString(a.path, 'path');
+        if (!pipe) {
+          throw new Error("'path' is empty");
+        }
+        await this.#stream.connect(pipe);
+        this.#audioWanted = Boolean(a.audio);
         this.#audioOff?.();
-        this.#audioOff = a.audio
-          ? s.on({ audio: (samples) => this.#stream.sendAudio(samples, AUDIO_SAMPLE_RATE) })
-          : null;
+        this.#audioOff = null;
+        if (this.#audioWanted) {
+          this.#listenAudio(s);
+        }
         s.requestFrame();
         return { connected: this.#stream.connected };
       }
@@ -984,18 +1279,27 @@ export class GbaDebugSession extends DebugSession {
         s.requestFrame();
         return undefined;
       case 'gba-kit/recordStart':
-        s.startRecording();
-        this.#emit(new Event('gba-kit/state', this.#stateBody()));
-        return undefined;
-      case 'gba-kit/recordStop': {
-        const recording = s.stopRecording();
-        this.#emit(new Event('gba-kit/state', this.#stateBody()));
-        return { recording, script: s.recordingAsScript(recording) };
+        // the session's `recording` event becomes the `gba-kit/state` that follows the response
+        this.#inspect(response, () => s.startRecording());
+        return SENT;
+      case 'gba-kit/recordStop':
+        this.#inspect(response, () => {
+          const recording = s.stopRecording();
+          response.body = { recording, script: s.recordingAsScript(recording) };
+        });
+        return SENT;
+      case 'gba-kit/lastRecording': {
+        const last = s.lastRecording;
+        return { last: last ? { recording: last, script: s.recordingAsScript(last) } : null };
       }
       case 'gba-kit/replay': {
         const a = args as Args<'gba-kit/replay'>;
+        const recording = need(a.recording, 'recording') as InputRecording;
+        if (typeof recording !== 'object' || !Array.isArray(recording.frames)) {
+          throw new Error("'recording' is not an input recording");
+        }
         this.#exec(response, () => {
-          const replayed = s.replayRecording(a.recording as InputRecording);
+          const replayed = s.replayRecording(recording);
           response.body = { replayed };
           if (!replayed) {
             this.#stayStopped(s, 'the recording starts before the history kept');
@@ -1005,19 +1309,19 @@ export class GbaDebugSession extends DebugSession {
       }
       case 'gba-kit/saveState': {
         const a = args as Args<'gba-kit/saveState'>;
-        return this.#saveState(s, a.name);
+        return this.#saveState(s, optionalString(a.name, 'name'));
       }
       case 'gba-kit/loadState': {
         const a = args as Args<'gba-kit/loadState'>;
-        const file = a.path ?? (a.name ? this.#statePath(s, a.name) : null);
-        if (!file) {
-          throw new Error('give a state name or path');
-        }
-        const text = await this.#files(s).readText(file);
-        if (text === null) {
-          throw new Error(`no such state: ${file}`);
-        }
-        this.#exec(response, () => s.loadState(text));
+        const text = await this.#readState(s, a);
+        this.#exec(response, () => {
+          try {
+            s.loadState(text);
+          } catch (err) {
+            // the parser's message quotes the file: say what it is not instead
+            throw err instanceof SyntaxError ? new Error('not a gba-kit save state') : err;
+          }
+        });
         return SENT;
       }
       case 'gba-kit/listStates':
@@ -1028,26 +1332,38 @@ export class GbaDebugSession extends DebugSession {
         return { registers: s.ioRegisters() };
       case 'gba-kit/trace': {
         const a = args as Args<'gba-kit/trace'>;
-        if (a.enabled !== undefined) {
-          s.setTracing(Boolean(a.enabled));
-        }
-        return { enabled: s.tracing, entries: s.trace.last(Math.min(Number(a.count) || 200, 20_000)) };
+        // answered through #inspect so the `gba-kit/state` a toggle causes follows the response
+        this.#inspect(response, () => {
+          if (a.enabled !== undefined) {
+            s.setTracing(Boolean(a.enabled));
+          }
+          response.body = { enabled: s.tracing, entries: s.trace.last(entryCount(a.count, LOG.traceDefault)) };
+        });
+        return SENT;
       }
       case 'gba-kit/events': {
         const a = args as Args<'gba-kit/events'>;
-        return { entries: s.events.last(Math.min(Number(a.count) || 500, 20_000)) };
+        return { entries: s.events.last(entryCount(a.count, LOG.eventsDefault)) };
       }
       case 'gba-kit/labels':
         return { labels: s.labels.all() };
       case 'gba-kit/setLabel': {
         const a = args as Args<'gba-kit/setLabel'>;
-        s.labels.set({ address: Number(a.address) >>> 0, label: a.label ?? '', comment: a.comment, size: a.size });
+        if (!Number.isInteger(a.address) || a.address < 0 || a.address > 0xffffffff) {
+          throw new Error(`not an address: ${String(a.address)}`);
+        }
+        s.labels.set({
+          address: a.address,
+          label: optionalString(a.label, 'label') ?? '',
+          comment: optionalString(a.comment, 'comment'),
+          size: a.size === undefined ? undefined : needInteger(a.size, 'size', 1, 0xffffffff),
+        });
         await this.#labelsChanged(s);
         return { labels: s.labels.all() };
       }
       case 'gba-kit/importLabels': {
         const a = args as Args<'gba-kit/importLabels'>;
-        const imported = s.labels.importSymbols(String(a.text));
+        const imported = s.labels.importSymbols(needString(a.text, 'text'));
         await this.#labelsChanged(s);
         return { imported };
       }
@@ -1055,16 +1371,20 @@ export class GbaDebugSession extends DebugSession {
         return { text: s.labels.exportSymbols() };
       case 'gba-kit/searchMemory': {
         const a = args as Args<'gba-kit/searchMemory'>;
-        return { addresses: s.searchMemory(a) };
+        return { addresses: s.searchMemory(searchOptions(a)) };
       }
       case 'gba-kit/filterMemory': {
         const a = args as Args<'gba-kit/filterMemory'>;
-        return { addresses: s.filterMemory(a.addresses, a.value, a.size) };
+        const { value, size } = searchOptions({ value: a.value, size: a.size });
+        if (!Array.isArray(a.addresses) || a.addresses.some((x) => typeof x !== 'number')) {
+          throw new Error("'addresses' must be a list of numbers");
+        }
+        return { addresses: s.filterMemory(a.addresses, value, size) };
       }
       case 'gba-kit/eventBreakpoints':
         return { kinds: EVENT_BREAKPOINT_KINDS.map((k) => ({ ...k })), enabled: [...s.breakpoints.events] };
       default:
-        this.sendErrorResponse(response, ERR.unknownRequest, `unknown request '${command}'`);
+        this.#fail(response, ERR.unknownRequest, `unknown request '${command}'`);
         return SENT;
     }
   }
@@ -1079,11 +1399,7 @@ export class GbaDebugSession extends DebugSession {
       case 'palette':
         return { kind: 'palette', ...s.palette() };
       case 'tiles': {
-        const t = s.tiles(
-          Number(args.charBase) >>> 0,
-          args.bpp === 8 ? 8 : 4,
-          Math.min(Math.max(1, Number(args.count) || 512), 2048),
-        );
+        const t = s.tiles(Number(args.charBase) >>> 0, args.bpp === 8 ? 8 : 4, tileCount(args.count));
         return {
           kind: 'tiles',
           charBase: t.charBase,
@@ -1127,6 +1443,34 @@ export class GbaDebugSession extends DebugSession {
     return { name: stateName, path: file, frame: session.frame, createdAt: new Date().toISOString() };
   }
 
+  /**
+   * The text of a saved state, by name or by a path `saveState` / `listStates`
+   * gave out. Only the states directory is read from: a state name is the request's
+   * whole reach into the file system.
+   */
+  async #readState(session: Session, args: { name?: unknown; path?: unknown }): Promise<string> {
+    const dir = path.resolve(this.#statesDir(session));
+    const file =
+      args.path !== undefined
+        ? path.resolve(dir, needString(args.path, 'path'))
+        : args.name !== undefined
+          ? path.resolve(this.#statePath(session, needString(args.name, 'name')))
+          : null;
+    if (!file) {
+      throw new Error('give a state name or path');
+    }
+    if (!file.startsWith(dir + path.sep)) {
+      throw new Error(`state files live under ${dir}`);
+    }
+    const text = await this.#files(session)
+      .readText(file)
+      .catch(() => null);
+    if (text === null) {
+      throw new Error(`no such state: ${path.basename(file)}`);
+    }
+    return text;
+  }
+
   async #listStates(session: Session): Promise<SavedStateInfo[]> {
     const files = this.#files(session);
     const dir = this.#statesDir(session);
@@ -1136,32 +1480,71 @@ export class GbaDebugSession extends DebugSession {
         continue;
       }
       const file = files.join(dir, entry);
-      const text = await files.readText(file);
-      if (!text) {
-        continue;
-      }
-      try {
-        const meta = JSON.parse(text) as {
-          format?: string;
-          name?: string;
-          frame?: number;
-          createdAt?: string;
-          romHash?: string;
-        };
-        if (meta.format === 'gba-kit-savestate' && (!meta.romHash || meta.romHash === session.romHash)) {
-          out.push({
-            name: meta.name ?? entry.replace(/\.json$/, ''),
-            path: file,
-            frame: meta.frame ?? 0,
-            createdAt: meta.createdAt ?? '',
-          });
-        }
-      } catch {
-        // not a state file
+      const meta = await this.#stateMeta(session, file);
+      if (meta?.format === 'gba-kit-savestate' && (!meta.romHash || meta.romHash === session.romHash)) {
+        out.push({
+          name: meta.name ?? entry.replace(/\.json$/, ''),
+          path: file,
+          frame: meta.frame ?? 0,
+          createdAt: meta.createdAt ?? '',
+        });
       }
     }
     return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
+
+  /**
+   * A state file's metadata, from its head alone when the host can read one: the
+   * snapshot that follows is most of a megabyte, and the keys precede it (see
+   * `encodeSaveState`). A file laid out otherwise is parsed whole. Null when the
+   * file is not JSON.
+   */
+  async #stateMeta(session: Session, file: string): Promise<StateMeta | null> {
+    const files = this.#files(session);
+    let text = files.readHead ? await files.readHead(file, STATE_HEAD_BYTES) : null;
+    const snapshotAt = text?.indexOf(',"snapshot":') ?? -1;
+    text = snapshotAt >= 0 ? text!.slice(0, snapshotAt) + '}' : await files.readText(file);
+    if (!text) {
+      return null;
+    }
+    try {
+      return JSON.parse(text) as StateMeta;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * The data breakpoint a client asks for, from an id `dataBreakpointInfo` gave out
+ * (`address:length:name`); the reason it cannot be set when the id is not one, or
+ * would watch more than a region.
+ */
+function dataSpec(b: DebugProtocol.DataBreakpoint): DataSpec | string {
+  const m = /^(\d+):(\d+):(.*)$/s.exec(typeof b.dataId === 'string' ? b.dataId : '');
+  if (!m) {
+    return `not a data breakpoint id: '${String(b.dataId)}' (dataBreakpointInfo gives one)`;
+  }
+  const address = Number(m[1]);
+  const length = Number(m[2]);
+  if (length < 1 || length > MAX_WATCH_BYTES) {
+    return `cannot watch ${length} bytes (1 to ${MAX_WATCH_BYTES})`;
+  }
+  if (address > 0xffffffff || regionOf(address) === null || regionOf(address + length - 1) === null) {
+    return `no memory at ${m[1]} for ${length} bytes`;
+  }
+  const access = b.accessType ?? 'write';
+  if (!DATA_ACCESS.includes(access as DataAccess)) {
+    return `unknown access type '${access}'`;
+  }
+  return {
+    address,
+    length,
+    name: m[3]!,
+    access: access as DataAccess,
+    condition: b.condition,
+    hitCondition: b.hitCondition,
+  };
 }
 
 /** Marker: the handler already sent the response itself. */

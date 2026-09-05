@@ -8,13 +8,15 @@
 import { createHash } from 'node:crypto';
 import { type Server as HttpServer, type IncomingMessage, createServer as createHttpServer } from 'node:http';
 import { type Server, type Socket, createServer } from 'node:net';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 
 import { STREAM } from './protocol.js';
-import { StreamReader, encodeInput } from './stream.js';
+import { StreamReader, encodeInput, newPipePath } from './stream.js';
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+/** The page only ever sends a short JSON button mask, a ping or a close: anything longer is not the page. */
+export const MAX_WS_PAYLOAD = 64 * 1024;
+/** Frames a page may hold unread before further frames are skipped (it gets the newest once it drains). */
+const BROADCAST_BACKLOG_FRAMES = 2;
 
 /** A WebSocket frame from the server: unmasked, one fragment. */
 export function encodeWebSocketFrame(payload: Uint8Array, opcode: 1 | 2 | 8 | 10 = 2): Buffer {
@@ -36,19 +38,31 @@ export function encodeWebSocketFrame(payload: Uint8Array, opcode: 1 | 2 | 8 | 10
   return Buffer.concat([header, payload]);
 }
 
-/** Frames from a client (masked, as browsers send them). Returns the frames and what is left unparsed. */
-export function decodeWebSocketFrames(buffer: Buffer): {
-  frames: Array<{ opcode: number; payload: Buffer }>;
-  rest: Buffer;
-} {
-  const frames: Array<{ opcode: number; payload: Buffer }> = [];
+export interface WebSocketFrame {
+  opcode: number;
+  /** the last fragment of its message (a continuation has opcode 0) */
+  fin: boolean;
+  payload: Buffer;
+}
+
+/**
+ * Frames from a client, which a browser masks (RFC 6455 requires it: an unmasked
+ * frame, or one longer than `MAX_WS_PAYLOAD`, throws so the caller can drop the
+ * connection). Returns the complete frames and what is left unparsed.
+ */
+export function decodeWebSocketFrames(buffer: Buffer): { frames: WebSocketFrame[]; rest: Buffer } {
+  const frames: WebSocketFrame[] = [];
   let offset = 0;
   for (;;) {
     if (buffer.length - offset < 2) {
       break;
     }
+    const fin = (buffer[offset]! & 0x80) !== 0;
     const opcode = buffer[offset]! & 0x0f;
     const masked = (buffer[offset + 1]! & 0x80) !== 0;
+    if (!masked) {
+      throw new Error('websocket: unmasked client frame');
+    }
     let length = buffer[offset + 1]! & 0x7f;
     let p = offset + 2;
     if (length === 126) {
@@ -64,27 +78,28 @@ export function decodeWebSocketFrames(buffer: Buffer): {
       length = Number(buffer.readBigUInt64BE(p));
       p += 8;
     }
-    const maskBytes = masked ? 4 : 0;
-    if (buffer.length < p + maskBytes + length) {
+    if (length > MAX_WS_PAYLOAD) {
+      throw new Error(`websocket: frame of ${length} bytes`);
+    }
+    if (buffer.length < p + 4 + length) {
       break;
     }
-    const payload = Buffer.from(buffer.subarray(p + maskBytes, p + maskBytes + length));
-    if (masked) {
-      for (let i = 0; i < length; i++) {
-        payload[i] = payload[i]! ^ buffer[p + (i & 3)]!;
-      }
+    const payload = Buffer.from(buffer.subarray(p + 4, p + 4 + length));
+    for (let i = 0; i < length; i++) {
+      payload[i] = payload[i]! ^ buffer[p + (i & 3)]!;
     }
-    frames.push({ opcode, payload });
-    offset = p + maskBytes + length;
+    frames.push({ opcode, fin, payload });
+    offset = p + 4 + length;
   }
   return { frames, rest: buffer.subarray(offset) };
 }
 
 export interface ScreenServerOptions {
-  /** HTTP port for the page (0 picks one) */
+  /** HTTP port for the page (default 0: pick one); `listen` may name another */
   port?: number;
   /** the pipe the adapter connects to (default: a fresh path under the temp dir) */
   pipe?: string;
+  /** the address the page is served on (default `127.0.0.1`: this machine's browsers only) */
   host?: string;
 }
 
@@ -93,12 +108,18 @@ export class ScreenServer {
   readonly #http: HttpServer;
   readonly #pipeServer: Server;
   readonly #clients = new Set<Socket>();
+  /** pages whose socket is full: they get the newest frame once they drain */
+  readonly #behind = new Set<Socket>();
   #adapter: Socket | null = null;
   #lastFrame: Buffer | null = null;
+  readonly #defaultPort: number;
+  #host: string;
   #port = 0;
 
   constructor(options: ScreenServerOptions = {}) {
-    this.pipe = options.pipe ?? defaultPipe();
+    this.pipe = options.pipe ?? newPipePath('gba-kit-screen');
+    this.#defaultPort = options.port ?? 0;
+    this.#host = options.host ?? '127.0.0.1';
     this.#http = createHttpServer((req, res) => {
       if (req.url === '/' || req.url === '/index.html') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -110,15 +131,19 @@ export class ScreenServer {
     });
     this.#http.on('upgrade', (req, socket) => this.#upgrade(req, socket as Socket));
     this.#pipeServer = createServer((socket) => this.#adapterConnected(socket));
-    void options.host;
+    // A server's error after `listen` (an accept failing) must not take the process down.
+    this.#http.on('error', () => {});
+    this.#pipeServer.on('error', () => {});
   }
 
   get port(): number {
     return this.#port;
   }
 
+  /** Where the page is, on the host it was bound to (`localhost` for a wildcard). */
   get url(): string {
-    return `http://localhost:${this.#port}/`;
+    const host = this.#host === '0.0.0.0' || this.#host === '::' ? 'localhost' : this.#host;
+    return `http://${host.includes(':') ? `[${host}]` : host}:${this.#port}/`;
   }
 
   /** Whether the adapter is connected to the pipe. */
@@ -126,15 +151,16 @@ export class ScreenServer {
     return this.#adapter !== null;
   }
 
-  async listen(port = 0, host = '127.0.0.1'): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      this.#pipeServer.once('error', reject);
-      this.#pipeServer.listen(this.pipe, () => resolve());
-    });
-    await new Promise<void>((resolve, reject) => {
-      this.#http.once('error', reject);
-      this.#http.listen(port, host, () => resolve());
-    });
+  /** Bind the pipe and the HTTP server; when the latter fails (a port in use) nothing stays bound. */
+  async listen(port = this.#defaultPort, host = this.#host): Promise<void> {
+    this.#host = host;
+    await bind(this.#pipeServer, (server) => server.listen(this.pipe));
+    try {
+      await bind(this.#http, (server) => server.listen(port, host));
+    } catch (err) {
+      await new Promise<void>((resolve) => this.#pipeServer.close(() => resolve()));
+      throw err;
+    }
     const address = this.#http.address();
     this.#port = typeof address === 'object' && address ? address.port : port;
   }
@@ -181,18 +207,30 @@ export class ScreenServer {
     });
   }
 
+  /** Every page gets the frame, except one that has not read the last few: it is caught up once it drains. */
   #broadcast(frame: Buffer): void {
     for (const c of this.#clients) {
-      if (c.writableLength < frame.length * 2) {
+      if (c.writableLength < frame.length * BROADCAST_BACKLOG_FRAMES) {
         c.write(frame);
+      } else {
+        this.#behind.add(c);
       }
     }
   }
 
+  /**
+   * The WebSocket handshake. A browser page may only connect from this server's
+   * own origin: any other page open in the same browser could otherwise watch the
+   * screen and press buttons. A client without an `Origin` is not a browser.
+   */
   #upgrade(req: IncomingMessage, socket: Socket): void {
     const key = req.headers['sec-websocket-key'];
     if (req.url !== '/ws' || typeof key !== 'string') {
       socket.destroy();
+      return;
+    }
+    if (!this.#sameOrigin(req.headers.origin)) {
+      socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
     const accept = createHash('sha1')
@@ -202,26 +240,72 @@ export class ScreenServer {
       `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
     );
     this.#clients.add(socket);
-    let pending = Buffer.alloc(0);
+    let pending: Buffer = Buffer.alloc(0);
+    // a message split over fragments: its first opcode and the pieces so far
+    let fragments: { opcode: number; parts: Buffer[] } | null = null;
     socket.on('data', (chunk: Buffer) => {
       pending = Buffer.concat([pending, chunk]);
-      const { frames, rest } = decodeWebSocketFrames(pending);
-      pending = Buffer.from(rest);
+      let frames: WebSocketFrame[];
+      try {
+        if (pending.length > MAX_WS_PAYLOAD + 14) {
+          throw new Error('websocket: too much unparsed data');
+        }
+        ({ frames, rest: pending } = decodeWebSocketFrames(pending));
+        pending = Buffer.from(pending);
+      } catch {
+        socket.destroy();
+        return;
+      }
       for (const f of frames) {
         if (f.opcode === 8) {
           socket.end(encodeWebSocketFrame(Buffer.alloc(0), 8));
         } else if (f.opcode === 9) {
           socket.write(encodeWebSocketFrame(f.payload, 10));
-        } else if (f.opcode === 1) {
-          this.#input(f.payload.toString('utf8'));
+        } else if (f.opcode === 1 || f.opcode === 2 || f.opcode === 0) {
+          if (f.opcode !== 0) {
+            fragments = { opcode: f.opcode, parts: [] };
+          }
+          if (!fragments) {
+            continue; // a continuation of nothing
+          }
+          fragments.parts.push(f.payload);
+          if (f.fin) {
+            if (fragments.opcode === 1) {
+              this.#input(Buffer.concat(fragments.parts).toString('utf8'));
+            }
+            fragments = null;
+          }
         }
       }
     });
+    socket.on('drain', () => {
+      if (this.#behind.delete(socket) && this.#lastFrame) {
+        socket.write(this.#lastFrame);
+      }
+    });
     socket.on('error', () => {});
-    socket.on('close', () => this.#clients.delete(socket));
+    socket.on('close', () => {
+      this.#clients.delete(socket);
+      this.#behind.delete(socket);
+    });
     if (this.#lastFrame) {
       socket.write(this.#lastFrame);
     }
+  }
+
+  #sameOrigin(origin: string | undefined): boolean {
+    if (origin === undefined) {
+      return true;
+    }
+    let url: URL;
+    try {
+      url = new URL(origin);
+    } catch {
+      return false;
+    }
+    const local = new Set(['localhost', '127.0.0.1', '[::1]', this.#host]);
+    const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+    return local.has(url.hostname) && port === String(this.#port);
   }
 
   #input(text: string): void {
@@ -236,9 +320,21 @@ export class ScreenServer {
   }
 }
 
-function defaultPipe(): string {
-  const id = `gba-kit-screen-${process.pid}-${Date.now().toString(36)}`;
-  return process.platform === 'win32' ? `\\\\.\\pipe\\${id}` : path.join(tmpdir(), `${id}.sock`);
+/** `listen` as a promise whose rejection listener does not outlive the bind. */
+function bind<S extends HttpServer | Server>(server: S, listen: (server: S) => void): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onError = (err: Error): void => {
+      server.removeListener('listening', onListening);
+      reject(err);
+    };
+    const onListening = (): void => {
+      server.removeListener('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    listen(server);
+  });
 }
 
 const PAGE = /* html */ `<!DOCTYPE html>
@@ -264,6 +360,7 @@ const PAGE = /* html */ `<!DOCTYPE html>
   const image = ctx.createImageData(${STREAM.width}, ${STREAM.height});
   const status = document.getElementById('status');
   const KEYS = { ArrowRight: 4, ArrowLeft: 5, ArrowUp: 6, ArrowDown: 7, z: 0, x: 1, Backspace: 2, Enter: 3, a: 8, s: 9 };
+  const PIXEL_BYTES = ${STREAM.width * STREAM.height * 4};
   let mask = 0;
   let ws = null;
   function connect() {
@@ -271,9 +368,10 @@ const PAGE = /* html */ `<!DOCTYPE html>
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => { status.textContent = 'connected · waiting for frames'; };
     ws.onmessage = (e) => {
+      if (e.data.byteLength < 8 + PIXEL_BYTES) return; // not a whole frame
       const view = new DataView(e.data);
       const frame = view.getUint32(0, true);
-      image.data.set(new Uint8Array(e.data, 8, ${STREAM.width * STREAM.height * 4}));
+      image.data.set(new Uint8Array(e.data, 8, PIXEL_BYTES));
       ctx.putImageData(image, 0, 0);
       status.textContent = 'frame ' + frame;
     };

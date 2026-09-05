@@ -20,9 +20,9 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 
-const server = new ScreenServer({ pipe });
+const server = new ScreenServer({ pipe, port });
 server
-  .listen(port)
+  .listen()
   .then(() => {
     console.log(`GBA screen: ${server.url}`);
     console.log(`Connect the debugger with the custom request:`);
