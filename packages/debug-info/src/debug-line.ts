@@ -364,12 +364,113 @@ function readSleb(c: Cursor, limit: number): number {
   return result;
 }
 
+/** The row that starts at an address, for stepping: a stop is only right at a statement row. */
+export interface LineRowStart {
+  file: string;
+  line: number;
+  /** True when any row starting here is a statement (`is_stmt`). */
+  isStmt: boolean;
+}
+
 /** Address-sorted line rows with PC→source lookup. */
 export class LineTable {
   readonly rows: LineRow[];
+  /** normalized file → line → addresses of the rows on that line, ascending (lazy) */
+  #byFileLine: Map<string, Map<number, number[]>> | null = null;
+  /** address → the label of the row(s) starting there (lazy) */
+  #starts: Map<number, LineRowStart> | null = null;
 
   constructor(rows: LineRow[]) {
     this.rows = rows;
+  }
+
+  /** Every file the table mentions, normalized (`./`, `..` and `\\` folded). */
+  get files(): string[] {
+    return [...this.#index().keys()];
+  }
+
+  /**
+   * Every address where code for `line` of `file` starts, ascending — a line may
+   * have several (a `for` header, an inlined body, a header function used from
+   * several units). Empty when the line has no code. `file` is matched normalized.
+   */
+  sourceToPcs(file: string, line: number): number[] {
+    return this.#index().get(normalizePath(file))?.get(line) ?? [];
+  }
+
+  /**
+   * The first line at or after `line` in `file` that has code, with its addresses —
+   * what a breakpoint set on a comment or a declaration slides to. `slack` bounds
+   * how far it may slide.
+   */
+  nearestLineWithCode(file: string, line: number, slack = 8): { line: number; addresses: number[] } | null {
+    const byLine = this.#index().get(normalizePath(file));
+    if (!byLine) {
+      return null;
+    }
+    for (let l = line; l <= line + slack; l++) {
+      const addresses = byLine.get(l);
+      if (addresses && addresses.length > 0) {
+        return { line: l, addresses };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The row starting exactly at `address`, or undefined. Several rows may share an
+   * address (GCC emits "view" rows); a statement row wins the label, and `isStmt`
+   * is true if any of them is one.
+   */
+  rowAt(address: number): LineRowStart | undefined {
+    if (!this.#starts) {
+      this.#starts = new Map();
+      for (const row of this.rows) {
+        if (row.endSequence) {
+          continue;
+        }
+        const existing = this.#starts.get(row.address);
+        if (!existing || row.isStmt || !existing.isStmt) {
+          this.#starts.set(row.address, {
+            file: normalizePath(row.file),
+            line: row.line,
+            isStmt: row.isStmt || (existing?.isStmt ?? false),
+          });
+        }
+      }
+    }
+    return this.#starts.get(address);
+  }
+
+  #index(): Map<string, Map<number, number[]>> {
+    if (this.#byFileLine) {
+      return this.#byFileLine;
+    }
+    const index = new Map<string, Map<number, number[]>>();
+    for (const row of this.rows) {
+      if (row.endSequence) {
+        continue;
+      }
+      const file = normalizePath(row.file);
+      let byLine = index.get(file);
+      if (!byLine) {
+        byLine = new Map();
+        index.set(file, byLine);
+      }
+      const list = byLine.get(row.line);
+      if (!list) {
+        byLine.set(row.line, [row.address]);
+      } else if (list[list.length - 1] !== row.address) {
+        list.push(row.address);
+      }
+    }
+    for (const byLine of index.values()) {
+      for (const list of byLine.values()) {
+        list.sort((a, b) => a - b);
+      }
+    }
+    this.#byFileLine = index;
+    return index;
   }
 
   /**
@@ -397,4 +498,24 @@ export class LineTable {
     }
     return { file: row.file, line: row.line };
   }
+}
+
+/** Fold `./`, `..` and backslashes so the same file spelled two ways is one key. */
+export function normalizePath(p: string): string {
+  const parts = p.replace(/\\/g, '/').split('/');
+  const out: string[] = [];
+  for (const part of parts) {
+    if (part === '' && out.length > 0) {
+      continue;
+    }
+    if (part === '.') {
+      continue;
+    }
+    if (part === '..' && out.length > 0 && out[out.length - 1] !== '..' && out[out.length - 1] !== '') {
+      out.pop();
+      continue;
+    }
+    out.push(part);
+  }
+  return out.join('/') || p;
 }

@@ -457,14 +457,17 @@ describe('DebugInfo on devkitarm-min-only shapes', () => {
     ]);
   });
 
-  it('keeps absolute ldscript globals but excludes section-relative linker markers', () => {
+  it('keeps ldscript globals whether absolute or placed inside a section', () => {
     // `gAbsGlobal` is STT_NOTYPE with SHN_ABS — an ldscript-placed data global we want.
     expect(di.symbolToAddress('gAbsGlobal')).toBe(0x03001234);
-    // `_end` / `__bss_start` are also STT_NOTYPE/STB_GLOBAL and present in the symtab,
-    // but section-relative (not SHN_ABS): boundary markers, not data globals. The
-    // SHN_ABS filter must exclude them, so symbolToAddress returns null.
-    expect(di.symbolToAddress('_end')).toBeNull();
-    expect(di.symbolToAddress('__bss_start')).toBeNull();
+    // `_end` / `__bss_start` are STT_NOTYPE/STB_GLOBAL placed inside a loadable section.
+    // A decomp places its data globals the same way (`gFoo = .;` in the ldscript), and
+    // nothing in the ELF tells the two apart, so both resolve: the linker did define
+    // them, and a debugger asked for `_end` should answer. They carry no size, so any
+    // containment inferred from them is reported inexact.
+    expect(di.symbolToAddress('_end')).not.toBeNull();
+    expect(di.symbolToAddress('__bss_start')).not.toBeNull();
+    expect(di.symbols.globalSymbol('_end')?.address).toBe(di.symbolToAddress('_end'));
   });
 });
 

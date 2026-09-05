@@ -25,9 +25,15 @@ const ELFDATA2MSB = 2;
 const SHT_SYMTAB = 2;
 const SHT_RELA = 4;
 
+/** `e_type` values a debugger cares about. */
+export const ET_REL = 1;
+export const ET_EXEC = 2;
+
 export class ElfFile {
   readonly #bytes: Uint8Array;
   readonly sections: ElfSection[];
+  /** `e_type`: {@link ET_EXEC} for a linked image, {@link ET_REL} for an object file. */
+  readonly type: number;
   /** Byte order of the container AND of its DWARF payload (they always agree). */
   readonly littleEndian: boolean;
   readonly #byName = new Map<string, ElfSection>();
@@ -35,10 +41,11 @@ export class ElfFile {
   readonly #relocated = new Map<string, Uint8Array>();
 
   /** Use {@link ElfFile.parse}; this constructor is an internal detail. */
-  constructor(bytes: Uint8Array, sections: ElfSection[], littleEndian = true) {
+  constructor(bytes: Uint8Array, sections: ElfSection[], littleEndian = true, type = ET_EXEC) {
     this.#bytes = bytes;
     this.sections = sections;
     this.littleEndian = littleEndian;
+    this.type = type;
     for (const s of sections) {
       // First occurrence wins (a name should be unique anyway).
       if (!this.#byName.has(s.name)) {
@@ -96,7 +103,7 @@ export class ElfFile {
     const shstrtab = bytes.subarray(shstr.offset, shstr.offset + shstr.size);
 
     const sections: ElfSection[] = raw.map((s, i) => ({ name: cstrAt(shstrtab, nameOffsets[i]!), ...s }));
-    return new ElfFile(bytes, sections, littleEndian);
+    return new ElfFile(bytes, sections, littleEndian, c.u16At(0x10));
   }
 
   section(name: string): ElfSection | undefined {

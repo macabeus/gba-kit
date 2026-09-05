@@ -4,8 +4,8 @@
  */
 import { LineTable, parseDebugLine } from './debug-line.js';
 import { type MacroDefinition, parseDebugMacinfo } from './debug-macro.js';
-import { ElfFile } from './elf.js';
-import { type FunctionEntry, SymbolIndex } from './symbols.js';
+import { ET_EXEC, ElfFile } from './elf.js';
+import { type FunctionEntry, type IsaMode, SymbolIndex } from './symbols.js';
 import { type MemberLocation, type StructType, TypeIndex, parsePath } from './types.js';
 
 export interface SourceLocation {
@@ -13,6 +13,24 @@ export interface SourceLocation {
   line: number;
   /** Containing function, when known from the symbol table. */
   func?: string;
+}
+
+/** The verdict of {@link DebugInfo.checkRomIdentity}. */
+export type RomIdentity =
+  | { ok: true; comparedBytes: number }
+  | { ok: false; reason: string; section?: string; address?: number };
+
+const SHT_PROGBITS = 1;
+
+/** The lowest address of any loadable section, or null when the ELF has none. */
+function lowestLoadableAddress(elf: ElfFile): number | null {
+  let lowest: number | null = null;
+  for (const s of elf.sections) {
+    if (s.addr > 0 && s.size > 0 && (lowest === null || s.addr < lowest)) {
+      lowest = s.addr;
+    }
+  }
+  return lowest;
 }
 
 /** An absolute, readable location: address + byte size, plus bitfield shift/width. */
@@ -45,7 +63,13 @@ export class DebugInfo {
     const elf = ElfFile.parse(bytes);
     const symbols = SymbolIndex.fromElf(elf);
     const debugLine = elf.sectionData('.debug_line');
-    const lines = debugLine ? parseDebugLine(debugLine, elf.littleEndian) : new LineTable([]);
+    let lines = debugLine ? parseDebugLine(debugLine, elf.littleEndian) : new LineTable([]);
+    // Rows for code the linker discarded (`--gc-sections`) keep their addresses at
+    // 0, below every loadable section; a PC in the BIOS stub would resolve into them.
+    const lowest = lowestLoadableAddress(elf);
+    if (lowest !== null && lines.rows.some((r) => r.address < lowest)) {
+      lines = new LineTable(lines.rows.filter((r) => r.address >= lowest));
+    }
     const types = TypeIndex.fromElf(elf);
     const macinfo = elf.sectionData('.debug_macinfo');
     return new DebugInfo(elf, symbols, lines, types, macinfo ? parseDebugMacinfo(macinfo) : []);
@@ -68,6 +92,81 @@ export class DebugInfo {
 
   pcToFunction(pc: number): FunctionEntry | null {
     return this.symbols.pcToFunction(pc);
+  }
+
+  /** True for a linked image; false for a relocatable object (which has no addresses to debug). */
+  get isLinked(): boolean {
+    return this.elf.type === ET_EXEC;
+  }
+
+  /**
+   * Every address where code for `line` of `file` starts (see {@link LineTable.sourceToPcs}).
+   * `file` is matched after normalization, as DWARF spells it — not as a local path.
+   */
+  sourceToPcs(file: string, line: number): number[] {
+    return this.lines.sourceToPcs(file, line);
+  }
+
+  /** The instruction set at `address` from the ELF's mapping symbols, or null without them. */
+  modeAt(address: number): IsaMode | null {
+    return this.symbols.modeAt(address);
+  }
+
+  /**
+   * The address of the defined GLOBAL symbol `name`, or null. Unlike
+   * {@link symbolToAddress}, a file-static of the same spelling does not answer,
+   * and two globals at different addresses are refused as ambiguous — the rule for
+   * joining a C `extern` declaration to storage the linker placed.
+   */
+  globalSymbolAddress(name: string): number | null {
+    return this.symbols.globalSymbol(name)?.address ?? null;
+  }
+
+  /**
+   * Whether this ELF is the debug sidecar of `rom`: every loadable, initialized
+   * section that lies in the cartridge window (`0x08000000–0x0DFFFFFF`) must match
+   * the ROM byte for byte at its offset. A wrong ELF (another build, an object-file
+   * wrapper around the ROM, a `-gdwarf` variant linked differently) fails on the
+   * first section that differs, which is named so the user can see what is off.
+   *
+   * This checks the code and data the ELF placed in ROM. It does not compare bytes
+   * the ELF says nothing about (padding, a post-link header patch), so a match is
+   * "no contradiction found", not a build identity.
+   */
+  checkRomIdentity(rom: Uint8Array): RomIdentity {
+    if (!this.isLinked) {
+      return { ok: false, reason: 'not a linked image (ET_EXEC): an object file or a wrapper around raw bytes' };
+    }
+    let compared = 0;
+    for (const s of this.elf.sections) {
+      const inRom = s.addr >= 0x08000000 && s.addr < 0x0e000000;
+      if (!inRom || s.size === 0 || s.type !== SHT_PROGBITS) {
+        continue;
+      }
+      const data = this.elf.sectionDataByIndex(this.elf.sections.indexOf(s));
+      if (!data) {
+        continue;
+      }
+      const offset = s.addr & 0x01ffffff;
+      if (offset + s.size > rom.length) {
+        return { ok: false, reason: `section ${s.name} at 0x${s.addr.toString(16)} extends past the end of the ROM`, section: s.name };
+      }
+      for (let i = 0; i < s.size; i++) {
+        if (data[i] !== rom[offset + i]) {
+          return {
+            ok: false,
+            reason: `section ${s.name} differs from the ROM at 0x${(s.addr + i).toString(16)}`,
+            section: s.name,
+            address: s.addr + i,
+          };
+        }
+      }
+      compared += s.size;
+    }
+    if (compared === 0) {
+      return { ok: false, reason: 'the ELF places nothing in the cartridge window' };
+    }
+    return { ok: true, comparedBytes: compared };
   }
 
   symbolToAddress(name: string): number | null {
