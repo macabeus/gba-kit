@@ -32,13 +32,17 @@ export function Button({
   kind,
   active,
   title,
+  label,
 }: {
   children: ReactNode;
   onClick: () => void;
   disabled?: boolean;
   kind?: 'primary' | 'danger';
+  /** a toggle's state: shown, and announced as `aria-pressed` */
   active?: boolean;
   title?: string;
+  /** what a screen reader announces, for a button whose content is an icon */
+  label?: string;
 }) {
   const classes = [
     'gk-button',
@@ -49,7 +53,15 @@ export function Button({
     .filter(Boolean)
     .join(' ');
   return (
-    <button type="button" className={classes} onClick={onClick} disabled={disabled} title={title}>
+    <button
+      type="button"
+      className={classes}
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      aria-label={label}
+      aria-pressed={active}
+    >
       {children}
     </button>
   );
@@ -83,29 +95,69 @@ export function Select<T extends string | number>({
   );
 }
 
+/** The element id of a tab and of the panel it controls, so the two can name each other. */
+export function tabIds(prefix: string, id: string): { tab: string; panel: string } {
+  return { tab: `${prefix}-tab-${id}`, panel: `${prefix}-tabpanel-${id}` };
+}
+
+/**
+ * A tab strip in the ARIA tabs pattern: each tab controls a panel the host renders
+ * with `tabIds(prefix, id).panel` as its id, and the arrow keys move between tabs.
+ */
 export function Tabs<T extends string>({
   tabs,
   active,
   onChange,
+  prefix = 'gk',
 }: {
   tabs: Array<{ id: T; label: string }>;
   active: T;
   onChange: (id: T) => void;
+  /** distinguishes the ids of several strips on one page */
+  prefix?: string;
 }) {
+  const move = (from: number, key: string): T | null => {
+    const last = tabs.length - 1;
+    const to =
+      key === 'ArrowRight'
+        ? (from + 1) % tabs.length
+        : key === 'ArrowLeft'
+          ? (from + last) % tabs.length
+          : key === 'Home'
+            ? 0
+            : key === 'End'
+              ? last
+              : -1;
+    return to < 0 ? null : (tabs[to]?.id ?? null);
+  };
   return (
     <nav className="gk-tabs" role="tablist">
-      {tabs.map((t) => (
-        <button
-          key={t.id}
-          type="button"
-          role="tab"
-          aria-selected={t.id === active}
-          className={`gk-tab${t.id === active ? ' gk-active' : ''}`}
-          onClick={() => onChange(t.id)}
-        >
-          {t.label}
-        </button>
-      ))}
+      {tabs.map((t, i) => {
+        const ids = tabIds(prefix, t.id);
+        return (
+          <button
+            key={t.id}
+            id={ids.tab}
+            type="button"
+            role="tab"
+            aria-selected={t.id === active}
+            aria-controls={ids.panel}
+            tabIndex={t.id === active ? 0 : -1}
+            className={`gk-tab${t.id === active ? ' gk-active' : ''}`}
+            onClick={() => onChange(t.id)}
+            onKeyDown={(e) => {
+              const next = move(i, e.key);
+              if (next !== null) {
+                e.preventDefault();
+                onChange(next);
+                document.getElementById(tabIds(prefix, next).tab)?.focus();
+              }
+            }}
+          >
+            {t.label}
+          </button>
+        );
+      })}
     </nav>
   );
 }
@@ -130,4 +182,25 @@ export function parseNumber(text: string): number | null {
     return Number(t);
   }
   return null;
+}
+
+/**
+ * Run a click's request without awaiting it, routing its failure into the
+ * panel's error line (and clearing the line when it succeeds) instead of
+ * leaving an unhandled rejection the user never sees.
+ */
+export function attempt(setError: (message: string | null) => void, action: Promise<unknown>): void {
+  action.then(
+    () => setError(null),
+    (err: Error) => setError(err.message),
+  );
+}
+
+/** How many rows a log view mounts at most; older entries are counted, not rendered. */
+export const MAX_ROWS = 1000;
+
+/** The newest `MAX_ROWS` of a log, and how many older ones are left out. */
+export function newest<T>(entries: T[]): { shown: T[]; omitted: number } {
+  const omitted = Math.max(0, entries.length - MAX_ROWS);
+  return { shown: omitted ? entries.slice(omitted) : entries, omitted };
 }

@@ -1,7 +1,7 @@
 /** Every tool panel behind tabs: what a host with one slot for "the GBA tools" shows. */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-import { Tabs } from '../components.js';
+import { Tabs, tabIds } from '../components.js';
 import type { Transport } from '../transport.js';
 import { EventsPanel } from './EventsPanel.js';
 import { IoRegistersPanel } from './IoRegistersPanel.js';
@@ -63,10 +63,25 @@ export function DebugPanels({
     setActive(id);
     onChange?.(id);
   };
+  // a request to show a panel (a recording just stopped elsewhere) selects its tab, when this strip offers it
+  const selectRef = useRef(select);
+  selectRef.current = select;
+  const panelsRef = useRef(panels);
+  panelsRef.current = panels;
+  useEffect(
+    () =>
+      transport.onShowPanel?.((id) => {
+        if (panelsRef.current.includes(id)) {
+          selectRef.current(id);
+        }
+      }),
+    [transport],
+  );
+  const ids = tabIds('gk', active);
   return (
     <div className="gk-tabbed gk-root">
       <Tabs tabs={tabs} active={active} onChange={select} />
-      <div className="gk-tab-body">
+      <div className="gk-tab-body" role="tabpanel" id={ids.panel} aria-labelledby={ids.tab}>
         <PanelBody id={active} transport={transport} />
       </div>
     </div>

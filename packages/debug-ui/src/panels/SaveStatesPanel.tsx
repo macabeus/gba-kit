@@ -1,4 +1,4 @@
-import type { SavedStateInfo } from '@gba-kit/debug-adapter/protocol';
+import type { SavedStateInfo } from '@gba-kit/debug-core/protocol';
 import { useCallback, useEffect, useState } from 'react';
 
 import { Button, Empty } from '../components.js';

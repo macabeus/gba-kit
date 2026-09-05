@@ -1,9 +1,9 @@
 /**
  * Plays the interleaved stereo samples the emulator produces. An `AudioWorklet`
- * fed from a ring buffer, created on the first user gesture (browsers require
- * one); a `ScriptProcessorNode` when worklets are unavailable (a strict CSP).
- * About 100 ms of buffer: enough to ride out a slow frame, little enough that
- * a button press is heard promptly.
+ * fed from a queue of sample chunks, created on the first user gesture (browsers
+ * require one); a `ScriptProcessorNode` when worklets are unavailable (a strict
+ * CSP). The queue holds about 100 ms: enough to ride out a slow frame, little
+ * enough that a button press is heard promptly.
  */
 const WORKLET_SOURCE = `
 class GbaKitPlayer extends AudioWorkletProcessor {
@@ -12,6 +12,7 @@ class GbaKitPlayer extends AudioWorkletProcessor {
     this.queue = [];
     this.offset = 0;
     this.port.onmessage = (e) => {
+      if (e.data === 'flush') { this.queue = []; this.offset = 0; return; }
       this.queue.push(e.data);
       // keep at most ~100 ms queued: drop the oldest when the host outruns us
       let total = 0;
@@ -42,47 +43,69 @@ export class AudioPlayer {
   #fallback: ScriptProcessorNode | null = null;
   #queue: Float32Array[] = [];
   #offset = 0;
-  #starting: Promise<void> | null = null;
+  /** resolves once the graph exists; the same promise for every `start` until `close` */
+  #ready: Promise<void> | null = null;
+  /** bumped by `close`, so a graph still being built for a closed context is abandoned */
+  #generation = 0;
   #muted = false;
 
   get enabled(): boolean {
     return this.#context !== null && !this.#muted;
   }
 
-  /** Create the audio graph; call from a user gesture. */
+  /**
+   * Create the audio graph (call from a user gesture), or resume it after `mute`.
+   * Resolves once samples pushed will be heard; concurrent calls share the build.
+   */
   start(sampleRate: number): Promise<void> {
-    if (this.#context) {
-      this.#muted = false;
-      return this.#context.resume();
-    }
-    if (this.#starting) {
-      return this.#starting;
-    }
-    const context = new AudioContext({ sampleRate });
-    this.#context = context;
-    this.#starting = (async () => {
-      try {
-        const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'application/javascript' }));
-        await context.audioWorklet.addModule(url);
-        URL.revokeObjectURL(url);
-        const node = new AudioWorkletNode(context, 'gba-kit-player', { outputChannelCount: [2] });
-        node.connect(context.destination);
-        this.#worklet = node;
-      } catch {
-        const node = context.createScriptProcessor(2048, 0, 2);
-        node.onaudioprocess = (e) => this.#fill(e.outputBuffer.getChannelData(0), e.outputBuffer.getChannelData(1));
-        node.connect(context.destination);
-        this.#fallback = node;
+    this.#muted = false;
+    const generation = this.#generation;
+    this.#ready ??= this.#build(sampleRate, generation);
+    return this.#ready.then(() => {
+      // resume undoes mute()'s suspend; after a close() there is nothing to resume
+      if (this.#generation === generation && this.#context && !this.#muted) {
+        return this.#context.resume();
       }
-      await context.resume();
-    })();
-    return this.#starting;
+    });
   }
 
+  async #build(sampleRate: number, generation: number): Promise<void> {
+    const context = new AudioContext({ sampleRate });
+    this.#context = context;
+    const abandoned = (): boolean => this.#generation !== generation;
+    try {
+      const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'application/javascript' }));
+      try {
+        await context.audioWorklet.addModule(url);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+      if (abandoned()) {
+        return;
+      }
+      const node = new AudioWorkletNode(context, 'gba-kit-player', { outputChannelCount: [2] });
+      node.connect(context.destination);
+      this.#worklet = node;
+    } catch (err) {
+      if (abandoned()) {
+        return;
+      }
+      // the fallback plays, with more latency: say so, since a CSP that refuses the worklet is the usual cause
+      console.warn('gba-kit: AudioWorklet unavailable, playing through a ScriptProcessorNode', err);
+      const node = context.createScriptProcessor(2048, 0, 2);
+      node.onaudioprocess = (e) => this.#fill(e.outputBuffer.getChannelData(0), e.outputBuffer.getChannelData(1));
+      node.connect(context.destination);
+      this.#fallback = node;
+    }
+  }
+
+  /** Silence now: what is queued is dropped, so nothing stale plays on the next `start`. */
   mute(): void {
     this.#muted = true;
     this.#queue = [];
-    void this.#context?.suspend();
+    this.#offset = 0;
+    this.#worklet?.port.postMessage('flush');
+    void this.#context?.suspend().catch(() => {});
   }
 
   push(samples: Float32Array): void {
@@ -122,14 +145,17 @@ export class AudioPlayer {
     }
   }
 
+  /** Tear the graph down; a build still in flight for it stops short of touching the closed context. */
   close(): void {
+    this.#generation++;
     this.#worklet?.disconnect();
     this.#fallback?.disconnect();
-    void this.#context?.close();
+    void this.#context?.close().catch(() => {});
     this.#context = null;
     this.#worklet = null;
     this.#fallback = null;
-    this.#starting = null;
+    this.#ready = null;
     this.#queue = [];
+    this.#offset = 0;
   }
 }

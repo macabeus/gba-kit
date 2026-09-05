@@ -1,7 +1,7 @@
 import type { EventEntry } from '@gba-kit/debug-core';
 import { useState } from 'react';
 
-import { Button, Empty, Hex } from '../components.js';
+import { Button, Empty, Hex, newest } from '../components.js';
 import { useAtStop } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
@@ -48,10 +48,12 @@ export function describeEvent(event: EventEntry['event']): string {
     .join(' ');
 }
 
+/** The newest `MAX_ROWS` entries as a table, oldest first, with a count of what is older. */
 export function EventsView({ entries }: { entries: EventEntry[] }) {
   if (entries.length === 0) {
     return <Empty>No events (of the kinds shown) yet.</Empty>;
   }
+  const { shown, omitted } = newest(entries);
   return (
     <table className="gk-table">
       <thead>
@@ -65,7 +67,12 @@ export function EventsView({ entries }: { entries: EventEntry[] }) {
         </tr>
       </thead>
       <tbody>
-        {entries.map((e, i) => (
+        {omitted > 0 && (
+          <tr>
+            <td colSpan={6} className="gk-muted">{`… ${omitted} older not shown`}</td>
+          </tr>
+        )}
+        {shown.map((e, i) => (
           <tr key={i}>
             <td className="gk-right gk-muted">{e.frame}</td>
             <td className="gk-right gk-muted">{e.scanline}</td>

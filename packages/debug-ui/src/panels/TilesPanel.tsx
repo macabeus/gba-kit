@@ -15,6 +15,23 @@ const CHAR_BASES = [
 ];
 const PER_ROW = 32;
 
+/** One fetch of a tile sheet, with the depth and count it was fetched at: what a repaint reads it with. */
+export interface TileSheet {
+  pixels: Uint8Array;
+  palette: number[];
+  bpp: 4 | 8;
+  count: number;
+}
+
+/**
+ * Paint a sheet with its own depth and count, never the panel's current controls:
+ * between a control change and the refetch it causes, the previous sheet stays
+ * consistent instead of being read past its end or at the wrong depth.
+ */
+export function paintTiles(sheet: TileSheet, bank: number): { width: number; height: number; rgba: Uint8ClampedArray } {
+  return tilesToRgba(sheet.pixels, sheet.count, PER_ROW, sheet.bpp, sheet.palette, bank, true);
+}
+
 export function TilesPanel({ transport }: { transport: Transport }) {
   const [charBase, setCharBase] = useState(0);
   const [bpp, setBpp] = useState<4 | 8>(4);
@@ -23,7 +40,7 @@ export function TilesPanel({ transport }: { transport: Transport }) {
   const count = bpp === 4 ? 512 : 256; // one 16 KB block
   const { data, error } = useAtStop(
     transport,
-    async (t) => {
+    async (t): Promise<TileSheet | null> => {
       const [tiles, palette] = await Promise.all([
         t.request('gba-kit/ppu', { kind: 'tiles', charBase, bpp, count }),
         t.request('gba-kit/ppu', { kind: 'palette' }),
@@ -31,14 +48,16 @@ export function TilesPanel({ transport }: { transport: Transport }) {
       if (tiles.kind !== 'tiles' || palette.kind !== 'palette') {
         return null;
       }
-      return { pixels: base64ToBytes(tiles.pixels), palette: charBase >= 0x10000 ? palette.obj : palette.bg };
+      return {
+        pixels: base64ToBytes(tiles.pixels),
+        palette: charBase >= 0x10000 ? palette.obj : palette.bg,
+        bpp: tiles.bpp,
+        count: tiles.count,
+      };
     },
     [charBase, bpp, count],
   );
-  const pixels = useMemo(
-    () => (data ? tilesToRgba(data.pixels, count, PER_ROW, bpp, data.palette, bank, true) : null),
-    [data, count, bpp, bank],
-  );
+  const pixels = useMemo(() => (data ? paintTiles(data, bank) : null), [data, bank]);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   usePixels(canvasRef, pixels);
 
@@ -74,7 +93,14 @@ export function TilesPanel({ transport }: { transport: Transport }) {
       {!data && !error && <Empty>Stop the machine to see the tiles.</Empty>}
       {data && (
         <div className="gk-row" style={{ alignItems: 'flex-start' }}>
-          <canvas ref={canvasRef} className="gk-pixels" style={{ width: PER_ROW * 8 * 2 }} onClick={onPick} />
+          <canvas
+            ref={canvasRef}
+            className="gk-pixels"
+            role="img"
+            aria-label="Tile sheet; click a tile to inspect it"
+            style={{ width: PER_ROW * 8 * 2 }}
+            onClick={onPick}
+          />
           <div className="gk-col gk-mono gk-small">
             {selected !== null && selected < count ? (
               <>

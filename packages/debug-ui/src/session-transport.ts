@@ -1,11 +1,27 @@
 /**
  * A transport over an in-process `@gba-kit/debug-core` session: what a web page
  * that runs the emulator itself uses. The custom requests are answered the way
- * the debug adapter answers them, so a panel sees the same bodies either way.
+ * the debug adapter answers them — the same bodies, the same argument semantics
+ * (the count and frame helpers of `@gba-kit/debug-core/protocol`), and a state
+ * notification after everything that changes the state body — so a panel sees no
+ * difference between the two.
  */
-import type { GbaKitCommand, GbaKitRequests, PpuArguments, PpuBody, StateBody } from '@gba-kit/debug-adapter/protocol';
 import { EVENT_BREAKPOINT_KINDS, type InputRecording, type Session } from '@gba-kit/debug-core';
+import {
+  AUDIO_SAMPLE_RATE,
+  type GbaKitCommand,
+  type GbaKitRequests,
+  LOG,
+  type PpuArguments,
+  type PpuBody,
+  STREAM,
+  type StateBody,
+  entryCount,
+  rewindFrameCount,
+  tileCount,
+} from '@gba-kit/debug-core/protocol';
 
+import type { PanelId } from './panels/DebugPanels.js';
 import type { ControlAction, Transport } from './transport.js';
 
 export interface SessionTransportOptions {
@@ -18,8 +34,6 @@ export interface SessionTransportOptions {
   openText?: Transport['openText'];
 }
 
-const AUDIO_SAMPLE_RATE = 32768;
-
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   for (let i = 0; i < bytes.length; i += 0x8000) {
@@ -31,6 +45,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 export function createSessionTransport(session: Session, options: SessionTransportOptions = {}): Transport {
   const memoryStates = new Map<string, { text: string; frame: number; createdAt: string }>();
   const labelListeners = new Set<() => void>();
+  const panelListeners = new Set<(panel: PanelId) => void>();
 
   const state = (): StateBody => ({
     state: session.state,
@@ -49,7 +64,7 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       case 'palette':
         return { kind: 'palette', ...session.palette() };
       case 'tiles': {
-        const t = session.tiles(args.charBase, args.bpp, args.count);
+        const t = session.tiles(args.charBase, args.bpp === 8 ? 8 : 4, tileCount(args.count));
         return { kind: 'tiles', charBase: t.charBase, bpp: t.bpp, count: t.count, pixels: bytesToBase64(t.pixels) };
       }
       case 'tilemap':
@@ -61,9 +76,14 @@ export function createSessionTransport(session: Session, options: SessionTranspo
     }
   };
 
-  const labelsChanged = (): void => {
-    void session.saveLabels().catch(() => {});
+  /**
+   * The labels changed in memory: every view hears of it, then the host's copy is
+   * written. A failed write rejects the request that caused it, so the panel that
+   * asked shows why the labels will not be there next time.
+   */
+  const labelsChanged = async (): Promise<void> => {
     labelListeners.forEach((l) => l());
+    await session.saveLabels();
   };
 
   async function request<C extends GbaKitCommand>(
@@ -82,9 +102,7 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       }
       case 'gba-kit/buttons': {
         const { mask } = a as A<'gba-kit/buttons'>;
-        for (let b = 0; b < 10; b++) {
-          session.setButton(b, ((mask >>> b) & 1) === 1);
-        }
+        session.setButtons(mask);
         return { buttons: session.buttons } as never;
       }
       case 'gba-kit/stepFrame':
@@ -94,13 +112,13 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         session.stepScanline();
         return undefined as never;
       case 'gba-kit/rewind':
-        return { rewound: session.rewindFrames((a as A<'gba-kit/rewind'>).frames) } as never;
+        return { rewound: session.rewindFrames(rewindFrameCount((a as A<'gba-kit/rewind'>).frames)) } as never;
       case 'gba-kit/rewindToFrame':
         return { rewound: session.rewindToFrame((a as A<'gba-kit/rewindToFrame'>).frame) } as never;
       case 'gba-kit/frame':
         return {
-          width: 240,
-          height: 160,
+          width: STREAM.width,
+          height: STREAM.height,
           frame: session.frame,
           rgba: bytesToBase64(session.machine.framebufferRgba()),
         } as never;
@@ -115,6 +133,10 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       case 'gba-kit/recordStop': {
         const recording = session.stopRecording();
         return { recording, script: session.recordingAsScript(recording) } as never;
+      }
+      case 'gba-kit/lastRecording': {
+        const last = session.lastRecording;
+        return { last: last ? { recording: last, script: session.recordingAsScript(last) } : null } as never;
       }
       case 'gba-kit/replay':
         return { replayed: session.replayRecording((a as A<'gba-kit/replay'>).recording as InputRecording) } as never;
@@ -158,21 +180,23 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         if (enabled !== undefined) {
           session.setTracing(enabled);
         }
-        return { enabled: session.tracing, entries: session.trace.last(count ?? 200) } as never;
+        return { enabled: session.tracing, entries: session.trace.last(entryCount(count, LOG.traceDefault)) } as never;
       }
       case 'gba-kit/events':
-        return { entries: session.events.last((a as A<'gba-kit/events'>).count ?? 500) } as never;
+        return {
+          entries: session.events.last(entryCount((a as A<'gba-kit/events'>).count, LOG.eventsDefault)),
+        } as never;
       case 'gba-kit/labels':
         return { labels: session.labels.all() } as never;
       case 'gba-kit/setLabel': {
         const { address, label, comment, size } = a as A<'gba-kit/setLabel'>;
         session.labels.set({ address, label: label ?? '', comment, size });
-        labelsChanged();
+        await labelsChanged();
         return { labels: session.labels.all() } as never;
       }
       case 'gba-kit/importLabels': {
         const imported = session.labels.importSymbols((a as A<'gba-kit/importLabels'>).text);
-        labelsChanged();
+        await labelsChanged();
         return { imported } as never;
       }
       case 'gba-kit/exportLabels':
@@ -220,11 +244,9 @@ export function createSessionTransport(session: Session, options: SessionTranspo
     control,
     onState(listener) {
       listener(state());
-      return session.on({
-        stopped: () => listener(state()),
-        continued: () => listener(state()),
-        state: () => listener(state()),
-      });
+      // every session event after which the body reads differently, like the adapter's `gba-kit/state`
+      const notify = (): void => listener(state());
+      return session.on({ stopped: notify, continued: notify, state: notify, recording: notify, tracing: notify });
     },
     onFrame(listener) {
       const off = session.on({ frame: listener });
@@ -239,5 +261,12 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       return () => labelListeners.delete(listener);
     },
     openText: options.openText,
+    showPanel(panel) {
+      panelListeners.forEach((l) => l(panel));
+    },
+    onShowPanel(listener) {
+      panelListeners.add(listener);
+      return () => panelListeners.delete(listener);
+    },
   };
 }

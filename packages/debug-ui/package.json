@@ -11,6 +11,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./transport": {
+      "types": "./dist/transport.d.ts",
+      "import": "./dist/transport.js"
+    },
     "./styles.css": "./src/styles.css"
   },
   "license": "MIT",
@@ -37,15 +41,16 @@
     "build": "tsc",
     "test": "vitest run",
     "check-types": "tsc --noEmit",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "check-deps": "depcruise src --config .dependency-cruiser.cjs"
   },
   "dependencies": {
-    "@gba-kit/debug-adapter": "workspace:*",
     "@gba-kit/debug-core": "workspace:*"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "dependency-cruiser": "^17.3.9",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "typescript": "^6.0.2",

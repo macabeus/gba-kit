@@ -1,4 +1,4 @@
-import type { StateBody } from '@gba-kit/debug-adapter/protocol';
+import type { StateBody } from '@gba-kit/debug-core/protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { Transport } from './transport.js';
@@ -13,7 +13,10 @@ export function useDebugState(transport: Transport): StateBody | null {
 /**
  * Data fetched from the transport, refreshed whenever the machine stops at a new
  * revision (a panel showing memory is only meaningful at a stop; while running it
- * keeps the last stop's view). `deps` refetch on their own.
+ * keeps the last stop's view). A change of `deps` refetches too, and until that
+ * lands `data` is still what the previous deps fetched: a consumer that paints it
+ * with the current controls must carry the controls in the data itself. `deps`
+ * is spread into the effect's dependency list, so its length must never change.
  */
 export function useAtStop<T>(
   transport: Transport,

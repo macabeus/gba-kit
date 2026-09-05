@@ -1,7 +1,7 @@
 import type { TraceEntry } from '@gba-kit/debug-core';
 import { useState } from 'react';
 
-import { Button, Empty, Hex, Select } from '../components.js';
+import { Button, Empty, Hex, MAX_ROWS, Select, newest } from '../components.js';
 import { useAtStop, useDebugState } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
@@ -9,7 +9,8 @@ export function TracePanel({ transport }: { transport: Transport }) {
   const state = useDebugState(transport);
   const [count, setCount] = useState(200);
   const { data, error, refresh } = useAtStop(transport, (t) => t.request('gba-kit/trace', { count }), [count]);
-  const enabled = data?.enabled ?? state?.tracing ?? false;
+  // the state body follows every toggle, running or not; the entries only refetch at a stop
+  const enabled = state?.tracing ?? data?.enabled ?? false;
   const toggle = async (): Promise<void> => {
     await transport.request('gba-kit/trace', { enabled: !enabled, count: 0 });
     refresh();
@@ -26,7 +27,7 @@ export function TracePanel({ transport }: { transport: Transport }) {
         </Button>
         <Select
           value={count}
-          options={[50, 200, 1000, 5000].map((n) => ({ value: n, label: `last ${n}` }))}
+          options={[50, 200, MAX_ROWS].map((n) => ({ value: n, label: `last ${n}` }))}
           onChange={setCount}
         />
         <Button onClick={refresh}>Refresh</Button>
@@ -40,7 +41,9 @@ export function TracePanel({ transport }: { transport: Transport }) {
   );
 }
 
+/** The newest `MAX_ROWS` entries as a table, oldest first, with a count of what is older. */
 export function TraceView({ entries }: { entries: TraceEntry[] }) {
+  const { shown, omitted } = newest(entries);
   return (
     <table className="gk-table">
       <thead>
@@ -57,7 +60,12 @@ export function TraceView({ entries }: { entries: TraceEntry[] }) {
         </tr>
       </thead>
       <tbody>
-        {entries.map((e, i) => (
+        {omitted > 0 && (
+          <tr>
+            <td colSpan={9} className="gk-muted">{`… ${omitted} older not shown`}</td>
+          </tr>
+        )}
+        {shown.map((e, i) => (
           <tr key={i}>
             <td className="gk-right gk-muted">{e.frame}</td>
             <td className="gk-right gk-muted">{e.scanline}</td>

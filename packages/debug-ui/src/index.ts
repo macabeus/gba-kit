@@ -8,6 +8,7 @@ export {
   createMessageTransport,
   serveTransport,
   type ControlAction,
+  type Feed,
   type HostToTransport,
   type MessagePort,
   type Transport,
@@ -17,14 +18,26 @@ export {
 } from './transport.js';
 export { createSessionTransport, type SessionTransportOptions } from './session-transport.js';
 export { useAtStop, useDebugState, usePixels } from './hooks.js';
-export { Button, Empty, Hex, Panel, Select, Tabs, parseNumber } from './components.js';
+export {
+  Button,
+  Empty,
+  Hex,
+  MAX_ROWS,
+  Panel,
+  Select,
+  Tabs,
+  attempt,
+  newest,
+  parseNumber,
+  tabIds,
+} from './components.js';
 export { AudioPlayer } from './audio.js';
 export { BUTTONS, GAMEPAD, KEYBOARD, KEYBOARD_HINT, buttonForKey, gamepadMask } from './keys.js';
 export { base64ToBytes, cssColor, hex, spriteToRgba, tilemapToRgba, tilesToRgba, unpackRgb } from './render.js';
 export { ScreenPanel, type ScreenPanelProps } from './panels/ScreenPanel.js';
 export { PalettePanel, PaletteView } from './panels/PalettePanel.js';
-export { TilesPanel } from './panels/TilesPanel.js';
-export { TilemapPanel } from './panels/TilemapPanel.js';
+export { TilesPanel, paintTiles, type TileSheet } from './panels/TilesPanel.js';
+export { MAP_TILES, TilemapPanel } from './panels/TilemapPanel.js';
 export { SpritesPanel, SpritesView } from './panels/SpritesPanel.js';
 export { IoRegistersPanel, IoRegistersView } from './panels/IoRegistersPanel.js';
 export { TracePanel, TraceView } from './panels/TracePanel.js';

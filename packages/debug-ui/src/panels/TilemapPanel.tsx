@@ -5,6 +5,9 @@ import { useAtStop, usePixels } from '../hooks.js';
 import { base64ToBytes, tilemapToRgba } from '../render.js';
 import type { Transport } from '../transport.js';
 
+/** A text map's tile index is 10 bits in either depth: every one of the 1024 tiles from the character base is reachable. */
+export const MAP_TILES = 1024;
+
 export function TilemapPanel({ transport }: { transport: Transport }) {
   const [index, setIndex] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number } | null>(null);
@@ -19,17 +22,16 @@ export function TilemapPanel({ transport }: { transport: Transport }) {
         return null;
       }
       const bg = map.tilemap.background;
-      const tileCount = bg.bpp === 4 ? 1024 : 512;
       const tiles = await t.request('gba-kit/ppu', {
         kind: 'tiles',
         charBase: bg.charBase,
         bpp: bg.bpp,
-        count: tileCount,
+        count: MAP_TILES,
       });
       if (tiles.kind !== 'tiles') {
         return null;
       }
-      return { map: map.tilemap, tiles: base64ToBytes(tiles.pixels), tileCount, palette: palette.bg };
+      return { map: map.tilemap, tiles: base64ToBytes(tiles.pixels), tileCount: MAP_TILES, palette: palette.bg };
     },
     [index],
   );
@@ -65,6 +67,8 @@ export function TilemapPanel({ transport }: { transport: Transport }) {
           <canvas
             ref={canvasRef}
             className="gk-pixels"
+            role="img"
+            aria-label={`Background ${index} map; hover a cell to inspect its entry`}
             style={{ width: Math.min(bg.width * 8, 512) }}
             onMouseMove={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();

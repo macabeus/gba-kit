@@ -4,7 +4,12 @@
  * page implements it with direct calls into a `@gba-kit/debug-core` session
  * (`createSessionTransport`). The panels never know which.
  */
-import type { GbaKitCommand, GbaKitRequests, StateBody } from '@gba-kit/debug-adapter/protocol';
+import type { GbaKitCommand, GbaKitRequests, StateBody } from '@gba-kit/debug-core/protocol';
+
+import type { PanelId } from './panels/DebugPanels.js';
+
+// A host that only serves the transport (an extension host bundling no React) imports this module alone.
+export type { PanelId };
 
 /** The execution controls a panel's toolbar can trigger; the host maps them to its debugger. */
 export type ControlAction =
@@ -18,6 +23,9 @@ export type ControlAction =
   | 'restart';
 
 export type Unsubscribe = () => void;
+
+/** The feeds a transport can subscribe to on its host. */
+export type Feed = 'state' | 'frame' | 'audio' | 'labels' | 'showPanel';
 
 export interface Transport {
   /** A `gba-kit/*` custom request. */
@@ -34,6 +42,14 @@ export interface Transport {
   onLabels(listener: () => void): Unsubscribe;
   /** Show text to the user in an editor (a recording's script, an exported symbol file), when the host has one. */
   openText?(content: string, language: string, title: string): void;
+  /**
+   * Bring one of the tool panels into view (a stopped recording, in the Recording
+   * tab), when the host has somewhere to show it. Whoever renders `DebugPanels`
+   * hears it through `onShowPanel`; a host with several views routes it between them.
+   */
+  showPanel?(panel: PanelId): void;
+  /** Something asked for a tool panel to be shown; `DebugPanels` selects it when it offers that tab. */
+  onShowPanel?(listener: (panel: PanelId) => void): Unsubscribe;
 }
 
 // ─── postMessage transport (a webview and its host) ─────────────────────
@@ -42,8 +58,11 @@ export interface Transport {
 export type TransportToHost =
   | { type: 'request'; id: number; command: string; args?: unknown }
   | { type: 'control'; id: number; action: ControlAction }
-  | { type: 'subscribe'; what: 'state' | 'frame' | 'audio' | 'labels' }
-  | { type: 'openText'; content: string; language: string; title: string };
+  | { type: 'subscribe'; what: Feed }
+  /** the last listener of a feed left: the host may stop sending it */
+  | { type: 'unsubscribe'; what: Feed }
+  | { type: 'openText'; content: string; language: string; title: string }
+  | { type: 'showPanel'; panel: PanelId };
 
 /** Messages a host sends to a webview transport. */
 export type HostToTransport =
@@ -51,7 +70,8 @@ export type HostToTransport =
   | { type: 'state'; state: StateBody }
   | { type: 'frame'; rgba: Uint8Array; frame: number }
   | { type: 'audio'; samples: Float32Array; sampleRate: number }
-  | { type: 'labels' };
+  | { type: 'labels' }
+  | { type: 'showPanel'; panel: PanelId };
 
 export interface MessagePort {
   post(message: TransportToHost): void;
@@ -68,6 +88,7 @@ export function createMessageTransport(port: MessagePort): Transport {
     frame: new Set<(rgba: Uint8Array, frame: number) => void>(),
     audio: new Set<(samples: Float32Array, sampleRate: number) => void>(),
     labels: new Set<() => void>(),
+    showPanel: new Set<(panel: PanelId) => void>(),
   };
   let lastState: StateBody | null = null;
   let lastFrame: { rgba: Uint8Array; frame: number } | null = null;
@@ -101,6 +122,9 @@ export function createMessageTransport(port: MessagePort): Transport {
       case 'labels':
         listeners.labels.forEach((l) => l());
         return;
+      case 'showPanel':
+        listeners.showPanel.forEach((l) => l(message.panel));
+        return;
     }
   });
 
@@ -115,37 +139,48 @@ export function createMessageTransport(port: MessagePort): Transport {
     });
   };
 
+  /**
+   * Keep the host's idea of a feed in step with its listeners: subscribed while it
+   * has any, unsubscribed once the last leaves (so 150 KB frames and audio stop
+   * crossing to a panel that no longer shows them). A feed `always` subscribes on
+   * every listener when the host does something on each subscription (it resends
+   * the last frame).
+   */
+  function listen<L>(what: Feed, set: Set<L>, listener: L, always = false): Unsubscribe {
+    if (set.size === 0 || always) {
+      port.post({ type: 'subscribe', what });
+    }
+    set.add(listener);
+    return () => {
+      if (set.delete(listener) && set.size === 0) {
+        port.post({ type: 'unsubscribe', what });
+      }
+    };
+  }
+
   return {
     request: (command, args) => send({ type: 'request', id: nextId++, command, args }) as Promise<never>,
     control: (action) => send({ type: 'control', id: nextId++, action }).then(() => undefined),
     onState(listener) {
-      listeners.state.add(listener);
+      const off = listen('state', listeners.state, listener);
       if (lastState) {
         listener(lastState);
-      } else {
-        port.post({ type: 'subscribe', what: 'state' });
       }
-      return () => listeners.state.delete(listener);
+      return off;
     },
     onFrame(listener) {
-      listeners.frame.add(listener);
+      const off = listen('frame', listeners.frame, listener, true);
       if (lastFrame) {
         listener(lastFrame.rgba, lastFrame.frame);
       }
-      port.post({ type: 'subscribe', what: 'frame' });
-      return () => listeners.frame.delete(listener);
+      return off;
     },
-    onAudio(listener) {
-      listeners.audio.add(listener);
-      port.post({ type: 'subscribe', what: 'audio' });
-      return () => listeners.audio.delete(listener);
-    },
-    onLabels(listener) {
-      listeners.labels.add(listener);
-      port.post({ type: 'subscribe', what: 'labels' });
-      return () => listeners.labels.delete(listener);
-    },
+    onAudio: (listener) => listen('audio', listeners.audio, listener),
+    onLabels: (listener) => listen('labels', listeners.labels, listener),
     openText: (content, language, title) => port.post({ type: 'openText', content, language, title }),
+    showPanel: (panel) => port.post({ type: 'showPanel', panel }),
+    // the subscription tells the host this view can show a panel: one asked for before it loaded arrives now
+    onShowPanel: (listener) => listen('showPanel', listeners.showPanel, listener),
   };
 }
 
@@ -153,8 +188,12 @@ export function createMessageTransport(port: MessagePort): Transport {
 export interface TransportBackend {
   request(command: string, args: unknown): Promise<unknown>;
   control(action: ControlAction): Promise<void>;
-  subscribe(what: 'state' | 'frame' | 'audio' | 'labels'): void;
+  subscribe(what: Feed): void;
+  /** the webview's last listener of the feed left */
+  unsubscribe(what: Feed): void;
   openText?(content: string, language: string, title: string): void;
+  /** a webview asked for a tool panel; the host brings the view that holds it up and tells it which */
+  showPanel?(panel: PanelId): void;
 }
 
 /** Handle one message from a webview transport on the host side. */
@@ -182,8 +221,14 @@ export async function serveTransport(
     case 'subscribe':
       backend.subscribe(message.what);
       return;
+    case 'unsubscribe':
+      backend.unsubscribe(message.what);
+      return;
     case 'openText':
       backend.openText?.(message.content, message.language, message.title);
+      return;
+    case 'showPanel':
+      backend.showPanel?.(message.panel);
       return;
   }
 }

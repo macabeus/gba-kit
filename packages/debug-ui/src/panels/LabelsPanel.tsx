@@ -44,25 +44,39 @@ export function LabelsPanel({ transport }: { transport: Transport }) {
     }
   };
   const remove = async (address: number): Promise<void> => {
-    const b = await transport.request('gba-kit/setLabel', { address, label: '' });
-    setLabels(b.labels);
+    try {
+      const b = await transport.request('gba-kit/setLabel', { address, label: '' });
+      setLabels(b.labels);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
   const doImport = async (): Promise<void> => {
-    const { imported } = await transport.request('gba-kit/importLabels', { text: importText });
-    setImportText('');
-    setMode('list');
-    setError(
-      imported === 0
-        ? 'nothing recognized: expected lines like `03005220 gUnk_03005220` or `gFoo = 0x03000000;`'
-        : null,
-    );
-    load();
+    try {
+      const { imported } = await transport.request('gba-kit/importLabels', { text: importText });
+      setImportText('');
+      setMode('list');
+      setError(
+        imported === 0
+          ? 'nothing recognized: expected lines like `03005220 gUnk_03005220` or `gFoo = 0x03000000;`'
+          : null,
+      );
+      load();
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
   const doExport = async (): Promise<void> => {
-    const { text } = await transport.request('gba-kit/exportLabels');
-    setExportText(text);
-    setMode('export');
-    transport.openText?.(text, 'plaintext', 'labels.sym');
+    try {
+      const { text } = await transport.request('gba-kit/exportLabels');
+      setExportText(text);
+      setMode('export');
+      setError(null);
+      transport.openText?.(text, 'plaintext', 'labels.sym');
+    } catch (err) {
+      setError((err as Error).message);
+    }
   };
 
   return (
@@ -153,6 +167,7 @@ export function LabelsPanel({ transport }: { transport: Transport }) {
   );
 }
 
+/** The labels as a table; editing one fills the form below it (the Edit button, or a double-click on its row). */
 export function LabelsView({
   labels,
   onRemove,
@@ -183,8 +198,25 @@ export function LabelsView({
             <td className="gk-muted">{l.comment ?? ''}</td>
             <td className="gk-right gk-muted">{l.size ?? ''}</td>
             <td>
+              {onEdit && (
+                <button
+                  type="button"
+                  className="gk-button gk-small"
+                  onClick={() => onEdit(l)}
+                  title="Edit"
+                  aria-label={`Edit label ${l.label}`}
+                >
+                  ✎
+                </button>
+              )}
               {onRemove && (
-                <button type="button" className="gk-button gk-small" onClick={() => onRemove(l.address)} title="Remove">
+                <button
+                  type="button"
+                  className="gk-button gk-small"
+                  onClick={() => onRemove(l.address)}
+                  title="Remove"
+                  aria-label={`Remove label ${l.label}`}
+                >
                   ✕
                 </button>
               )}

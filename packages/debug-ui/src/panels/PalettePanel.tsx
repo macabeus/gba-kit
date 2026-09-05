@@ -19,7 +19,10 @@ export function PalettePanel({ transport }: { transport: Transport }) {
   return <PaletteView bg={data.bg} obj={data.obj} />;
 }
 
-/** Two 16×16 grids of swatches; hovering or clicking one names its index and color. */
+/**
+ * Two 16×16 grids of swatches; hovering, focusing or clicking one names its index
+ * and color. Each swatch is a button, so the grids are walked with the keyboard.
+ */
 export function PaletteView({ bg, obj }: { bg: number[]; obj: number[] }) {
   const [picked, setPicked] = useState<{ kind: 'bg' | 'obj'; index: number } | null>(null);
   const pickedColor = picked ? (picked.kind === 'bg' ? bg : obj)[picked.index] : undefined;
@@ -29,17 +32,25 @@ export function PaletteView({ bg, obj }: { bg: number[]; obj: number[] }) {
     <div className="gk-row" style={{ alignItems: 'flex-start', padding: 8 }}>
       {(['bg', 'obj'] as const).map((kind) => (
         <Panel key={kind} title={kind === 'bg' ? 'Background' : 'Sprites'} pad>
-          <div className="gk-swatches" role="grid">
-            {(kind === 'bg' ? bg : obj).map((color, i) => (
-              <div
-                key={i}
-                className={`gk-swatch${picked?.kind === kind && picked.index === i ? ' gk-selected' : ''}`}
-                style={{ background: cssColor(color) }}
-                title={`${kind} ${i} (bank ${i >> 4}, entry ${i & 15}): ${cssColor(color)}`}
-                onMouseEnter={() => setPicked({ kind, index: i })}
-                onClick={() => setPicked({ kind, index: i })}
-              />
-            ))}
+          <div className="gk-swatches">
+            {(kind === 'bg' ? bg : obj).map((color, i) => {
+              const selected = picked?.kind === kind && picked.index === i;
+              const pick = (): void => setPicked({ kind, index: i });
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  className={`gk-swatch${selected ? ' gk-selected' : ''}`}
+                  style={{ background: cssColor(color) }}
+                  title={`${kind} ${i} (bank ${i >> 4}, entry ${i & 15}): ${cssColor(color)}`}
+                  aria-label={`${kind} ${i}: ${cssColor(color)}`}
+                  aria-pressed={selected}
+                  onMouseEnter={pick}
+                  onFocus={pick}
+                  onClick={pick}
+                />
+              );
+            })}
           </div>
         </Panel>
       ))}

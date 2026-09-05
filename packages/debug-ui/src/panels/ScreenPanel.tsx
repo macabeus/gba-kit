@@ -3,10 +3,11 @@
  * audio when asked, and a transport bar an editor has no native buttons for
  * (frame step, rewind, record).
  */
+import { AUDIO_SAMPLE_RATE } from '@gba-kit/debug-core/protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { AudioPlayer } from '../audio.js';
-import { Button } from '../components.js';
+import { Button, attempt } from '../components.js';
 import { useDebugState } from '../hooks.js';
 import { KEYBOARD_HINT, buttonForKey, gamepadMask } from '../keys.js';
 import type { Transport } from '../transport.js';
@@ -34,6 +35,7 @@ export function ScreenPanel({
   const state = useDebugState(transport);
   const [frame, setFrame] = useState(0);
   const [soundOn, setSoundOn] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const playerRef = useRef<AudioPlayer | null>(null);
   const heldRef = useRef(0);
   const padRef = useRef(0);
@@ -118,13 +120,13 @@ export function ScreenPanel({
       return;
     }
     const player = (playerRef.current ??= new AudioPlayer());
-    let sampleRate = 32768;
-    void player.start(sampleRate);
+    let sampleRate: number = AUDIO_SAMPLE_RATE;
+    attempt(setError, player.start(sampleRate));
     return transport.onAudio((samples, rate) => {
       if (rate !== sampleRate) {
         sampleRate = rate;
         player.close();
-        void player.start(rate);
+        attempt(setError, player.start(rate));
       }
       player.push(samples);
     });
@@ -136,14 +138,22 @@ export function ScreenPanel({
   const stopped = state?.state === 'stopped';
   const recording = state?.recording ?? false;
 
+  /**
+   * Stop a recording where it can be seen and replayed: the Recording tool panel
+   * when the host has one, else an editor with its script.
+   */
   const toggleRecording = async (): Promise<void> => {
     if (recording) {
       const { script, recording: log } = await transport.request('gba-kit/recordStop');
-      transport.openText?.(
-        script,
-        'javascript',
-        `recording-${log.startFrame}-${log.startFrame + log.frames.length}.js`,
-      );
+      if (transport.showPanel) {
+        transport.showPanel('recording');
+      } else {
+        transport.openText?.(
+          script,
+          'javascript',
+          `recording-${log.startFrame}-${log.startFrame + log.frames.length}.js`,
+        );
+      }
     } else {
       await transport.request('gba-kit/recordStart');
     }
@@ -164,37 +174,42 @@ export function ScreenPanel({
       {controls && (
         <div className="gk-row">
           {running ? (
-            <Button onClick={() => void transport.control('pause')} kind="primary">
+            <Button onClick={() => attempt(setError, transport.control('pause'))} kind="primary">
               ⏸ Pause
             </Button>
           ) : (
-            <Button onClick={() => void transport.control('continue')} kind="primary" disabled={!stopped}>
+            <Button onClick={() => attempt(setError, transport.control('continue'))} kind="primary" disabled={!stopped}>
               ▶ Run
             </Button>
           )}
           <Button
-            onClick={() => void transport.request('gba-kit/stepFrame')}
+            onClick={() => attempt(setError, transport.request('gba-kit/stepFrame'))}
             disabled={!stopped}
             title="Run to the end of this frame"
           >
             ⏭ Frame
           </Button>
           <Button
-            onClick={() => void transport.request('gba-kit/rewind', { frames: rewindFrames })}
-            disabled={!stopped || !state?.history.earliestFrame === null}
+            onClick={() => attempt(setError, transport.request('gba-kit/rewind', { frames: rewindFrames }))}
+            disabled={state?.state !== 'stopped' || state.history.earliestFrame === null}
             title={`Rewind ${rewindFrames} frames`}
           >
             ⏪ Rewind
           </Button>
           <Button
-            onClick={() => void toggleRecording()}
+            onClick={() => attempt(setError, toggleRecording())}
             kind={recording ? 'danger' : undefined}
             title="Record the buttons you press as a script"
           >
             {recording ? '■ Stop recording' : '● Record'}
           </Button>
           {audio && (
-            <Button onClick={() => setSoundOn((v) => !v)} active={soundOn} title="Sound">
+            <Button
+              onClick={() => setSoundOn((v) => !v)}
+              active={soundOn}
+              title="Sound"
+              label={soundOn ? 'Mute sound' : 'Unmute sound'}
+            >
               {soundOn ? '🔊' : '🔇'}
             </Button>
           )}
@@ -211,6 +226,7 @@ export function ScreenPanel({
           </>
         )}
         {recording && <span className="gk-bad"> · recording</span>}
+        {error && <span className="gk-bad"> · {error}</span>}
       </div>
       <div className="gk-hint">Click the screen, then: {KEYBOARD_HINT}</div>
     </div>
