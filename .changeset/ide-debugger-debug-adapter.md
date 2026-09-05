@@ -7,6 +7,8 @@ New package `@gba-kit/debug-adapter`: a Debug Adapter Protocol server for GBA pr
 
 Emulator-only operations are `gba-kit/*` custom requests, typed in `@gba-kit/debug-adapter/protocol`: buttons, frame and scanline steps, rewind by frames, save states, input recordings, the palette / tiles / tilemap / sprite / background views, decoded I/O registers, trace and event logs, labels, memory search, and a frame/audio stream over a pipe the client owns. A `gba-kit/state` event reports every stop, resume and rewind.
 
+`gba-kit-screen` is a browser page with the display and a keyboard gamepad for editors that have none, fed by the adapter over the same pipe (which is two-way: the page's button presses come back). The adapter is exercised as a real child process on stdio as well as in-process.
+
 Launch diagnostics refuse an ELF whose loadable bytes differ from the ROM (naming the first mismatching section) unless `allowElfMismatch` is set, and say when no source file was found under `cwd`. Responses always precede the `stopped` they cause, and variable references from before the machine last moved are refused as stale.
 
 `@gba-kit/debug-core`: `Program.hasCodeAt` (for `breakpointLocations`), and `SourceMapper.localFiles` keeps the file system's spelling on case-insensitive systems.

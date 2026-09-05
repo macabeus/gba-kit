@@ -965,6 +965,14 @@ export class GbaDebugSession extends DebugSession {
       case 'gba-kit/stream': {
         const a = args as Args<'gba-kit/stream'>;
         await this.#stream.connect(String(a.path));
+        this.#stream.onInput = (mask) => {
+          if (s.state === 'disposed') {
+            return;
+          }
+          for (let b = 0; b < 10; b++) {
+            s.setButton(b, ((mask >>> b) & 1) === 1);
+          }
+        };
         this.#audioOff?.();
         this.#audioOff = a.audio
           ? s.on({ audio: (samples) => this.#stream.sendAudio(samples, AUDIO_SAMPLE_RATE) })

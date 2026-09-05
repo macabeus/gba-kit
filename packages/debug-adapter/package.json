@@ -7,7 +7,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "gba-kit-debug-adapter": "dist/cli.js"
+    "gba-kit-debug-adapter": "dist/cli.js",
+    "gba-kit-screen": "dist/screen.js"
   },
   "exports": {
     ".": {
@@ -52,6 +53,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2",
     "vitest": "^4.1.1"
   }

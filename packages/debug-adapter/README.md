@@ -80,9 +80,36 @@ dap.configurations.c = {
 }
 ```
 
-Then `:lua require('dap').continue()`. The screen is not part of DAP; a client
-that wants one connects a pipe with `gba-kit/stream` (see the `STREAM` framing in
-`protocol.ts`) or polls `gba-kit/frame`.
+Then `:lua require('dap').continue()`.
+
+### The screen outside VS Code
+
+The screen is not part of DAP. `gba-kit-screen` serves a browser page with the
+display and a keyboard gamepad, fed by the adapter over a pipe it owns:
+
+```bash
+npx gba-kit-screen            # prints http://localhost:4712/ and the pipe path
+```
+
+then, in the debug session, send the request it prints:
+
+```lua
+:lua require('dap').session():request('gba-kit/stream', { path = '/tmp/gba-kit-screen-….sock' })
+```
+
+Frames flow to the page, button presses flow back (the pipe is two-way; see the
+`STREAM` framing in `protocol.ts`). A client that prefers polling asks
+`gba-kit/frame` for a base64 RGBA image.
+
+### Emacs, Zed, JetBrains
+
+Any DAP client works the same way: launch `npx @gba-kit/debug-adapter` on stdio
+with a launch configuration of `type: "gba-kit"`, `request: "launch"` and the
+`rom` / `elf` / `cwd` fields above. Emacs `dap-mode` registers it with
+`dap-register-debug-provider`; Zed's `debug.json` and JetBrains' generic DAP
+support (2025.1+) take the same command line and arguments. Exception filters
+show up as the hardware events, custom requests are available wherever the
+client exposes `request`, and `gba-kit-screen` provides the display.
 
 ## In-process
 

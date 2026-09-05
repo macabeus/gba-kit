@@ -12,10 +12,29 @@ import { STREAM } from './protocol.js';
 /** A frame's payload is larger than this many bytes of backlog: drop it instead of queueing. */
 const MAX_BACKLOG = 2 * (STREAM.headerBytes + 8 + STREAM.width * STREAM.height * 4);
 
+/** One message of the stream, framed. */
+export function encodeStreamMessage(type: number, payload: Uint8Array): Buffer {
+  const header = Buffer.allocUnsafe(STREAM.headerBytes);
+  header.writeUInt16LE(STREAM.magic, 0);
+  header.writeUInt8(type, 2);
+  header.writeUInt8(0, 3);
+  header.writeUInt32LE(payload.byteLength, 4);
+  return Buffer.concat([header, payload]);
+}
+
+/** The message a client writes back to press buttons. */
+export function encodeInput(mask: number): Buffer {
+  const payload = Buffer.allocUnsafe(2);
+  payload.writeUInt16LE(mask & 0x3ff, 0);
+  return encodeStreamMessage(STREAM.input, payload);
+}
+
 export class FrameStream {
   #socket: Socket | null = null;
   #connecting: Promise<void> | null = null;
   #dropped = 0;
+  /** buttons the client pressed through the pipe */
+  onInput: ((mask: number) => void) | null = null;
 
   get connected(): boolean {
     return this.#socket !== null && !this.#socket.destroyed;
@@ -37,6 +56,18 @@ export class FrameStream {
         socket.on('close', () => {
           if (this.#socket === socket) {
             this.#socket = null;
+          }
+        });
+        const reader = new StreamReader(
+          () => {},
+          () => {},
+          (mask) => this.onInput?.(mask),
+        );
+        socket.on('data', (chunk: Buffer) => {
+          try {
+            reader.push(chunk);
+          } catch {
+            this.close();
           }
         });
         this.#socket = socket;
@@ -82,12 +113,7 @@ export class FrameStream {
   }
 
   #write(type: number, payload: Buffer): void {
-    const header = Buffer.allocUnsafe(STREAM.headerBytes);
-    header.writeUInt16LE(STREAM.magic, 0);
-    header.writeUInt8(type, 2);
-    header.writeUInt8(0, 3);
-    header.writeUInt32LE(payload.byteLength, 4);
-    this.#socket?.write(Buffer.concat([header, payload]));
+    this.#socket?.write(encodeStreamMessage(type, payload));
   }
 }
 
@@ -98,6 +124,7 @@ export class StreamReader {
   constructor(
     readonly onFrame: (frame: { frame: number; width: number; height: number; rgba: Uint8Array }) => void,
     readonly onAudio: (audio: { sampleRate: number; samples: Float32Array }) => void = () => {},
+    readonly onInput: (mask: number) => void = () => {},
   ) {}
 
   push(chunk: Uint8Array): void {
@@ -128,6 +155,8 @@ export class StreamReader {
         const copy = new Uint8Array(bytes.byteLength);
         copy.set(bytes);
         this.onAudio({ sampleRate: payload.readUInt32LE(0), samples: new Float32Array(copy.buffer) });
+      } else if (type === STREAM.input && payload.length >= 2) {
+        this.onInput(payload.readUInt16LE(0));
       }
     }
   }

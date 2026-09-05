@@ -176,12 +176,17 @@ export interface GbaKitEvents {
  * RGBA bytes. An audio payload is `u32 sampleRate` then interleaved stereo
  * float32 samples. While the machine runs frames arrive throttled and stale frames
  * are dropped when the pipe is slow; a stop always sends the current frame.
+ *
+ * The pipe is two-way: the client may write `type 3` messages back, whose payload
+ * is a `u16` button mask (GBA bit order) the adapter presses at the next frame —
+ * how a screen page that is not a DAP client still has a gamepad.
  */
 export const STREAM = {
   magic: 0x4b47,
   headerBytes: 8,
   frame: 1,
   audio: 2,
+  input: 3,
   width: 240,
   height: 160,
 } as const;
