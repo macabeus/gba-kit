@@ -4,7 +4,8 @@
  * the masks through the machine; exported as gba-kit's scripting dialect for
  * humans, and kept as files under a project's `.gba-kit/recordings/`.
  */
-import { base64ToBytes, bytesToBase64 } from './snapshot-codec.js';
+import type { PackedSnapshot } from './delta.js';
+import { base64ToBytes, bytesToBase64, decodeTypedArrays, encodeTypedArrays } from './snapshot-codec.js';
 
 export interface InputRecording {
   format: 'gba-kit-input';
@@ -29,6 +30,13 @@ export interface RecordedTake {
   thumbnail: { width: number; height: number; rgba: Uint8Array };
   /** when the recording was stopped, or when the file holding it was written */
   createdAt: string;
+  /**
+   * The machine as it was on the recording's first frame, packed. What lets a
+   * session opened later replay the take from where it was recorded, which rewinding
+   * cannot reach: that session never ran those frames. Absent on a take from a
+   * session that could not snapshot the machine.
+   */
+  start?: PackedSnapshot;
 }
 
 /**
@@ -40,6 +48,8 @@ export interface RecordingFile {
   version: 1;
   createdAt: string;
   thumbnail: { width: number; height: number; rgba: string };
+  /** the packed machine at the first frame, with its typed arrays as base64 */
+  start?: unknown;
   recording: InputRecording;
 }
 
@@ -53,6 +63,7 @@ export function encodeTake(take: Omit<RecordedTake, 'id'>): string {
       height: take.thumbnail.height,
       rgba: bytesToBase64(take.thumbnail.rgba),
     },
+    start: take.start ? encodeTypedArrays(take.start) : undefined,
     recording: take.recording,
   };
   return JSON.stringify(file);
@@ -70,6 +81,7 @@ export function decodeTake(text: string): Omit<RecordedTake, 'id'> {
     script: recordingToScript(file.recording),
     thumbnail: { width: shot.width, height: shot.height, rgba: base64ToBytes(shot.rgba) },
     createdAt: typeof file.createdAt === 'string' ? file.createdAt : '',
+    start: file.start ? (decodeTypedArrays(file.start) as PackedSnapshot) : undefined,
   };
 }
 

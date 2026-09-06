@@ -7,7 +7,7 @@
  */
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
-import { arrayFrom, arrayKind, viewBytes } from './typed-arrays.js';
+import { type ArrayKind, arrayFrom, arrayKind, viewBytes } from './typed-arrays.js';
 
 /** A typed-array field of the snapshot, addressed by path. */
 type ArrayPath = string[];
@@ -136,6 +136,37 @@ export function applySnapshotDelta(base: GbaSnapshot, delta: SnapshotDelta): Gba
   baseArrays.forEach((b, i) => setPath(out, b.path, restored[i]!, getPath(base, b.path)));
   // The framebuffer is not part of a delta: carry the base's so the screen is never blank.
   out.ppu.framebuffer = new Uint32Array(base.ppu.framebuffer);
+  return out;
+}
+
+/**
+ * A snapshot on its own: the scalars, and every typed array run-length encoded
+ * against nothing. Around 24 KB of a ~470 KB snapshot, because most of a GBA's RAM
+ * is zero, which is what makes it worth keeping one beside an input recording.
+ */
+export interface PackedSnapshot {
+  scalars: GbaSnapshot;
+  arrays: Array<{ path: ArrayPath; kind: ArrayKind; bytes: number; rle: Uint8Array }>;
+  /** the framebuffer is not stored (it is re-rendered); this is how long to make a blank one */
+  framebuffer: number;
+}
+
+export function packSnapshot(snap: GbaSnapshot): PackedSnapshot {
+  const arrays = snapshotArrays(snap).map(({ path, array }) => ({
+    path,
+    kind: arrayKind(getPath(snap, path)) ?? 'u8',
+    bytes: array.length,
+    rle: encodeDelta(new Uint8Array(array.length), array),
+  }));
+  return { scalars: stripArrays(snap), arrays, framebuffer: snap.ppu.framebuffer.length };
+}
+
+export function unpackSnapshot(packed: PackedSnapshot): GbaSnapshot {
+  const out = structuredClone(packed.scalars) as GbaSnapshot;
+  for (const { path, kind, bytes, rle } of packed.arrays) {
+    setPath(out, path, decodeDelta(new Uint8Array(bytes), rle), arrayFrom(kind, new Uint8Array(0)));
+  }
+  out.ppu.framebuffer = new Uint32Array(packed.framebuffer);
   return out;
 }
 

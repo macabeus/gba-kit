@@ -904,6 +904,32 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(h.session.state).toBe('stopped');
   });
 
+  it('replays from where it was recorded even after the history holding that frame is gone', async () => {
+    const h = await boot(variant);
+    h.run(2);
+    h.session.startRecording();
+    h.session.setButton(0, true); // A
+    h.run(2);
+    h.session.setButton(0, false);
+    h.run(2);
+    h.session.stopRecording();
+    const take = h.session.recordings[0]!;
+    expect(take.start).toBeDefined();
+    const end = h.session.machine.snapshot();
+    const endFrame = h.session.frame;
+
+    // a machine that never ran those frames: the recording's own start state is the way back
+    h.session.restart();
+    expect(h.session.frame).toBe(0);
+    expect(h.session.replayRecording(take.recording, 'start')).toBe(false);
+    expect(h.session.frame).toBe(0); // a refused replay leaves the machine alone
+    expect(h.session.replayRecording(take.recording, 'start', take.start)).toBe(true);
+    expect(h.session.frame).toBe(take.recording.startFrame);
+    h.finish();
+    expect(h.session.frame).toBe(endFrame);
+    expect(h.session.machine.snapshot()).toEqual(end);
+  });
+
   it('a recording whose start frame is ahead of the machine is not replayed', async () => {
     const h = await boot(variant);
     h.session.startRecording();

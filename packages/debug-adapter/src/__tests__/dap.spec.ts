@@ -1283,6 +1283,9 @@ describe('emulator requests', () => {
     tempDirs.push(projectDir);
     const dir = join(projectDir, '.gba-kit', 'recordings');
     const first = await launch({ projectDir });
+    // recorded well into the run, so replaying it from there needs more than a rewind
+    await stopped(first, 'gba-kit/stepFrame');
+    await stopped(first, 'gba-kit/stepFrame');
     await first.body('gba-kit/recordStart');
     await first.body('gba-kit/input', { button: 0, down: true });
     await stopped(first, 'gba-kit/stepFrame');
@@ -1299,9 +1302,16 @@ describe('emulator requests', () => {
     expect(take.script).toContain("press('a', { hold: 2 })");
     expect(take.createdAt).not.toBe('');
     expect(base64Bytes(take.thumbnail)).toBe(take.width * take.height * 4);
-    // and it replays there, having come back whole
-    const replay = await stopped(next, 'gba-kit/replay', { recording: take.recording });
-    expect(replay.description).toMatch(/replayed 2 frames/);
+    // it replays there from where it was recorded, a frame this session never ran
+    expect(take.recording.startFrame).toBe(2);
+    expect((await next.body<StateBody>('gba-kit/state')).frame).toBe(0);
+    // the recording alone cannot say how to get there: only the take this session kept can
+    const lost = await next.request('gba-kit/replay', { recording: take.recording, from: 'start' });
+    expect(lost.body).toEqual({ replayed: false });
+    expect((await next.body<StateBody>('gba-kit/state')).frame).toBe(0);
+    const back = await stopped(next, 'gba-kit/replay', { id: take.id, recording: take.recording, from: 'start' });
+    expect(back.description).toMatch(/replayed 2 frames/);
+    expect((await next.body<StateBody>('gba-kit/state')).frame).toBe(4);
 
     expect(await next.body('gba-kit/deleteRecording', { id: take.id })).toEqual({ deleted: true });
     expect(await filesIn(dir, 0)).toEqual([]);

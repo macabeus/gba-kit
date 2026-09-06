@@ -1385,8 +1385,9 @@ export class GbaDebugSession extends DebugSession {
           throw new Error("'recording' is not an input recording");
         }
         const from = a.from === 'here' ? 'here' : 'start';
+        const take = a.id === undefined ? undefined : s.recordings.find((t) => t.id === a.id);
         this.#exec(response, () => {
-          const replayed = s.replayRecording(recording, from);
+          const replayed = s.replayRecording(recording, from, take?.start);
           response.body = { replayed };
           if (!replayed) {
             this.#stayStopped(s, 'the recording starts before the history kept');

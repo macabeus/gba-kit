@@ -210,10 +210,12 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       }
       case 'gba-kit/replay': {
         const replay = a as A<'gba-kit/replay'>;
+        const take = replay.id === undefined ? undefined : session.recordings.find((t) => t.id === replay.id);
         return {
           replayed: session.replayRecording(
             replay.recording as InputRecording,
             replay.from === 'here' ? 'here' : 'start',
+            take?.start,
           ),
         } as never;
       }

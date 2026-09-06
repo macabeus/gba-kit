@@ -151,7 +151,16 @@ export interface GbaKitRequests {
    * where the recording was made and reproduces it, `here` presses them from wherever
    * the machine is now.
    */
-  'gba-kit/replay': { args: { recording: InputRecording; from?: 'start' | 'here' }; body: { replayed: boolean } };
+  /**
+   * Replay a recording: `from` `'start'` puts the machine back where it was recorded,
+   * `'here'` presses the buttons from where the machine is now. `id` names the take
+   * the recording came from, when this session has it: its start state is what makes
+   * `'start'` reach a frame this session never ran, in a project opened later.
+   */
+  'gba-kit/replay': {
+    args: { recording: InputRecording; from?: 'start' | 'here'; id?: number };
+    body: { replayed: boolean };
+  };
 
   /**
    * Save the machine to `<projectDir>/.gba-kit/states/<name>.json`, with `name`

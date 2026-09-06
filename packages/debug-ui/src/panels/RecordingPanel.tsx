@@ -55,9 +55,9 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
 
   const replay = (take: TakeBody, from: 'start' | 'here'): Promise<void> =>
     act(async () => {
-      const { replayed } = await transport.request('gba-kit/replay', { recording: take.recording, from });
+      const { replayed } = await transport.request('gba-kit/replay', { id: take.id, recording: take.recording, from });
       if (!replayed) {
-        throw new Error(`frame ${take.recording.startFrame} is no longer in history; replay it from here instead`);
+        throw new Error(`frame ${take.recording.startFrame} cannot be reached; replay it from here instead`);
       }
     });
 

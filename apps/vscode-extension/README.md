@@ -64,7 +64,9 @@ stale ELF land in the wrong places).
 - **GBA: Show Tools**: I/O registers decoded, palette, tiles, tilemaps, sprites,
   the instruction trace, the hardware event log, memory search, labels (with
   `.sym` import and export), save states, recordings. Save states and recordings
-  are kept in the project and listed again the next time it is opened.
+  are kept in the project and listed again the next time it is opened; a
+  recording carries the machine it began on, so it replays from where it was
+  recorded even in a session that never ran those frames.
 
 The panels use the editor's own icons (the codicon font, which ships with the
 extension) and its theme colors, so they read as part of the editor rather than as

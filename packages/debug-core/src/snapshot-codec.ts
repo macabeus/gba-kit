@@ -50,27 +50,27 @@ export function base64ToBytes(text: string): Uint8Array {
 type Json = Record<string, unknown>;
 
 /** Deep copy with every typed array replaced by `{ $t: 'u8'|'u32'|'i8'|'f32', $b: base64 }`. */
-function encode(value: unknown): unknown {
+export function encodeTypedArrays(value: unknown): unknown {
   const kind = arrayKind(value);
   if (kind !== null) {
     return { $t: kind, $b: bytesToBase64(viewBytes(value as ArrayBufferView)) };
   }
   if (Array.isArray(value)) {
-    return value.map(encode);
+    return value.map(encodeTypedArrays);
   }
   if (value && typeof value === 'object') {
     const out: Json = {};
     for (const [k, v] of Object.entries(value)) {
-      out[k] = encode(v);
+      out[k] = encodeTypedArrays(v);
     }
     return out;
   }
   return value;
 }
 
-function decode(value: unknown): unknown {
+export function decodeTypedArrays(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return value.map(decode);
+    return value.map(decodeTypedArrays);
   }
   if (value && typeof value === 'object') {
     const o = value as Json;
@@ -79,7 +79,7 @@ function decode(value: unknown): unknown {
     }
     const out: Json = {};
     for (const [k, v] of Object.entries(o)) {
-      out[k] = decode(v);
+      out[k] = decodeTypedArrays(v);
     }
     return out;
   }
@@ -116,7 +116,7 @@ export function encodeSaveState(
     createdAt: new Date().toISOString(),
     frame: meta.frame,
     thumbnail: meta.thumbnail,
-    snapshot: encode(snapshot),
+    snapshot: encodeTypedArrays(snapshot),
   };
   return JSON.stringify(file);
 }
@@ -151,5 +151,5 @@ export function decodeSaveState(text: string): { snapshot: GbaSnapshot; meta: Om
     throw new Error('not a gba-kit save state');
   }
   const { snapshot, ...meta } = file;
-  return { snapshot: decode(snapshot) as GbaSnapshot, meta };
+  return { snapshot: decodeTypedArrays(snapshot) as GbaSnapshot, meta };
 }

@@ -40,6 +40,7 @@ export { type RewindOptions } from './rewind.js';
 export { type SnapshotDelta } from './delta.js';
 export { type EventEntry, type TimeStamp, type TraceEntry } from './rings.js';
 export { LabelStore, type Label, type LabelsFile } from './labels.js';
+export { type PackedSnapshot, packSnapshot, unpackSnapshot } from './delta.js';
 export {
   BUTTON_COUNT,
   buttonsToNames,

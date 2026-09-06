@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { applySnapshotDelta, decodeDelta, deltaSnapshot, encodeDelta } from '../delta.js';
+import { packSnapshot, unpackSnapshot } from '../delta.js';
 import {
   type ExprEnv,
   compileExpression,
@@ -311,6 +312,33 @@ describe('recordings', () => {
     for (const bad of ['{}', '{"format":"gba-kit-recording"}', 'not json']) {
       expect(() => decodeTake(bad)).toThrow();
     }
+  });
+
+  it('packs the machine a take begins on, small enough to keep beside it', () => {
+    const ram = new Uint8Array(4096);
+    ram.set([1, 2, 3], 100); // as a GBA's RAM is: mostly zero, with a little in it
+    const snapshot = {
+      frame: 7,
+      cpu: { r: new Uint32Array([1, 2]) },
+      ram,
+      apu: { buf: new Int8Array([-1]) },
+      ppu: { framebuffer: new Uint32Array(240 * 160), mode: 3 },
+    };
+    const packed = packSnapshot(snapshot as never);
+    const rle = packed.arrays.reduce((n, a) => n + a.rle.length, 0);
+    const raw = packed.arrays.reduce((n, a) => n + a.bytes, 0);
+    expect(rle).toBeLessThan(raw / 4);
+    // the framebuffer is not among them: it is drawn again by the frame that follows
+    expect(packed.arrays.some((a) => a.path.includes('framebuffer'))).toBe(false);
+
+    const back = unpackSnapshot(packed) as unknown as typeof snapshot;
+    expect(back.ram).toBeInstanceOf(Uint8Array);
+    expect(Array.from(back.ram.subarray(98, 104))).toEqual([0, 0, 1, 2, 3, 0]);
+    expect(Array.from(back.cpu.r)).toEqual([1, 2]);
+    expect(Array.from(back.apu.buf)).toEqual([-1]);
+    expect(back.frame).toBe(7);
+    expect(back.ppu.mode).toBe(3);
+    expect(back.ppu.framebuffer.length).toBe(240 * 160);
   });
 });
 

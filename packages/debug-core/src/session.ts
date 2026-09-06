@@ -24,6 +24,7 @@ import {
   type EventBreakpointKind,
   type ResolvedAddresses,
 } from './breakpoints.js';
+import { type PackedSnapshot, packSnapshot, unpackSnapshot } from './delta.js';
 import type { CompiledExpr, ExprEnv } from './expression.js';
 import type { Host } from './host.js';
 import { type DisassembledLine, type EvaluateResult, Inspector, type Scope, type StackFrame } from './inspector.js';
@@ -221,6 +222,8 @@ export class Session {
   #nextTakeId = 1;
   /** the screen the recording in progress began on, kept for its take */
   #recordingThumbnail: RecordedTake['thumbnail'] | null = null;
+  /** the machine the recording in progress began on, kept for its take */
+  #recordingSnapshot: PackedSnapshot | null = null;
   /** the recording being played back, a frame per tick; null when the machine runs on its own input */
   #playback: { frames: number[]; index: number } | null = null;
 
@@ -1434,9 +1437,15 @@ export class Session {
 
   // ─── recording ─────────────────────────────────────────────────────
 
-  /** Record the buttons held on every frame from this one, until `stopRecording`. */
+  /**
+   * Record the buttons held on every frame from this one, until `stopRecording`.
+   * The screen and the machine are kept as they are now: the screen to show the take
+   * by, the machine so a session that never ran these frames can still replay it from
+   * here (packed, so it costs tens of kilobytes rather than half a megabyte).
+   */
   startRecording(): void {
     this.#recordingThumbnail = thumbnailRgba(this.machine.framebufferRgba());
+    this.#recordingSnapshot = packSnapshot(this.machine.snapshot());
     this.#setRecordingStart(this.machine.frame);
   }
 
@@ -1485,8 +1494,10 @@ export class Session {
       script: recordingToScript(recording),
       thumbnail: this.#recordingThumbnail ?? thumbnailRgba(this.machine.framebufferRgba()),
       createdAt: new Date().toISOString(),
+      start: this.#recordingSnapshot ?? undefined,
     });
     this.#recordingThumbnail = null;
+    this.#recordingSnapshot = null;
     return recording;
   }
 
@@ -1533,7 +1544,7 @@ export class Session {
    * is `'start'` and the frame the recording was made at cannot be reached. A
    * breakpoint, a stall or a pause during the playback ends it where it hit.
    */
-  replayRecording(recording: InputRecording, from: 'start' | 'here' = 'start'): boolean {
+  replayRecording(recording: InputRecording, from: 'start' | 'here' = 'start', start?: PackedSnapshot): boolean {
     this.#requireStopped('replay');
     if (recording.romHash !== this.romHash) {
       throw new Error('this recording was made with a different ROM');
@@ -1545,7 +1556,13 @@ export class Session {
       if (recording.startFrame === 0 && (this.history.earliestFrame ?? 0) > 0) {
         this.restart();
       } else if (recording.startFrame > this.machine.frame || !this.#replayTo(recording.startFrame, 0)) {
-        return false; // the past only: a start frame ahead of the machine is not in history
+        // rewinding could not reach it: this session never ran those frames. The take's
+        // own start state can still put the machine there, which is how a recording
+        // outlives the session that made it.
+        if (!start) {
+          return false;
+        }
+        this.#restoreSnapshot(unpackSnapshot(start));
       }
     }
     this.history.truncateAfter(this.machine.frame);
@@ -1581,6 +1598,12 @@ export class Session {
   }
 
   #loadSnapshot(snapshot: GbaSnapshot, description: string): void {
+    this.#restoreSnapshot(snapshot);
+    this.#stop({ reason: 'restart', address: this.machine.pc, description });
+  }
+
+  /** Put the machine in a state it did not reach by running: history starts again from there. */
+  #restoreSnapshot(snapshot: GbaSnapshot): void {
     this.machine.restore(snapshot);
     this.#epoch++;
     this.#lastFrame = this.machine.frame;
@@ -1590,7 +1613,6 @@ export class Session {
     this.#stopRequest = null;
     this.#pendingStop = null;
     this.#hiddenInline = AUTO_HIDDEN;
-    this.#stop({ reason: 'restart', address: this.machine.pc, description });
   }
 
   /**
