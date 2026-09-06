@@ -96,6 +96,23 @@ export function createSessionTransport(session: Session, options: SessionTranspo
     tracing: session.tracing,
   });
 
+  /**
+   * The body is rebuilt only when the session says it reads differently, so a reader
+   * that compares snapshots by identity (React's `useSyncExternalStore`) sees one
+   * object per change instead of one per read. The transport follows the session
+   * itself rather than leaving that to whoever subscribed, so a reader that is not
+   * subscribed — a panel rendering before it subscribes — still sees the state as it
+   * is now.
+   */
+  let lastState: StateBody | null = null;
+  const currentState = (): StateBody => (lastState ??= state());
+  /** every session event after which the body reads differently, like the adapter's `gba-kit/state` */
+  const onStateEvent = (what: () => void): (() => void) =>
+    session.on({ stopped: what, continued: what, state: what, recording: what, tracing: what });
+  onStateEvent(() => {
+    lastState = null;
+  });
+
   const ppu = (args: PpuArguments): PpuBody => {
     switch (args.kind) {
       case 'palette':
@@ -332,11 +349,15 @@ export function createSessionTransport(session: Session, options: SessionTranspo
   return {
     request,
     control,
+    get state() {
+      return currentState();
+    },
     onState(listener) {
-      listener(state());
-      // every session event after which the body reads differently, like the adapter's `gba-kit/state`
-      const notify = (): void => listener(state());
-      return session.on({ stopped: notify, continued: notify, state: notify, recording: notify, tracing: notify });
+      listener(currentState());
+      return onStateEvent(() => {
+        lastState = null;
+        listener(currentState());
+      });
     },
     onFrame(listener) {
       const off = session.on({ frame: listener });

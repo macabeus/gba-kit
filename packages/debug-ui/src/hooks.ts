@@ -1,13 +1,62 @@
 import type { SavedStateInfo, StateBody } from '@gba-kit/debug-core/protocol';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import type { Transport } from './transport.js';
 
-/** The debugger's state, updated on every change. Null until the host reports one. */
+/**
+ * The debugger's state, re-read on every change. Null until the host reports one.
+ * The transport is the store: what it holds is read while rendering rather than
+ * copied into state, so a panel's first render already shows the machine.
+ */
 export function useDebugState(transport: Transport): StateBody | null {
-  const [state, setState] = useState<StateBody | null>(null);
-  useEffect(() => transport.onState(setState), [transport]);
-  return state;
+  const snapshot = useCallback(() => transport.state, [transport]);
+  return useSyncExternalStore(
+    useCallback((changed) => transport.onState(changed), [transport]),
+    snapshot,
+    snapshot,
+  );
+}
+
+/**
+ * Something read from the transport, read again whenever `key` changes and on
+ * demand. A null key asks for nothing and keeps what was last read, for a view with
+ * nothing to ask yet (no session) or nothing worth asking now (a recording still
+ * running). A response that lands after a newer read, or after the view is gone, is
+ * dropped, so the slower of two reads never wins.
+ */
+export function useFetched<T>(
+  transport: Transport,
+  fetch: (transport: Transport) => Promise<T>,
+  key: string | null,
+): { data: T | null; error: string | null; refresh: () => void } {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [asked, setAsked] = useState(0);
+  const fetchRef = useRef(fetch);
+  fetchRef.current = fetch;
+  useEffect(() => {
+    if (key === null) {
+      return;
+    }
+    let ignore = false;
+    fetchRef.current(transport).then(
+      (d) => {
+        if (!ignore) {
+          setData(d);
+          setError(null);
+        }
+      },
+      (err: Error) => {
+        if (!ignore) {
+          setError(err.message);
+        }
+      },
+    );
+    return () => {
+      ignore = true;
+    };
+  }, [transport, key, asked]);
+  return { data, error, refresh: useCallback(() => setAsked((n) => n + 1), []) };
 }
 
 /**
@@ -15,8 +64,8 @@ export function useDebugState(transport: Transport): StateBody | null {
  * revision (a panel showing memory is only meaningful at a stop; while running it
  * keeps the last stop's view). A change of `deps` refetches too, and until that
  * lands `data` is still what the previous deps fetched: a consumer that paints it
- * with the current controls must carry the controls in the data itself. `deps`
- * is spread into the effect's dependency list, so its length must never change.
+ * with the current controls must carry the controls in the data itself. `deps` are
+ * read as the text they print as, so pass what a panel's controls are set to.
  */
 export function useAtStop<T>(
   transport: Transport,
@@ -24,42 +73,19 @@ export function useAtStop<T>(
   deps: unknown[] = [],
 ): { data: T | null; error: string | null; refresh: () => void; stopped: boolean } {
   const state = useDebugState(transport);
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [tick, setTick] = useState(0);
-  const fetchRef = useRef(fetch);
-  fetchRef.current = fetch;
-  const revision = state?.state === 'stopped' ? `${state.epoch}:${state.revision}` : null;
-  useEffect(() => {
-    if (revision === null) {
-      return;
-    }
-    let cancelled = false;
-    fetchRef
-      .current(transport)
-      .then((d) => {
-        if (!cancelled) {
-          setData(d);
-          setError(null);
-        }
-      })
-      .catch((err: Error) => {
-        if (!cancelled) {
-          setError(err.message);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [transport, revision, tick, ...deps]);
-  const refresh = useCallback(() => setTick((t) => t + 1), []);
-  return { data, error, refresh, stopped: state?.state === 'stopped' };
+  const stopped = state?.state === 'stopped';
+  const fetched = useFetched(transport, fetch, stopped ? [state.epoch, state.revision, ...deps].join('\u0000') : null);
+  return { ...fetched, stopped };
 }
 
-/** Paint RGBA pixels onto a canvas ref whenever they change. */
+/**
+ * Paint RGBA pixels onto a canvas ref whenever they change. The one place this
+ * package touches a canvas: what to paint is worked out while rendering, and only
+ * the painting itself happens here, because a canvas is not React's to describe.
+ */
 export function usePixels(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
-  pixels: { width: number; height: number; rgba: Uint8ClampedArray } | null,
+  pixels: { width: number; height: number; rgba: Uint8Array | Uint8ClampedArray } | null,
 ): void {
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -93,35 +119,23 @@ export function useSaveStates(transport: Transport): {
   rename: (state: SavedStateInfo, to: string) => Promise<void>;
   remove: (state: SavedStateInfo) => Promise<void>;
 } {
-  const state = useDebugState(transport);
-  const [states, setStates] = useState<SavedStateInfo[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const connected = useDebugState(transport) !== null;
+  const listed = useFetched(transport, (t) => t.request('gba-kit/listStates'), connected ? 'connected' : null);
+  const [failed, setFailed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const connected = state !== null;
-
-  const refresh = useCallback(() => {
-    transport
-      .request('gba-kit/listStates')
-      .then((b) => setStates(b.states))
-      .catch((err: Error) => setError(err.message));
-  }, [transport]);
-  useEffect(() => {
-    if (connected) {
-      refresh();
-    }
-  }, [refresh, connected]);
+  const refresh = listed.refresh;
 
   const act = useCallback(
     async (what: () => Promise<unknown>, relist: boolean): Promise<void> => {
       setBusy(true);
       try {
         await what();
-        setError(null);
+        setFailed(null);
         if (relist) {
           refresh();
         }
       } catch (err) {
-        setError((err as Error).message);
+        setFailed((err as Error).message);
       } finally {
         setBusy(false);
       }
@@ -130,8 +144,8 @@ export function useSaveStates(transport: Transport): {
   );
 
   return {
-    states,
-    error,
+    states: listed.data?.states ?? [],
+    error: failed ?? listed.error,
     busy,
     refresh,
     save: (name) => act(() => transport.request('gba-kit/saveState', { name: name?.trim() || undefined }), true),

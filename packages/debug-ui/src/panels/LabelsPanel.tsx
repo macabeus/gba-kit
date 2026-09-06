@@ -1,28 +1,25 @@
 import type { Label } from '@gba-kit/debug-core';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { Button, Empty, Hex, parseNumber } from '../components.js';
+import { useFetched } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
 /** Names for addresses the ELF does not name: persisted per project, shown in disassembly, usable in expressions. */
 export function LabelsPanel({ transport }: { transport: Transport }) {
-  const [labels, setLabels] = useState<Label[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<'list' | 'import' | 'export'>('list');
   const [importText, setImportText] = useState('');
   const [exportText, setExportText] = useState('');
   const [form, setForm] = useState({ address: '', label: '', comment: '' });
 
-  const load = useCallback(() => {
-    transport
-      .request('gba-kit/labels')
-      .then((b) => setLabels(b.labels))
-      .catch((err: Error) => setError(err.message));
-  }, [transport]);
-  useEffect(() => {
-    load();
-    return transport.onLabels(load);
-  }, [transport, load]);
+  // The label set, and a re-read whenever it changes. An edit made here changes it
+  // too, so the list follows that one event rather than each editing path also
+  // setting it: a label named in the editor lands the same way.
+  const listed = useFetched(transport, (t) => t.request('gba-kit/labels'), 'labels');
+  const labels = listed.data?.labels ?? null;
+  const reread = listed.refresh;
+  useEffect(() => transport.onLabels(reread), [transport, reread]);
 
   const submit = async (): Promise<void> => {
     const address = parseNumber(form.address);
@@ -36,7 +33,6 @@ export function LabelsPanel({ transport }: { transport: Transport }) {
         label: form.label.trim(),
         comment: form.comment.trim() || undefined,
       });
-      setLabels(b.labels);
       setForm({ address: '', label: '', comment: '' });
       setError(null);
     } catch (err) {
@@ -45,8 +41,7 @@ export function LabelsPanel({ transport }: { transport: Transport }) {
   };
   const remove = async (address: number): Promise<void> => {
     try {
-      const b = await transport.request('gba-kit/setLabel', { address, label: '' });
-      setLabels(b.labels);
+      await transport.request('gba-kit/setLabel', { address, label: '' });
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -62,7 +57,6 @@ export function LabelsPanel({ transport }: { transport: Transport }) {
           ? 'nothing recognized: expected lines like `03005220 gUnk_03005220` or `gFoo = 0x03000000;`'
           : null,
       );
-      load();
     } catch (err) {
       setError((err as Error).message);
     }

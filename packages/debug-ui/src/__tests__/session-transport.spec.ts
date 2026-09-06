@@ -299,6 +299,25 @@ describe('session transport', () => {
     expect((await transport.request('gba-kit/listStates')).states.map((s) => s.name)).toEqual(['other']);
   });
 
+  it('hands out one state object per change, so a reader can compare them by identity', async () => {
+    const { session, host } = await boot();
+    const transport = createSessionTransport(session);
+    const first = transport.state;
+    expect(first).not.toBeNull();
+    expect(transport.state).toBe(first); // read twice without a change: the same object
+    await transport.request('gba-kit/stepFrame');
+    const second = transport.state;
+    expect(second).not.toBe(first);
+    expect(second!.frame).toBe(1);
+    // a resume and the stop that follows each report their own
+    await transport.control('continue');
+    expect(transport.state).not.toBe(second);
+    expect(transport.state!.state).toBe('running');
+    await transport.control('pause');
+    host.tick(FRAME_MS);
+    expect(transport.state!.state).toBe('stopped');
+  });
+
   it('says so when the store given cannot rename or delete', async () => {
     const { session } = await boot();
     const transport = createSessionTransport(session, {

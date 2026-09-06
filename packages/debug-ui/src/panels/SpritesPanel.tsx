@@ -1,8 +1,8 @@
 import type { SpriteInfo } from '@gba-kit/debug-core';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 
 import { Empty, Hex } from '../components.js';
-import { useAtStop } from '../hooks.js';
+import { useAtStop, usePixels } from '../hooks.js';
 import { base64ToBytes, spriteToRgba } from '../render.js';
 import type { Transport } from '../transport.js';
 
@@ -156,22 +156,11 @@ function SpritePreview({
   oneDimensional: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
-    }
-    const { width, height, rgba } = spriteToRgba(sprite, objTiles, objTiles.length / 64, objPalette, oneDimensional);
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      return;
-    }
-    const image = ctx.createImageData(width, height);
-    image.data.set(rgba);
-    ctx.putImageData(image, 0, 0);
-  }, [sprite, objTiles, objPalette, oneDimensional]);
+  const pixels = useMemo(
+    () => spriteToRgba(sprite, objTiles, objTiles.length / 64, objPalette, oneDimensional),
+    [sprite, objTiles, objPalette, oneDimensional],
+  );
+  usePixels(canvasRef, pixels);
   const scale = sprite.height > 32 ? 1 : 2;
   return (
     <canvas

@@ -19,6 +19,7 @@ vi.mock(import('../hooks.js'), async (importOriginal) => ({
 }));
 
 const transport = {
+  state: null,
   request: () => Promise.reject(new Error('not in this test')),
   control: () => Promise.resolve(),
   onState: () => () => {},

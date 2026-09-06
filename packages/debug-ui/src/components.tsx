@@ -1,6 +1,7 @@
 /** Small building blocks the panels share. */
-import { type ReactNode, useEffect, useRef } from 'react';
+import { type ReactNode, useMemo, useRef } from 'react';
 
+import { usePixels } from './hooks.js';
 import { base64ToBytes } from './render.js';
 
 export function Panel({
@@ -217,18 +218,8 @@ export function Screenshot({
   label: string;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext('2d');
-    if (!canvas || !ctx) {
-      return;
-    }
-    canvas.width = width;
-    canvas.height = height;
-    const image = ctx.createImageData(width, height);
-    image.data.set(base64ToBytes(rgba));
-    ctx.putImageData(image, 0, 0);
-  }, [rgba, width, height]);
+  const pixels = useMemo(() => ({ width, height, rgba: base64ToBytes(rgba) }), [rgba, width, height]);
+  usePixels(canvasRef, pixels);
   return (
     <canvas
       ref={canvasRef}

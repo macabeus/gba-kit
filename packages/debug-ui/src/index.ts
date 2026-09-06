@@ -17,7 +17,7 @@ export {
   type Unsubscribe,
 } from './transport.js';
 export { createSessionTransport, type SessionTransportOptions } from './session-transport.js';
-export { useAtStop, useDebugState, usePixels } from './hooks.js';
+export { useAtStop, useDebugState, useFetched, usePixels, useSaveStates } from './hooks.js';
 export {
   Button,
   Empty,

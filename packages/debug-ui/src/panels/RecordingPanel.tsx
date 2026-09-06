@@ -1,9 +1,8 @@
 import type { TakeBody } from '@gba-kit/debug-core/protocol';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 
-import { Button, Empty } from '../components.js';
-import { useDebugState } from '../hooks.js';
-import { base64ToBytes } from '../render.js';
+import { Button, Empty, Screenshot } from '../components.js';
+import { useDebugState, useFetched } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
 /**
@@ -15,30 +14,22 @@ import type { Transport } from '../transport.js';
  */
 export function RecordingPanel({ transport }: { transport: Transport }) {
   const state = useDebugState(transport);
-  const [takes, setTakes] = useState<TakeBody[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const recording = state?.recording ?? false;
   const replaying = state?.replaying ?? false;
   const stopped = state?.state === 'stopped';
-  const connected = state !== null;
 
-  // The session's recordings, refreshed when one ends. There is nothing to ask
-  // for before a session reports itself, and this refresh happens on its own rather
-  // than because the user asked, so a failure leaves the list as it is instead of
-  // writing to the error line, which reports what the user just did.
-  const refresh = useCallback(() => {
-    transport
-      .request('gba-kit/recordings')
-      .then((b) => setTakes(b.takes))
-      .catch(() => {});
-  }, [transport]);
-  useEffect(() => {
-    if (recording || !connected) {
-      return;
-    }
-    refresh();
-  }, [refresh, recording, connected]);
+  // The session's recordings, re-read whenever one ends — here, from the Screen
+  // panel's button, or from an editor command, since all three flip the same flag.
+  // A read that fails is not reported: it happened on its own rather than because
+  // the user asked, and the error line says what the user just did.
+  const listed = useFetched(
+    transport,
+    (t) => t.request('gba-kit/recordings'),
+    state === null || recording ? null : 'idle',
+  );
+  const takes = listed.data?.takes ?? [];
 
   const act = async (what: () => Promise<unknown>): Promise<void> => {
     setBusy(true);
@@ -53,14 +44,7 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
   };
 
   const toggle = (): Promise<void> =>
-    act(async () => {
-      if (recording) {
-        await transport.request('gba-kit/recordStop');
-        refresh();
-      } else {
-        await transport.request('gba-kit/recordStart');
-      }
-    });
+    act(() => transport.request(recording ? 'gba-kit/recordStop' : 'gba-kit/recordStart'));
 
   const replay = (take: TakeBody, from: 'start' | 'here'): Promise<void> =>
     act(async () => {
@@ -137,7 +121,13 @@ export function RecordingsView({
         {[...takes].reverse().map((take) => (
           <tr key={take.id}>
             <td>
-              <Thumbnail take={take} />
+              <Screenshot
+                rgba={take.thumbnail}
+                width={take.width}
+                height={take.height}
+                scale={2}
+                label={`the screen at frame ${take.recording.startFrame}`}
+              />
               <div className="gk-muted gk-small">
                 frame {take.recording.startFrame} · {take.recording.frames.length} frames
               </div>
@@ -177,30 +167,5 @@ export function RecordingsView({
         ))}
       </tbody>
     </table>
-  );
-}
-
-/** The screen a recording begins on, painted from its base64 RGBA. */
-function Thumbnail({ take }: { take: TakeBody }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext('2d');
-    if (!canvas || !ctx) {
-      return;
-    }
-    canvas.width = take.width;
-    canvas.height = take.height;
-    const image = ctx.createImageData(take.width, take.height);
-    image.data.set(base64ToBytes(take.thumbnail));
-    ctx.putImageData(image, 0, 0);
-  }, [take]);
-  return (
-    <canvas
-      ref={canvasRef}
-      className="gk-pixels"
-      style={{ width: take.width * 2, height: take.height * 2 }}
-      aria-label={`the screen at frame ${take.recording.startFrame}`}
-    />
   );
 }

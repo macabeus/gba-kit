@@ -32,6 +32,12 @@ export interface Transport {
   request<C extends GbaKitCommand>(command: C, args?: GbaKitRequests[C]['args']): Promise<GbaKitRequests[C]['body']>;
   /** A standard execution control. */
   control(action: ControlAction): Promise<void>;
+  /**
+   * The state as last reported, readable while rendering, or null before the host
+   * has reported one. The same object until the state changes, so React can compare
+   * it by identity (`useDebugState` reads it through `useSyncExternalStore`).
+   */
+  readonly state: StateBody | null;
   /** Called with the current state on subscription (when known), then on every change. */
   onState(listener: (state: StateBody) => void): Unsubscribe;
   /** 240×160 RGBA frames; subscribing asks the host for a current one. */
@@ -161,6 +167,9 @@ export function createMessageTransport(port: MessagePort): Transport {
   return {
     request: (command, args) => send({ type: 'request', id: nextId++, command, args }) as Promise<never>,
     control: (action) => send({ type: 'control', id: nextId++, action }).then(() => undefined),
+    get state() {
+      return lastState;
+    },
     onState(listener) {
       const off = listen('state', listeners.state, listener);
       if (lastState) {
