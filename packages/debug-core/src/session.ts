@@ -33,11 +33,13 @@ import { LabelStore, type LabelsFile } from './labels.js';
 import { Machine, romHash } from './machine.js';
 import { type SearchOptions, filterMemory, searchMemory } from './memory-search.js';
 import {
+  type Screen,
   type SpriteInfo,
   type TilemapSnapshot,
   type TilesSnapshot,
   backgroundsSnapshot,
   paletteSnapshot,
+  screenToJson,
   spritesSnapshot,
   thumbnailRgba,
   tilemapSnapshot,
@@ -47,7 +49,7 @@ import { Program } from './program.js';
 import { BUTTON_COUNT, type InputRecording, type RecordedTake, recordingToScript } from './recorder.js';
 import { RewindHistory, type RewindOptions } from './rewind.js';
 import { type EventEntry, Ring, type TraceEntry } from './rings.js';
-import { bytesToBase64, decodeSaveState, encodeSaveState } from './snapshot-codec.js';
+import { decodeSaveState, encodeSaveState } from './snapshot-codec.js';
 import type { SourceMapperOptions } from './source-map.js';
 import {
   type StepContext,
@@ -1444,7 +1446,7 @@ export class Session {
    * here (packed, so it costs tens of kilobytes rather than half a megabyte).
    */
   startRecording(): void {
-    this.#recordingThumbnail = thumbnailRgba(this.machine.framebufferRgba());
+    this.#recordingThumbnail = this.screen();
     this.#recordingSnapshot = packSnapshot(this.machine.snapshot());
     this.#setRecordingStart(this.machine.frame);
   }
@@ -1461,6 +1463,16 @@ export class Session {
 
   get recording(): boolean {
     return this.#recordingStart !== null;
+  }
+
+  /**
+   * A path under the project's `.gba-kit/`, where everything this session keeps
+   * beside the ROM lives: its labels, its save states, its recordings. Null when the
+   * host has no file system.
+   */
+  projectFile(...parts: string[]): string | null {
+    const files = this.host.files;
+    return files ? files.join(this.options.projectDir ?? this.options.cwd, '.gba-kit', ...parts) : null;
   }
 
   /** The frame the recording in progress began at; null when none is. */
@@ -1492,7 +1504,7 @@ export class Session {
     this.addRecording({
       recording,
       script: recordingToScript(recording),
-      thumbnail: this.#recordingThumbnail ?? thumbnailRgba(this.machine.framebufferRgba()),
+      thumbnail: this.#recordingThumbnail ?? this.screen(),
       createdAt: new Date().toISOString(),
       start: this.#recordingSnapshot ?? undefined,
     });
@@ -1577,14 +1589,18 @@ export class Session {
 
   // ─── save states ───────────────────────────────────────────────────
 
+  /** The screen as it is now, reduced: what a save state or a recording is shown by. */
+  screen(): Screen {
+    return thumbnailRgba(this.machine.framebufferRgba());
+  }
+
   /** The machine as a save state, with the screen it was saved on for a view that lists states. */
   saveState(name?: string): string {
-    const shot = thumbnailRgba(this.machine.framebufferRgba());
     return encodeSaveState(this.machine.snapshot(), {
       romHash: this.romHash,
       name,
       frame: this.machine.frame,
-      thumbnail: { width: shot.width, height: shot.height, rgba: bytesToBase64(shot.rgba) },
+      thumbnail: screenToJson(this.screen()),
     });
   }
 
@@ -1751,11 +1767,7 @@ export class Session {
   // ─── labels ────────────────────────────────────────────────────────
 
   #labelsPath(): string | null {
-    const files = this.host.files;
-    if (!files) {
-      return null;
-    }
-    return files.join(this.options.projectDir ?? this.options.cwd, '.gba-kit', 'labels.json');
+    return this.projectFile('labels.json');
   }
 
   async #loadLabels(): Promise<void> {

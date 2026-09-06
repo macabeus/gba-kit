@@ -17,7 +17,6 @@ import {
   MAX_RECORDINGS,
   REGISTER_NAMES,
   type RecordedTake,
-  type SaveStateFile,
   type Scope,
   type SearchOptions,
   Session,
@@ -46,10 +45,13 @@ import {
   type PpuArguments,
   type PpuBody,
   STREAM,
+  type SaveStateMeta,
   type SavedStateInfo,
   type StateBody,
   entryCount,
   rewindFrameCount,
+  savedStateInfo,
+  takeBody,
   tileCount,
 } from './protocol.js';
 import { FrameStream } from './stream.js';
@@ -249,23 +251,8 @@ function existingFile(file: string, what: string): string {
   return file;
 }
 
-type StateMeta = Partial<Omit<SaveStateFile, 'snapshot'>>;
-
 /** The arguments of one `gba-kit/*` request. */
 type Args<K extends GbaKitCommand> = NonNullable<GbaKitRequests[K]['args']>;
-
-/** What a client is told about a saved state. */
-function stateInfo(name: string, file: string, meta: StateMeta | null): SavedStateInfo {
-  return {
-    name,
-    path: file,
-    frame: meta?.frame ?? 0,
-    createdAt: meta?.createdAt ?? '',
-    thumbnail: meta?.thumbnail?.rgba,
-    width: meta?.thumbnail?.width,
-    height: meta?.thumbnail?.height,
-  };
-}
 
 export class GbaDebugSession extends DebugSession {
   #session: Session | null = null;
@@ -1368,15 +1355,7 @@ export class GbaDebugSession extends DebugSession {
       }
       case 'gba-kit/recordings':
         return {
-          takes: s.recordings.map((t) => ({
-            id: t.id,
-            recording: t.recording,
-            script: t.script,
-            createdAt: t.createdAt,
-            thumbnail: Buffer.from(t.thumbnail.rgba).toString('base64'),
-            width: t.thumbnail.width,
-            height: t.thumbnail.height,
-          })),
+          takes: s.recordings.map(takeBody),
         };
       case 'gba-kit/replay': {
         const a = args as Args<'gba-kit/replay'>;
@@ -1518,9 +1497,19 @@ export class GbaDebugSession extends DebugSession {
     return session.host.files;
   }
 
-  #recordingsDir(session: Session): string {
-    const files = this.#files(session);
-    return files.join(session.options.projectDir ?? session.options.cwd, '.gba-kit', 'recordings');
+  /** Where the project keeps one kind of thing. The session names the directory; a host without files is not one this adapter runs on. */
+  #dirFor(session: Session, kind: 'states' | 'recordings'): string {
+    const dir = session.projectFile(kind);
+    if (dir === null) {
+      throw new Error('this host has no file system');
+    }
+    return dir;
+  }
+
+  /** The `.json` files of one of those directories, newest name first or oldest first. */
+  async #jsonIn(session: Session, dir: string, order: 'newest' | 'oldest'): Promise<string[]> {
+    const entries = (await this.#files(session).list(dir)).filter((e) => e.endsWith('.json'));
+    return entries.sort((a, b) => (order === 'newest' ? b.localeCompare(a) : a.localeCompare(b)));
   }
 
   /**
@@ -1530,7 +1519,10 @@ export class GbaDebugSession extends DebugSession {
   #recordingPath(session: Session, take: RecordedTake): string {
     // to the millisecond: two takes of the same frame, seconds apart, are two files
     const stamp = safeName(take.createdAt) || 'undated';
-    return this.#files(session).join(this.#recordingsDir(session), `${stamp}-frame${take.recording.startFrame}.json`);
+    return this.#files(session).join(
+      this.#dirFor(session, 'recordings'),
+      `${stamp}-frame${take.recording.startFrame}.json`,
+    );
   }
 
   async #writeRecording(session: Session, take: RecordedTake): Promise<void> {
@@ -1552,10 +1544,9 @@ export class GbaDebugSession extends DebugSession {
    */
   async #loadRecordings(session: Session): Promise<void> {
     const files = this.#files(session);
-    const dir = this.#recordingsDir(session);
-    const newestFirst = (await files.list(dir)).filter((e) => e.endsWith('.json')).sort((a, b) => b.localeCompare(a));
+    const dir = this.#dirFor(session, 'recordings');
     const takes: Array<Omit<RecordedTake, 'id'>> = [];
-    for (const entry of newestFirst) {
+    for (const entry of await this.#jsonIn(session, dir, 'newest')) {
       if (takes.length === MAX_RECORDINGS) {
         break;
       }
@@ -1580,13 +1571,8 @@ export class GbaDebugSession extends DebugSession {
     }
   }
 
-  #statesDir(session: Session): string {
-    const files = this.#files(session);
-    return files.join(session.options.projectDir ?? session.options.cwd, '.gba-kit', 'states');
-  }
-
   #statePath(session: Session, name: string): string {
-    return this.#files(session).join(this.#statesDir(session), `${safeName(name)}.json`);
+    return this.#files(session).join(this.#dirFor(session, 'states'), `${safeName(name)}.json`);
   }
 
   async #saveState(session: Session, name?: string): Promise<SavedStateInfo> {
@@ -1595,7 +1581,7 @@ export class GbaDebugSession extends DebugSession {
     const text = session.saveState(stateName);
     await this.#files(session).writeText(file, text);
     this.#log(`gba-kit: state '${stateName}' saved to ${file}\n`);
-    return stateInfo(stateName, file, saveStateMeta(text));
+    return savedStateInfo(stateName, file, saveStateMeta(text));
   }
 
   /**
@@ -1604,7 +1590,7 @@ export class GbaDebugSession extends DebugSession {
    * whole reach into the file system.
    */
   #stateFile(session: Session, args: { name?: unknown; path?: unknown }): string {
-    const dir = path.resolve(this.#statesDir(session));
+    const dir = path.resolve(this.#dirFor(session, 'states'));
     let file: string;
     if (args.path !== undefined) {
       file = path.resolve(dir, needString(args.path, 'path'));
@@ -1657,7 +1643,7 @@ export class GbaDebugSession extends DebugSession {
     if (target !== from) {
       await this.#removeFile(session, from);
     }
-    return stateInfo(to, target, saveStateMeta(renamed));
+    return savedStateInfo(to, target, saveStateMeta(renamed));
   }
 
   /** Delete a saved state's file. False when it was already gone. */
@@ -1686,16 +1672,13 @@ export class GbaDebugSession extends DebugSession {
 
   async #listStates(session: Session): Promise<SavedStateInfo[]> {
     const files = this.#files(session);
-    const dir = this.#statesDir(session);
+    const dir = this.#dirFor(session, 'states');
     const out: SavedStateInfo[] = [];
-    for (const entry of await files.list(dir)) {
-      if (!entry.endsWith('.json')) {
-        continue;
-      }
+    for (const entry of await this.#jsonIn(session, dir, 'oldest')) {
       const file = files.join(dir, entry);
       const meta = await this.#stateMeta(session, file);
       if (meta?.format === 'gba-kit-savestate' && (!meta.romHash || meta.romHash === session.romHash)) {
-        out.push(stateInfo(meta.name ?? entry.replace(/\.json$/, ''), file, meta));
+        out.push(savedStateInfo(meta.name ?? entry.replace(/\.json$/, ''), file, meta));
       }
     }
     return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -1707,7 +1690,7 @@ export class GbaDebugSession extends DebugSession {
    * `encodeSaveState`). A file laid out otherwise is parsed whole. Null when the
    * file is not JSON.
    */
-  async #stateMeta(session: Session, file: string): Promise<StateMeta | null> {
+  async #stateMeta(session: Session, file: string): Promise<SaveStateMeta | null> {
     const files = this.#files(session);
     const head = files.readHead ? await files.readHead(file, STATE_HEAD_BYTES) : null;
     const text = head?.includes(',"snapshot":') ? head : await files.readText(file);

@@ -4,6 +4,7 @@
  */
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
+import type { ScreenJson } from './ppu.js';
 import { type ArrayKind, arrayFrom, arrayKind, viewBytes } from './typed-arrays.js';
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -96,7 +97,7 @@ export interface SaveStateFile {
   createdAt: string;
   frame: number;
   /** the screen at the moment it was saved, for a view that lists states */
-  thumbnail?: { width: number; height: number; rgba: string };
+  thumbnail?: ScreenJson;
   snapshot: unknown;
 }
 

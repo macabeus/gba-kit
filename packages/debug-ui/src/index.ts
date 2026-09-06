@@ -17,13 +17,17 @@ export {
   type Unsubscribe,
 } from './transport.js';
 export { createSessionTransport, type SessionTransportOptions } from './session-transport.js';
-export { useAtStop, useDebugState, useFetched, usePixels, useSaveStates } from './hooks.js';
+export { useAction, useAtStop, useDebugState, useFetched, usePixels, useSaveStates } from './hooks.js';
 export {
   Button,
+  EditableName,
   Empty,
   Hex,
+  Icon,
+  type IconName,
   MAX_ROWS,
   Panel,
+  Screenshot,
   Select,
   Tabs,
   attempt,

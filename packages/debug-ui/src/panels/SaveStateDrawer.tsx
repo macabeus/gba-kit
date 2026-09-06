@@ -6,7 +6,7 @@
 import type { SavedStateInfo } from '@gba-kit/debug-core/protocol';
 import { useState } from 'react';
 
-import { Button, Icon, Screenshot } from '../components.js';
+import { Button, EditableName, Icon, Screenshot } from '../components.js';
 import { useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
@@ -88,15 +88,7 @@ function SaveStateCard({
   onRename,
   onRemove,
 }: Omit<SaveStatesViewProps, 'states'> & { state: SavedStateInfo }) {
-  const [renaming, setRenaming] = useState<string | null>(null);
-
-  const commit = (): void => {
-    const to = (renaming ?? '').trim();
-    setRenaming(null);
-    if (to && to !== state.name) {
-      onRename(state, to);
-    }
-  };
+  const [renaming, setRenaming] = useState(false);
 
   return (
     <div className="gk-card">
@@ -119,30 +111,17 @@ function SaveStateCard({
           <span className="gk-muted gk-small">frame {state.frame}</span>
         )}
       </button>
-      {renaming === null ? (
-        <span className="gk-card-name" title={state.name}>
-          {state.name}
-        </span>
-      ) : (
-        <input
-          className="gk-input gk-card-name"
-          autoFocus
-          value={renaming}
-          onChange={(e) => setRenaming(e.target.value)}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              commit();
-            } else if (e.key === 'Escape') {
-              setRenaming(null);
-            }
-          }}
-        />
-      )}
+      <EditableName
+        name={state.name}
+        editing={renaming}
+        className="gk-card-name"
+        onStop={() => setRenaming(false)}
+        onRename={(to) => onRename(state, to)}
+      />
       <div className="gk-row gk-card-actions">
         <Button
           kind="icon"
-          onClick={() => setRenaming(state.name)}
+          onClick={() => setRenaming(true)}
           disabled={busy}
           title="Rename"
           label={`Rename '${state.name}'`}

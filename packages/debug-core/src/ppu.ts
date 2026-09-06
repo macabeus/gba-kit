@@ -3,6 +3,7 @@
  * registers into plain data the viewers draw: palettes, tiles, tilemaps, sprites.
  */
 import type { Machine } from './machine.js';
+import { base64ToBytes, bytesToBase64 } from './snapshot-codec.js';
 
 export interface RgbColor {
   r: number;
@@ -231,12 +232,38 @@ export function spritesSnapshot(machine: Machine): SpriteInfo[] {
 }
 
 /** A screen scaled down by `factor` for a thumbnail: nearest pixel, no blending, so the art stays legible. */
-export function thumbnailRgba(
-  rgba: Uint8Array,
-  width = 240,
-  height = 160,
-  factor = 2,
-): { width: number; height: number; rgba: Uint8Array } {
+/**
+ * A small picture of the screen, kept beside something the user can go back to: a
+ * save state, an input recording. In memory it is bytes; in a file it is base64,
+ * which {@link screenToJson} and {@link screenFromJson} convert between.
+ */
+export interface Screen {
+  width: number;
+  height: number;
+  rgba: Uint8Array;
+}
+
+/** A screen as a file carries it. */
+export interface ScreenJson {
+  width: number;
+  height: number;
+  rgba: string;
+}
+
+export function screenToJson(screen: Screen): ScreenJson {
+  return { width: screen.width, height: screen.height, rgba: bytesToBase64(screen.rgba) };
+}
+
+/** Throws when the value is not a screen, so a reader can reject the file holding it. */
+export function screenFromJson(value: unknown): Screen {
+  const json = value as ScreenJson | undefined;
+  if (!json || typeof json.rgba !== 'string' || typeof json.width !== 'number' || typeof json.height !== 'number') {
+    throw new Error('not a screen');
+  }
+  return { width: json.width, height: json.height, rgba: base64ToBytes(json.rgba) };
+}
+
+export function thumbnailRgba(rgba: Uint8Array, width = 240, height = 160, factor = 2): Screen {
   const w = Math.max(1, Math.floor(width / factor));
   const h = Math.max(1, Math.floor(height / factor));
   const out = new Uint8Array(w * h * 4);

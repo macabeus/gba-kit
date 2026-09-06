@@ -6,6 +6,7 @@ import type { StateBody } from '@gba-kit/debug-core/protocol';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
+import { EditableName } from '../components.js';
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
 import { SaveStatesView } from '../panels/SaveStateDrawer.js';
 import { ScreenPanel } from '../panels/ScreenPanel.js';
@@ -86,6 +87,22 @@ describe('screen panel controls', () => {
     expect(html).toContain('gk-drawer-bar');
     expect(html).toContain('Save state');
     expect(renderToString(<ScreenPanel transport={transport} saveStates={false} />)).not.toContain('gk-drawer');
+  });
+});
+
+describe('editable name', () => {
+  it('shows a name, and the field that renames it, wherever one is renamed', () => {
+    const shown = renderToString(
+      <EditableName name="frame-1026" editing={false} onStop={() => {}} onRename={() => {}} />,
+    );
+    expect(shown).toContain('title="frame-1026"');
+    expect(shown).not.toContain('<input');
+    const editing = renderToString(
+      <EditableName name="frame-1026" editing className="gk-card-name" onStop={() => {}} onRename={() => {}} />,
+    );
+    expect(editing).toContain('value="frame-1026"');
+    expect(editing).toContain('aria-label="Rename &#x27;frame-1026&#x27;"');
+    expect(editing).toContain('gk-input gk-card-name');
   });
 });
 

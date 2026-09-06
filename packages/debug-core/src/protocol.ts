@@ -18,10 +18,14 @@ import type { EventBreakpointKind } from './breakpoints.js';
 import type { IoRegisterValue } from './io.js';
 import type { Label } from './labels.js';
 import type { SearchOptions } from './memory-search.js';
-import type { BackgroundInfo, SpriteInfo, TilemapSnapshot } from './ppu.js';
-import type { InputRecording } from './recorder.js';
+import { type BackgroundInfo, type SpriteInfo, type TilemapSnapshot, screenToJson } from './ppu.js';
+import type { InputRecording, RecordedTake } from './recorder.js';
 import type { EventEntry, TraceEntry } from './rings.js';
 import type { HistoryInfo, Position, SessionState, StopReason } from './session.js';
+import type { SaveStateFile } from './snapshot-codec.js';
+
+/** What the head of a save-state file says about it. */
+export type SaveStateMeta = Partial<Omit<SaveStateFile, 'snapshot'>>;
 
 /** Body of the `gba-kit/state` event and response; the machine's place in time. */
 export interface StateBody {
@@ -269,6 +273,40 @@ export const STREAM = {
  * stream's audio payload, an in-process transport) reports the same rate.
  */
 export const AUDIO_SAMPLE_RATE = 32768;
+
+/**
+ * A take as a body carries it: the screen as base64, the rest as the session holds
+ * it. Both the debug adapter and the in-process transport answer with this, so the
+ * two agree on the shape without either restating it.
+ */
+export function takeBody(take: RecordedTake): TakeBody {
+  const screen = screenToJson(take.thumbnail);
+  return {
+    id: take.id,
+    recording: take.recording,
+    script: take.script,
+    createdAt: take.createdAt,
+    thumbnail: screen.rgba,
+    width: screen.width,
+    height: screen.height,
+  };
+}
+
+/**
+ * A saved state as a body carries it, from the metadata at the head of its file.
+ * A state written before states kept a screen simply has none.
+ */
+export function savedStateInfo(name: string, path: string, meta: SaveStateMeta | null): SavedStateInfo {
+  return {
+    name,
+    path,
+    frame: meta?.frame ?? 0,
+    createdAt: meta?.createdAt ?? '',
+    thumbnail: meta?.thumbnail?.rgba,
+    width: meta?.thumbnail?.width,
+    height: meta?.thumbnail?.height,
+  };
+}
 
 /** How many entries `gba-kit/trace` and `gba-kit/events` answer by default, and at most. */
 export const LOG = {

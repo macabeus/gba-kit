@@ -5,7 +5,8 @@
  * humans, and kept as files under a project's `.gba-kit/recordings/`.
  */
 import type { PackedSnapshot } from './delta.js';
-import { base64ToBytes, bytesToBase64, decodeTypedArrays, encodeTypedArrays } from './snapshot-codec.js';
+import { type Screen, type ScreenJson, screenFromJson, screenToJson } from './ppu.js';
+import { decodeTypedArrays, encodeTypedArrays } from './snapshot-codec.js';
 
 export interface InputRecording {
   format: 'gba-kit-input';
@@ -27,7 +28,7 @@ export interface RecordedTake {
   /** the same input as a `press`/`wait` script */
   script: string;
   /** the screen where the recording begins, halved in each axis */
-  thumbnail: { width: number; height: number; rgba: Uint8Array };
+  thumbnail: Screen;
   /** when the recording was stopped, or when the file holding it was written */
   createdAt: string;
   /**
@@ -47,7 +48,7 @@ export interface RecordingFile {
   format: 'gba-kit-recording';
   version: 1;
   createdAt: string;
-  thumbnail: { width: number; height: number; rgba: string };
+  thumbnail: ScreenJson;
   /** the packed machine at the first frame, with its typed arrays as base64 */
   start?: unknown;
   recording: InputRecording;
@@ -58,11 +59,7 @@ export function encodeTake(take: Omit<RecordedTake, 'id'>): string {
     format: 'gba-kit-recording',
     version: 1,
     createdAt: take.createdAt,
-    thumbnail: {
-      width: take.thumbnail.width,
-      height: take.thumbnail.height,
-      rgba: bytesToBase64(take.thumbnail.rgba),
-    },
+    thumbnail: screenToJson(take.thumbnail),
     start: take.start ? encodeTypedArrays(take.start) : undefined,
     recording: take.recording,
   };
@@ -72,14 +69,13 @@ export function encodeTake(take: Omit<RecordedTake, 'id'>): string {
 /** Throws when the text is not one of these files, so a reader can skip it and go on. */
 export function decodeTake(text: string): Omit<RecordedTake, 'id'> {
   const file = JSON.parse(text) as RecordingFile;
-  const shot = file.thumbnail;
-  if (file.format !== 'gba-kit-recording' || !shot || typeof shot.rgba !== 'string') {
+  if (file.format !== 'gba-kit-recording') {
     throw new Error('not a gba-kit recording');
   }
   return {
     recording: parseRecording(JSON.stringify(file.recording)),
     script: recordingToScript(file.recording),
-    thumbnail: { width: shot.width, height: shot.height, rgba: base64ToBytes(shot.rgba) },
+    thumbnail: screenFromJson(file.thumbnail),
     createdAt: typeof file.createdAt === 'string' ? file.createdAt : '',
     start: file.start ? (decodeTypedArrays(file.start) as PackedSnapshot) : undefined,
   };

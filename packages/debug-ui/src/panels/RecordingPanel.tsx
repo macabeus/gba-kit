@@ -1,8 +1,7 @@
 import type { TakeBody } from '@gba-kit/debug-core/protocol';
-import { useState } from 'react';
 
 import { Button, Empty, Icon, Screenshot } from '../components.js';
-import { useDebugState, useFetched } from '../hooks.js';
+import { useAction, useDebugState, useFetched } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
 /**
@@ -15,8 +14,7 @@ import type { Transport } from '../transport.js';
  */
 export function RecordingPanel({ transport }: { transport: Transport }) {
   const state = useDebugState(transport);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { busy, error, run } = useAction();
   const recording = state?.recording ?? false;
   const replaying = state?.replaying ?? false;
   const stopped = state?.state === 'stopped';
@@ -32,29 +30,14 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
   );
   const takes = listed.data?.takes ?? [];
 
-  const act = async (what: () => Promise<unknown>): Promise<void> => {
-    setBusy(true);
-    try {
-      await what();
-      setError(null);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const toggle = (): Promise<void> =>
-    act(() => transport.request(recording ? 'gba-kit/recordStop' : 'gba-kit/recordStart'));
+    run(() => transport.request(recording ? 'gba-kit/recordStop' : 'gba-kit/recordStart'));
 
   const remove = (take: TakeBody): Promise<void> =>
-    act(async () => {
-      await transport.request('gba-kit/deleteRecording', { id: take.id });
-      listed.refresh();
-    });
+    run(() => transport.request('gba-kit/deleteRecording', { id: take.id }), listed.refresh);
 
   const replay = (take: TakeBody, from: 'start' | 'here'): Promise<void> =>
-    act(async () => {
+    run(async () => {
       const { replayed } = await transport.request('gba-kit/replay', { id: take.id, recording: take.recording, from });
       if (!replayed) {
         throw new Error(`frame ${take.recording.startFrame} cannot be reached; replay it from here instead`);

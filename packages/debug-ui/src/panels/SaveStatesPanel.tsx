@@ -6,7 +6,7 @@
 import type { SavedStateInfo } from '@gba-kit/debug-core/protocol';
 import { useState } from 'react';
 
-import { Button, Empty, Icon, Screenshot } from '../components.js';
+import { Button, EditableName, Empty, Icon, Screenshot } from '../components.js';
 import { useDebugState, useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
@@ -76,15 +76,7 @@ function SaveStateRow({
   saves: ReturnType<typeof useSaveStates>;
   disabled: boolean;
 }) {
-  const [renaming, setRenaming] = useState<string | null>(null);
-
-  const commit = (): void => {
-    const to = (renaming ?? '').trim();
-    setRenaming(null);
-    if (to && to !== state.name) {
-      void saves.rename(state, to);
-    }
-  };
+  const [renaming, setRenaming] = useState(false);
 
   return (
     <tr>
@@ -102,24 +94,12 @@ function SaveStateRow({
         )}
       </td>
       <td>
-        {renaming === null ? (
-          state.name
-        ) : (
-          <input
-            className="gk-input"
-            autoFocus
-            value={renaming}
-            onChange={(e) => setRenaming(e.target.value)}
-            onBlur={commit}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                commit();
-              } else if (e.key === 'Escape') {
-                setRenaming(null);
-              }
-            }}
-          />
-        )}
+        <EditableName
+          name={state.name}
+          editing={renaming}
+          onStop={() => setRenaming(false)}
+          onRename={(to) => void saves.rename(state, to)}
+        />
       </td>
       <td className="gk-right gk-muted">{state.frame}</td>
       <td className="gk-muted">{state.createdAt ? new Date(state.createdAt).toLocaleString() : ''}</td>
@@ -131,7 +111,7 @@ function SaveStateRow({
           </Button>
           <Button
             kind="icon"
-            onClick={() => setRenaming(state.name)}
+            onClick={() => setRenaming(true)}
             disabled={saves.busy}
             title="Rename"
             label={`Rename '${state.name}'`}

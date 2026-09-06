@@ -10,6 +10,7 @@ import {
   EVENT_BREAKPOINT_KINDS,
   type InputRecording,
   type Session,
+  bytesToBase64,
   renameSaveState,
   saveStateMeta,
 } from '@gba-kit/debug-core';
@@ -25,6 +26,8 @@ import {
   type StateBody,
   entryCount,
   rewindFrameCount,
+  savedStateInfo,
+  takeBody,
   tileCount,
 } from '@gba-kit/debug-core/protocol';
 
@@ -47,6 +50,11 @@ export interface SessionTransportOptions {
   openText?: Transport['openText'];
 }
 
+/** What a client is told about a saved state, read back from the state itself. */
+function stateInfoOf(name: string, path: string, text: string): SavedStateInfo {
+  return savedStateInfo(name, path, saveStateMeta(text));
+}
+
 /** Which state a request names, rejected the way the adapter rejects it so one message serves both. */
 function stateKey(name: string | undefined, path: string | undefined): string {
   const key = (path ?? name ?? '').trim();
@@ -54,28 +62,6 @@ function stateKey(name: string | undefined, path: string | undefined): string {
     throw new Error(path !== undefined ? "'path' is empty" : "'name' is empty");
   }
   return key;
-}
-
-/** What a client is told about a saved state, read back from the state itself. */
-function infoOf(name: string, path: string, text: string): SavedStateInfo {
-  const meta = saveStateMeta(text);
-  return {
-    name,
-    path,
-    frame: meta?.frame ?? 0,
-    createdAt: meta?.createdAt ?? '',
-    thumbnail: meta?.thumbnail?.rgba,
-    width: meta?.thumbnail?.width,
-    height: meta?.thumbnail?.height,
-  };
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(binary);
 }
 
 export function createSessionTransport(session: Session, options: SessionTransportOptions = {}): Transport {
@@ -194,15 +180,7 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       }
       case 'gba-kit/recordings':
         return {
-          takes: session.recordings.map((t) => ({
-            id: t.id,
-            recording: t.recording,
-            script: t.script,
-            createdAt: t.createdAt,
-            thumbnail: bytesToBase64(t.thumbnail.rgba),
-            width: t.thumbnail.width,
-            height: t.thumbnail.height,
-          })),
+          takes: session.recordings.map(takeBody),
         } as never;
       case 'gba-kit/deleteRecording': {
         // the page keeps its recordings in the session, so forgetting one is all there is to it
@@ -227,7 +205,7 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         if (!options.states) {
           memoryStates.set(name, { text, frame: session.frame, createdAt });
         }
-        return { ...infoOf(name, path, text), createdAt } as never;
+        return { ...stateInfoOf(name, path, text), createdAt } as never;
       }
       case 'gba-kit/loadState': {
         const { name, path } = a as A<'gba-kit/loadState'>;
@@ -242,7 +220,10 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       case 'gba-kit/listStates': {
         const states = options.states
           ? await options.states.list()
-          : [...memoryStates.entries()].map(([name, s]) => ({ ...infoOf(name, name, s.text), createdAt: s.createdAt }));
+          : [...memoryStates.entries()].map(([name, s]) => ({
+              ...stateInfoOf(name, name, s.text),
+              createdAt: s.createdAt,
+            }));
         return { states } as never;
       }
       case 'gba-kit/renameState': {
@@ -259,7 +240,7 @@ export function createSessionTransport(session: Session, options: SessionTranspo
           const at = await options.states.rename(key, target);
           const text = await options.states.load(at);
           return (
-            text === null ? { name: target, path: at, frame: 0, createdAt: '' } : infoOf(target, at, text)
+            text === null ? { name: target, path: at, frame: 0, createdAt: '' } : stateInfoOf(target, at, text)
           ) as never;
         }
         const held = memoryStates.get(key);
@@ -272,7 +253,7 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         const text = renameSaveState(held.text, target);
         memoryStates.delete(key);
         memoryStates.set(target, { ...held, text });
-        return { ...infoOf(target, target, text), createdAt: held.createdAt } as never;
+        return { ...stateInfoOf(target, target, text), createdAt: held.createdAt } as never;
       }
       case 'gba-kit/deleteState': {
         const { name, path } = a as A<'gba-kit/deleteState'>;

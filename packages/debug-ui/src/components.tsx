@@ -266,6 +266,58 @@ export function Screenshot({
   );
 }
 
+/**
+ * A name, and the field it becomes while `editing`. Enter or clicking away keeps
+ * what was typed; Escape leaves the name as it was, and so does an empty or
+ * unchanged one. Whoever offers the rename owns `editing` and clears it on `onStop`.
+ */
+export function EditableName({
+  name,
+  editing,
+  className,
+  onStop,
+  onRename,
+}: {
+  name: string;
+  editing: boolean;
+  className?: string;
+  onStop(): void;
+  onRename(to: string): void;
+}) {
+  if (!editing) {
+    return (
+      <span className={className} title={name}>
+        {name}
+      </span>
+    );
+  }
+  const finish = (typed: string): void => {
+    const to = typed.trim();
+    onStop();
+    if (to && to !== name) {
+      onRename(to);
+    }
+  };
+  return (
+    <input
+      className={`gk-input${className ? ` ${className}` : ''}`}
+      autoFocus
+      defaultValue={name}
+      aria-label={`Rename '${name}'`}
+      onBlur={(e) => finish(e.currentTarget.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.currentTarget.blur();
+        } else if (e.key === 'Escape') {
+          // back to the name it had: the blur that follows then has nothing to change
+          e.currentTarget.value = name;
+          e.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
 /** How many rows a log view mounts at most; older entries are counted, not rendered. */
 export const MAX_ROWS = 1000;
 

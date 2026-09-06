@@ -105,6 +105,32 @@ export function usePixels(
 }
 
 /**
+ * One thing at a time, for a view whose buttons do something that can fail: `busy`
+ * while it runs, `error` when the last one did not, and both again on the next.
+ */
+export function useAction(): {
+  busy: boolean;
+  error: string | null;
+  run(what: () => Promise<unknown>, after?: () => void): Promise<void>;
+} {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = useCallback(async (what: () => Promise<unknown>, after?: () => void): Promise<void> => {
+    setBusy(true);
+    try {
+      await what();
+      setError(null);
+      after?.();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+  return { busy, error, run };
+}
+
+/**
  * The save states of this ROM, and the four things a view does with them. Every
  * action refreshes the list and reports its own failure, so a view renders
  * `error` and needs no error handling of its own.
@@ -121,36 +147,18 @@ export function useSaveStates(transport: Transport): {
 } {
   const connected = useDebugState(transport) !== null;
   const listed = useFetched(transport, (t) => t.request('gba-kit/listStates'), connected ? 'connected' : null);
-  const [failed, setFailed] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const action = useAction();
   const refresh = listed.refresh;
 
-  const act = useCallback(
-    async (what: () => Promise<unknown>, relist: boolean): Promise<void> => {
-      setBusy(true);
-      try {
-        await what();
-        setFailed(null);
-        if (relist) {
-          refresh();
-        }
-      } catch (err) {
-        setFailed((err as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [refresh],
-  );
-
+  const { run } = action;
   return {
     states: listed.data?.states ?? [],
-    error: failed ?? listed.error,
-    busy,
+    error: action.error ?? listed.error,
+    busy: action.busy,
     refresh,
-    save: (name) => act(() => transport.request('gba-kit/saveState', { name: name?.trim() || undefined }), true),
-    load: (s) => act(() => transport.request('gba-kit/loadState', { path: s.path }), false),
-    rename: (s, to) => act(() => transport.request('gba-kit/renameState', { path: s.path, to }), true),
-    remove: (s) => act(() => transport.request('gba-kit/deleteState', { path: s.path }), true),
+    save: (name) => run(() => transport.request('gba-kit/saveState', { name: name?.trim() || undefined }), refresh),
+    load: (s) => run(() => transport.request('gba-kit/loadState', { path: s.path })),
+    rename: (s, to) => run(() => transport.request('gba-kit/renameState', { path: s.path, to }), refresh),
+    remove: (s) => run(() => transport.request('gba-kit/deleteState', { path: s.path }), refresh),
   };
 }
