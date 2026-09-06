@@ -10,8 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { DebugInfo } from '../debug-info.js';
-import { DW_AT, DW_FORM, DW_OP } from '../dwarf/constants.js';
-import type { UnitInfo } from '../dwarf/entries.js';
+import { DW_AT, DW_FORM, DW_OP, DW_TAG } from '../dwarf/constants.js';
+import { EntryIndex, type UnitInfo, addrxValue } from '../dwarf/entries.js';
 import { type EvalContext, evaluate } from '../dwarf/expr.js';
 import { entryRanges, locationAt } from '../dwarf/lists.js';
 import type { Memory } from '../scopes.js';
@@ -223,7 +223,34 @@ describe('DWARF expressions', () => {
   });
 });
 
+describe('unit lookup', () => {
+  const die = (offset: number, unitOffset: number, attrs: Record<number, unknown> = {}): DwarfEntry => ({
+    tag: DW_TAG.compile_unit,
+    offset,
+    attrs: new Map(Object.entries(attrs).map(([at, v]) => [Number(at), v as never])),
+    forms: new Map(),
+    children: [],
+    version: 5,
+    unitOffset,
+  });
+  const first = die(0x0b, 0, { [DW_AT.low_pc]: 0x08000000 });
+  const second = die(0x4b, 0x40, { [DW_AT.low_pc]: 0x08001000 });
+  const index = new EntryIndex([first, second]);
+
+  it('answers with the unit whose offset the entry names', () => {
+    expect(index.unit(second).lowPc).toBe(0x08001000);
+  });
+
+  it('throws naming the offset when the entry belongs to no indexed unit', () => {
+    // The per-unit facts (lowPc, the .debug_addr/loclists/rnglists bases) are what every
+    // address form is resolved against, so a substituted unit misplaces addresses silently.
+    expect(() => index.unit(die(0x90, 0x80))).toThrow(/0x80/);
+  });
+});
+
 describe('range and location lists', () => {
+  /** the byte order these hand-built payloads are written in */
+  const LE = { littleEndian: true };
   const unit = (version: number, lowPc: number): UnitInfo => ({
     offset: 0,
     version,
@@ -256,19 +283,40 @@ describe('range and location lists', () => {
       [DW_AT.low_pc]: [DW_FORM.addr, 0x08000100],
       [DW_AT.high_pc]: [DW_FORM.data4, 0x20],
     });
-    expect(entryRanges(byOffset, u, {})).toEqual([[0x08000100, 0x08000120]]);
+    expect(entryRanges(byOffset, u, LE)).toEqual([[0x08000100, 0x08000120]]);
     const byAddress = entry(0x2e, {
       [DW_AT.low_pc]: [DW_FORM.addr, 0x08000100],
       [DW_AT.high_pc]: [DW_FORM.addr, 0x08000130],
     });
-    expect(entryRanges(byAddress, u, {})).toEqual([[0x08000100, 0x08000130]]);
+    expect(entryRanges(byAddress, u, LE)).toEqual([[0x08000100, 0x08000130]]);
+  });
+
+  it('reads the DWARF 5 index tables in the payload byte order', () => {
+    // .debug_addr holding 0x08001234 at index 0, written each way round
+    const little = new Uint8Array([0x34, 0x12, 0x00, 0x08]);
+    const big = new Uint8Array([0x08, 0x00, 0x12, 0x34]);
+    const u = { ...unit(5, 0), addrBase: 0 };
+    expect(addrxValue(0, u, { littleEndian: true, addr: little })).toBe(0x08001234);
+    expect(addrxValue(0, u, { littleEndian: false, addr: big })).toBe(0x08001234);
+    // a rnglistx offset is an index-table read too: the same list, addressed through it
+    const rnglists = new Uint8Array([0, 0, 0, 0, 4, 0x10, 0x20, 0]);
+    const indexed = entry(0x1d, { [DW_AT.ranges]: [DW_FORM.rnglistx, 0] });
+    const base = { ...unit(5, 0x08000000), rnglistsBase: 0 };
+    for (const [littleEndian, table] of [
+      [true, new Uint8Array([4, 0, 0, 0])],
+      [false, new Uint8Array([0, 0, 0, 4])],
+    ] as const) {
+      const section = new Uint8Array(rnglists);
+      section.set(table, 0);
+      expect(entryRanges(indexed, base, { littleEndian, rnglists: section })).toEqual([[0x08000010, 0x08000020]]);
+    }
   });
 
   it('reads a DWARF 5 range list of offset pairs against the unit base', () => {
     // DW_RLE_offset_pair(0x10, 0x20), DW_RLE_offset_pair(0x40, 0x48), DW_RLE_end_of_list
     const rnglists = new Uint8Array([4, 0x10, 0x20, 4, 0x40, 0x48, 0]);
     const e = entry(0x1d, { [DW_AT.ranges]: [DW_FORM.sec_offset, 0] });
-    expect(entryRanges(e, unit(5, 0x08000000), { rnglists })).toEqual([
+    expect(entryRanges(e, unit(5, 0x08000000), { ...LE, rnglists })).toEqual([
       [0x08000010, 0x08000020],
       [0x08000040, 0x08000048],
     ]);
@@ -283,7 +331,7 @@ describe('range and location lists', () => {
     dv.setUint32(12, 0x18, true);
     // 0,0 terminator already zero
     const e = entry(0x0b, { [DW_AT.ranges]: [DW_FORM.data4, 0] });
-    expect(entryRanges(e, unit(4, 0), { ranges })).toEqual([[0x08001010, 0x08001018]]);
+    expect(entryRanges(e, unit(4, 0), { ...LE, ranges })).toEqual([[0x08001010, 0x08001018]]);
   });
 
   it('picks the location-list entry covering pc, and says where the value was otherwise', () => {
@@ -291,15 +339,15 @@ describe('range and location lists', () => {
     const loclists = new Uint8Array([4, 0x00, 0x10, 1, DW_OP.reg0, 4, 0x10, 0x30, 1, DW_OP.reg0 + 4, 0]);
     const e = entry(0x34, { [DW_AT.location]: [DW_FORM.sec_offset, 0] });
     const u = unit(5, 0x08000000);
-    expect(locationAt(e, DW_AT.location, 0x08000008, u, { loclists })).toEqual({
+    expect(locationAt(e, DW_AT.location, 0x08000008, u, { ...LE, loclists })).toEqual({
       kind: 'expr',
       expr: new Uint8Array([DW_OP.reg0]),
     });
-    expect(locationAt(e, DW_AT.location, 0x08000020, u, { loclists })).toEqual({
+    expect(locationAt(e, DW_AT.location, 0x08000020, u, { ...LE, loclists })).toEqual({
       kind: 'expr',
       expr: new Uint8Array([DW_OP.reg0 + 4]),
     });
-    const gone = locationAt(e, DW_AT.location, 0x08000040, u, { loclists });
+    const gone = locationAt(e, DW_AT.location, 0x08000040, u, { ...LE, loclists });
     expect(gone.kind).toBe('not-here');
     expect(gone.kind === 'not-here' && gone.entries.map((x) => [x.lo, x.hi])).toEqual([
       [0x08000000, 0x08000010],
@@ -309,10 +357,10 @@ describe('range and location lists', () => {
 
   it('an exprloc is the expression itself, and a missing attribute is none', () => {
     const e = entry(0x34, { [DW_AT.location]: [DW_FORM.exprloc, new Uint8Array([DW_OP.fbreg, 0x7c])] });
-    expect(locationAt(e, DW_AT.location, 0, unit(5, 0), {})).toEqual({
+    expect(locationAt(e, DW_AT.location, 0, unit(5, 0), LE)).toEqual({
       kind: 'expr',
       expr: new Uint8Array([DW_OP.fbreg, 0x7c]),
     });
-    expect(locationAt(entry(0x34, {}), DW_AT.location, 0, unit(5, 0), {})).toEqual({ kind: 'none' });
+    expect(locationAt(entry(0x34, {}), DW_AT.location, 0, unit(5, 0), LE)).toEqual({ kind: 'none' });
   });
 });

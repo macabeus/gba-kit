@@ -216,8 +216,9 @@ function registerIndex(name: string): number {
   return i >= 0 && i <= 15 ? i : -1;
 }
 
+/** A state name as a file name: anything a path could not carry becomes `_`. */
 function safeName(name: string): string {
-  return name.replace(/[^\w.-]+/g, '_').slice(0, 80) || 'state';
+  return name.replace(/[^\w.-]+/g, '_').slice(0, 80);
 }
 
 function fileKind(file: string): 'file' | 'directory' | 'missing' {
@@ -1497,13 +1498,17 @@ export class GbaDebugSession extends DebugSession {
    */
   async #readState(session: Session, args: { name?: unknown; path?: unknown }): Promise<string> {
     const dir = path.resolve(this.#statesDir(session));
-    const file =
-      args.path !== undefined
-        ? path.resolve(dir, needString(args.path, 'path'))
-        : args.name !== undefined
-          ? path.resolve(this.#statePath(session, needString(args.name, 'name')))
-          : null;
-    if (!file) {
+    let file: string;
+    if (args.path !== undefined) {
+      file = path.resolve(dir, needString(args.path, 'path'));
+    } else if (args.name !== undefined) {
+      // `#saveState` trims before naming the file; loading has to trim the same way
+      const name = needString(args.name, 'name').trim();
+      if (!name) {
+        throw new Error("'name' is empty");
+      }
+      file = path.resolve(this.#statePath(session, name));
+    } else {
       throw new Error('give a state name or path');
     }
     if (!file.startsWith(dir + path.sep)) {

@@ -83,6 +83,20 @@ describe('GbaSystemBus.poke', () => {
 });
 
 describe('read watchpoints', () => {
+  it('reads a word with its top bit set as an unsigned number, wherever it comes from', () => {
+    const bus = new GbaSystemBus();
+    const rom = new Uint8Array(8);
+    rom.set([0x1e, 0xff, 0x2f, 0xe1], 0); // `bx lr`, the word a disassembler looks for
+    bus.loadRom(rom);
+    bus.poke(0x03000000, new Uint8Array([0x00, 0x00, 0x00, 0x80]));
+    expect(bus.read32(0x08000000)).toBe(0xe12fff1e);
+    expect(bus.read32(0x03000000)).toBe(0x80000000);
+    const seen: number[] = [];
+    bus.addReadWatchpoint(0x03000000, 4, ({ value }) => seen.push(value));
+    bus.read32(0x03000000);
+    expect(seen).toEqual([0x80000000]);
+  });
+
   it('fire after a load overlapping the range, with the value read and the watched byte', () => {
     const bus = new GbaSystemBus();
     bus.poke(0x03000000, new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]));
@@ -104,5 +118,18 @@ describe('read watchpoints', () => {
     bus.read16(0x03000002);
     expect(seen.length).toBe(3);
     expect(bus.hasReadWatchpoints()).toBe(false);
+  });
+
+  it('reports a word with its top bit set unsigned, as a write watchpoint does', () => {
+    const bus = new GbaSystemBus();
+    bus.poke(0x03000000, new Uint8Array([0x00, 0x00, 0x00, 0x80]));
+    const read: number[] = [];
+    const written: number[] = [];
+    bus.addReadWatchpoint(0x03000000, 4, ({ value }) => read.push(value));
+    bus.addWriteWatchpoint(0x03000000, 4, ({ value }) => written.push(value));
+    bus.read32(0x03000000);
+    bus.write32(0x03000000, 0x80000000);
+    expect(read).toEqual([0x80000000]);
+    expect(written).toEqual([0x80000000]);
   });
 });

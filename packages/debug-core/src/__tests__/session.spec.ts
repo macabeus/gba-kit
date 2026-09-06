@@ -389,6 +389,23 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(() => h.session.assign('g_player.stats.hp', '99')).toThrow(/out of range for a 4-bit/);
   });
 
+  it('every write is an event carrying the fresh revision, and a refused write is not', async () => {
+    const h = await boot(variant);
+    const revisions: number[] = [];
+    h.session.on({ written: () => revisions.push(h.session.revision) });
+    const members = h.session.evaluate('g_player').node.children!();
+    const x = members.find((m) => m.name === 'pos')!.children!().find((m) => m.name === 'x')!;
+    h.session.setVariable(x, '7');
+    expect(revisions).toEqual([h.session.revision]);
+    const address = h.session.evaluate('&g_frame').address!;
+    expect(h.session.writeMemory(address, new Uint8Array([1, 0, 0, 0]))).toBe(4);
+    h.session.setRegister(0, 1);
+    expect(revisions).toEqual([revisions[0], revisions[0]! + 1, revisions[0]! + 2]);
+    // the BIOS takes no writes: nothing changed, so nothing is announced
+    expect(h.session.writeMemory(0, new Uint8Array([1]))).toBe(0);
+    expect(revisions).toHaveLength(3);
+  });
+
   it('writing a scalar changes the program', async () => {
     const h = await boot(variant);
     h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'update();') }]);
@@ -877,6 +894,14 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(h.session.machine.scanline).toBe(160);
   });
 
+  it('an event breakpoint on an I/O write names the register the write landed in', async () => {
+    const h = await boot(variant);
+    h.session.setEventBreakpoints(['mmio-write']);
+    const stop = h.run();
+    expect(stop?.reason).toBe('event breakpoint');
+    expect(stop?.description).toMatch(/^I\/O write [A-Z][A-Z0-9_]* \(0x[0-9a-f]+\) = 0x[0-9a-f]+$/);
+  });
+
   it('step back is exact: instructions, frames and registers come back as they were', async () => {
     const h = await boot(variant);
     h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'update();') }]);
@@ -1058,6 +1083,15 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(h.session.recordings.map((t) => t.id)).toEqual([take.id, take.id + 1]);
   });
 
+  it('loading a state starts a new epoch: the machine is not the one the client last saw', async () => {
+    const h = await boot(variant);
+    const text = h.session.saveState('here');
+    h.run(3);
+    const epoch = h.session.epoch;
+    h.session.loadState(text);
+    expect(h.session.epoch).toBe(epoch + 1);
+  });
+
   it('save states round-trip and are bound to the ROM', async () => {
     const h = await boot(variant);
     h.run(5);
@@ -1072,7 +1106,7 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
   });
 });
 
-describe('Session views and tools (thumb-O0)', () => {
+describe('Session views and tools', () => {
   it('lists the lines of a file a breakpoint arms without sliding, inlined call sites included', async () => {
     const h = await boot('thumb-O2');
     const lines = h.session.program.codeLines(MAIN);

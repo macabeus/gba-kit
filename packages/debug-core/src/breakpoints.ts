@@ -216,17 +216,6 @@ export class BreakpointStore {
     return this.#data;
   }
 
-  get dataSpecs(): DataBreakpointSpec[] {
-    return this.#data.map(({ address, length, name, access, condition, hitCondition }) => ({
-      address,
-      length,
-      name,
-      access,
-      condition,
-      hitCondition,
-    }));
-  }
-
   get data(): readonly DataBreakpoint[] {
     return this.#data;
   }

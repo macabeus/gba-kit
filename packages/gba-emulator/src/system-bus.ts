@@ -193,7 +193,7 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   /** Notify read watchpoints overlapping a load of `size` bytes at `base` that returned `value`. */
-  #notifyRead(base: number, value: number, size: number): number {
+  #notifyRead(base: number, value: number, size: number): void {
     const lo = base >>> 0;
     const hi = (lo + size) >>> 0;
     const list = this.#readWatchpoints.length === 1 ? this.#readWatchpoints : this.#readWatchpoints.slice();
@@ -203,7 +203,6 @@ export class GbaSystemBus implements MemoryBus {
         wp.onRead({ address, value, size, dmaChannel: this.#dmaChannel, dmaOrigin: this.#dmaOrigin });
       }
     }
-    return value;
   }
 
   /**
@@ -472,9 +471,10 @@ export class GbaSystemBus implements MemoryBus {
 
   read8(address: number): number {
     const value = this.#read8(address);
-    return this.#readWatchpoints.length > 0
-      ? this.#notifyRead(this.#canonicalAddress(address), value & 0xff, 1)
-      : value;
+    if (this.#readWatchpoints.length > 0) {
+      this.#notifyRead(this.#canonicalAddress(address), value & 0xff, 1);
+    }
+    return value;
   }
 
   #read8(address: number): number {
@@ -513,9 +513,10 @@ export class GbaSystemBus implements MemoryBus {
 
   read16(address: number): number {
     const value = this.#read16(address);
-    return this.#readWatchpoints.length > 0
-      ? this.#notifyRead(this.#canonicalAddress(address & ~1), value & 0xffff, 2)
-      : value;
+    if (this.#readWatchpoints.length > 0) {
+      this.#notifyRead(this.#canonicalAddress(address & ~1), value & 0xffff, 2);
+    }
+    return value;
   }
 
   #read16(address: number): number {
@@ -561,7 +562,12 @@ export class GbaSystemBus implements MemoryBus {
 
   read32(address: number): number {
     const value = this.#read32(address);
-    return this.#readWatchpoints.length > 0 ? this.#notifyRead(this.#canonicalAddress(address & ~3), value, 4) : value;
+    if (this.#readWatchpoints.length > 0) {
+      // `#read32` assembles with `<< 24`, so its result is signed; watchpoints
+      // report the loaded word unsigned, as the write side does.
+      this.#notifyRead(this.#canonicalAddress(address & ~3), value >>> 0, 4);
+    }
+    return value;
   }
 
   #read32(address: number): number {
@@ -771,10 +777,11 @@ export class GbaSystemBus implements MemoryBus {
   #readBios32(address: number): number {
     const offset = address & 0x3fff;
     this.#lastBiosRead =
-      this.#bios[offset]! |
-      (this.#bios[offset + 1]! << 8) |
-      (this.#bios[offset + 2]! << 16) |
-      (this.#bios[offset + 3]! << 24);
+      (this.#bios[offset]! |
+        (this.#bios[offset + 1]! << 8) |
+        (this.#bios[offset + 2]! << 16) |
+        (this.#bios[offset + 3]! << 24)) >>>
+      0;
     return this.#lastBiosRead;
   }
 
@@ -797,10 +804,11 @@ export class GbaSystemBus implements MemoryBus {
     const offset = address & 0x01fffffc;
     if (offset + 3 < this.#rom.length) {
       return (
-        this.#rom[offset]! |
-        (this.#rom[offset + 1]! << 8) |
-        (this.#rom[offset + 2]! << 16) |
-        (this.#rom[offset + 3]! << 24)
+        (this.#rom[offset]! |
+          (this.#rom[offset + 1]! << 8) |
+          (this.#rom[offset + 2]! << 16) |
+          (this.#rom[offset + 3]! << 24)) >>>
+        0
       );
     }
     return 0;
@@ -1143,7 +1151,9 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   #read32From(arr: Uint8Array, offset: number): number {
-    return arr[offset]! | (arr[offset + 1]! << 8) | (arr[offset + 2]! << 16) | (arr[offset + 3]! << 24);
+    // `>>> 0`: a word with bit 31 set would otherwise be a negative number, and a
+    // caller comparing it against an opcode or a search value would never match.
+    return (arr[offset]! | (arr[offset + 1]! << 8) | (arr[offset + 2]! << 16) | (arr[offset + 3]! << 24)) >>> 0;
   }
 
   #write16To(arr: Uint8Array, offset: number, value: number): void {

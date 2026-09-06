@@ -20,7 +20,7 @@ describe('package', () => {
     }
   }, 120_000);
 
-  it('ships the three bundles, the stylesheet and the manifest, and nothing else', () => {
+  it('ships the three bundles, the stylesheet, the manifest, the README and the license, and nothing else', () => {
     const listed = execFileSync(join(root, 'node_modules', '.bin', 'vsce'), ['ls', '--no-dependencies'], {
       cwd: root,
       encoding: 'utf8',

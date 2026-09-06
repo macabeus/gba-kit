@@ -4,16 +4,17 @@ import { Gba } from '../gba.js';
 import { GbaButton } from '../types.js';
 
 /**
- * ARM: start timer 0 (prescaler 1, no IRQ) and spin. The timer overflows about
+ * ARM: start timer 0 (prescaler F/1, no IRQ) and spin. The timer overflows about
  * four times per frame, so a restore that re-derived its overflow event from the
  * counter would drift within a frame.
  *
  *   mov  r0, #0x04000000
+ *   add  r0, r0, #0x100     ; ARM halfword offsets are 8-bit, so TM0CNT_H needs a nearer base
  *   mov  r1, #0x80
- *   strh r1, [r0, #0x102]   ; TM0CNT_H = enable
+ *   strh r1, [r0, #0x2]     ; TM0CNT_H = enable
  *   b    .
  */
-const TIMER_SPIN = [0xe3a00301, 0xe3a01080, 0xe1c011b2, 0xeafffffe];
+const TIMER_SPIN = [0xe3a00301, 0xe2800c01, 0xe3a01080, 0xe1c010b2, 0xeafffffe];
 
 function romOf(words: number[]): Uint8Array {
   const rom = new Uint8Array(words.length * 4);
@@ -35,6 +36,21 @@ function boot(words: number[]): Gba {
 }
 
 describe('snapshot round trip', () => {
+  it('the spin program leaves timer 0 running and overflowing several times a frame', () => {
+    const gba = boot(TIMER_SPIN);
+    let overflows = 0;
+    // Stands in for the APU's DirectSound hook, which this ROM never feeds.
+    gba.timers.setOverflowCallback(0, () => overflows++);
+    gba.runFrame();
+    const channel = gba.serialize().timers.channels[0]!;
+    expect(channel.enabled).toBe(true);
+    expect(channel.prescaler).toBe(0);
+    // a frame is 280896 cycles and the counter is 16-bit, so it wraps 4 times and stops
+    // partway through the fifth
+    expect(overflows).toBeGreaterThanOrEqual(4);
+    expect(gba.timers.readCounter(0)).toBeGreaterThan(0);
+  });
+
   it('serialize → deserialize → serialize is the identity', () => {
     const gba = boot(TIMER_SPIN);
     for (let i = 0; i < 3; i++) {
@@ -91,6 +107,17 @@ describe('snapshot round trip', () => {
     expect(gba.input.readKeyInput()).toBe(0x3ff);
     gba.deserialize(snap);
     expect(gba.input.readKeyInput()).toBe(0x3ff & ~((1 << GbaButton.A) | (1 << GbaButton.Right)));
+  });
+
+  it('an old snapshot carrying an extra cpu field still loads', () => {
+    const gba = boot(TIMER_SPIN);
+    gba.runFrame();
+    const snap = gba.serialize();
+    const legacy = { ...snap, cpu: { ...snap.cpu, haltedBySWI: true } };
+    const fresh = boot(TIMER_SPIN); // a machine the snapshot has to move, not one already there
+    fresh.deserialize(legacy);
+    expect(fresh.armCpu.halted).toBe(false);
+    expect(fresh.serialize()).toEqual(snap);
   });
 
   it('frameCount is restored, and an old snapshot without it reads as 0', () => {

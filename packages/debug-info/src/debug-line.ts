@@ -579,22 +579,27 @@ export class LineTable {
     // a line whose code spans several rows (`x = a + b` as a load, an add, a store)
     // is one breakpoint, but a line the compiler split around another (a loop
     // condition, a hoisted load) is one per piece. Rows without `is_stmt` are not
-    // places a debugger should stop, so they neither open a run nor count as code.
+    // places a debugger should stop, so they delimit runs like any other row but
+    // never supply the address one is recorded at.
     const index = new Map<string, Map<number, number[]>>();
     let prevFile: string | null = null;
     let prevLine = -1;
+    let runRecorded = false;
     for (const row of this.rows) {
       if (row.endSequence) {
         prevFile = null;
         continue;
       }
       const file = normalizePath(row.file);
-      const sameRun = file === prevFile && row.line === prevLine;
-      prevFile = file;
-      prevLine = row.line;
-      if (sameRun || !row.isStmt) {
+      if (file !== prevFile || row.line !== prevLine) {
+        prevFile = file;
+        prevLine = row.line;
+        runRecorded = false;
+      }
+      if (runRecorded || !row.isStmt) {
         continue;
       }
+      runRecorded = true;
       let byLine = index.get(file);
       if (!byLine) {
         byLine = new Map();

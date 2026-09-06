@@ -291,6 +291,11 @@
           "default": "process",
           "description": "Run the debug adapter as a separate Node process (needs `node` on the PATH) or inside the extension host"
         },
+        "gba-kit.runOnScreen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the machine when a session reaches its entry stop with the Screen panel up, instead of leaving it stopped"
+        },
         "gba-kit.screenScale": {
           "type": "number",
           "default": 2,

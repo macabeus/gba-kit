@@ -27,7 +27,7 @@ import {
 import type { CompiledExpr, ExprEnv } from './expression.js';
 import type { Host } from './host.js';
 import { type DisassembledLine, type EvaluateResult, Inspector, type Scope, type StackFrame } from './inspector.js';
-import { type IoRegisterValue, ioSnapshot } from './io.js';
+import { type IoRegisterValue, ioRegisterAt, ioSnapshot } from './io.js';
 import { LabelStore, type LabelsFile } from './labels.js';
 import { Machine, romHash } from './machine.js';
 import { type SearchOptions, filterMemory, searchMemory } from './memory-search.js';
@@ -94,6 +94,8 @@ export interface SessionEvents {
   tracing(on: boolean): void;
   /** a label was set, cleared, imported or loaded: the names disassembly and evaluation use changed */
   labels(): void;
+  /** memory, a register or a variable was written: anything a view read of the machine is stale */
+  written(): void;
   /** RGBA 240×160, a fresh copy; throttled while running, always on a stop */
   frame(rgba: Uint8Array, frame: number): void;
   /** interleaved stereo samples produced by the last run slice, when a listener wants them */
@@ -291,7 +293,7 @@ export class Session {
     return this.#revision;
   }
 
-  /** Bumps on a restart or a resync: breakpoints survive, everything else is new. */
+  /** Bumps on a restart, a resync or a state load: breakpoints survive, everything else is new. */
   get epoch(): number {
     return this.#epoch;
   }
@@ -1025,8 +1027,7 @@ export class Session {
       throw new Error(`'${node.name}' is not a writable scalar`);
     }
     const shown = this.inspector.setScalar(node.writable, text);
-    this.#revision++;
-    this.#frameCache = null;
+    this.#noteWrite();
     return shown;
   }
 
@@ -1041,8 +1042,7 @@ export class Session {
   writeMemory(address: number, bytes: Uint8Array): number {
     const n = this.machine.poke(address, bytes);
     if (n > 0) {
-      this.#revision++;
-      this.#frameCache = null;
+      this.#noteWrite();
     }
     return n;
   }
@@ -1054,8 +1054,18 @@ export class Session {
       throw new Error('no such register');
     }
     this.machine.registers[index] = value >>> 0;
+    this.#noteWrite();
+  }
+
+  /**
+   * A write reached the machine: the revision an observation was taken at moves on,
+   * the cached frames go, and listeners hear of it, so a view that shows the
+   * machine's contents re-reads them without waiting for the next stop.
+   */
+  #noteWrite(): void {
     this.#revision++;
     this.#frameCache = null;
+    this.#emit('written');
   }
 
   // ─── input ─────────────────────────────────────────────────────────
@@ -1519,6 +1529,7 @@ export class Session {
 
   #loadSnapshot(snapshot: GbaSnapshot, description: string): void {
     this.machine.restore(snapshot);
+    this.#epoch++;
     this.#lastFrame = this.machine.frame;
     this.#instrInFrame = 0;
     this.#pendingButtons = null;
@@ -1735,8 +1746,11 @@ function describeEvent(event: HardwareEvent): string {
       return 'interrupt taken';
     case 'dma':
       return `DMA${event.channel}: 0x${event.info.source.toString(16)} → 0x${event.info.destination.toString(16)}, ${event.info.count} × ${event.info.wordSize} bytes`;
-    case 'mmio-write':
-      return `I/O write 0x${event.address.toString(16)} = 0x${event.value.toString(16)}`;
+    case 'mmio-write': {
+      const register = ioRegisterAt(event.address);
+      const where = `0x${event.address.toString(16)}`;
+      return `I/O write ${register ? `${register.name} (${where})` : where} = 0x${event.value.toString(16)}`;
+    }
     case 'vblank':
       return 'VBlank';
     case 'hblank':

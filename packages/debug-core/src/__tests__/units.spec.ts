@@ -9,6 +9,7 @@ import {
   splitAssignment,
 } from '../expression.js';
 import { ManualHost } from '../host.js';
+import { ioRegisterAt } from '../io.js';
 import { LabelStore } from '../labels.js';
 import { LOG, TILES, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
 import { recordingToScript, toSegments } from '../recorder.js';
@@ -365,5 +366,15 @@ describe('protocol argument semantics', () => {
     expect(tileCount(0)).toBe(TILES.defaultCount);
     expect(tileCount(4)).toBe(4);
     expect(tileCount(99_999)).toBe(TILES.maxCount);
+  });
+});
+
+describe('I/O registers', () => {
+  it('names the register an address falls in, and nothing for a gap between two', () => {
+    expect(ioRegisterAt(0x04000000)?.name).toBe('DISPCNT');
+    expect(ioRegisterAt(0x04000001)?.name).toBe('DISPCNT'); // the high byte of a halfword register
+    expect(ioRegisterAt(0x0400002a)?.name).toBe('BG2X'); // inside a word register
+    expect(ioRegisterAt(0x0400004e)).toBeNull(); // past MOSAIC, which is two bytes at 0x400004c
+    expect(ioRegisterAt(0x03000000)).toBeNull();
   });
 });

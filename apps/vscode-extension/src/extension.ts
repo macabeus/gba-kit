@@ -346,12 +346,15 @@ export function activate(context: vscode.ExtensionContext): void {
   /**
    * A screen exists to be watched, so the machine runs once one is up. Only the entry
    * stop is resumed, and only once per session: opening the screen while stopped at a
-   * breakpoint must leave the machine exactly where the user stopped it. This does mean
-   * a session with `stopOnEntry` runs on once its screen appears; set `stopOnEntry` to
-   * false to skip the stop entirely.
+   * breakpoint must leave the machine exactly where the user stopped it. A session with
+   * `stopOnEntry` therefore runs on once its screen appears, unless `gba-kit.runOnScreen`
+   * is off, which leaves it sitting at the entry with the screen up.
    */
   function runForTheScreen(session: vscode.DebugSession, body: { state?: string; reason?: string }): void {
     if (body.state !== 'stopped' || body.reason !== 'entry' || ranForScreen.has(session.id) || !panels.has('screen')) {
+      return;
+    }
+    if (!vscode.workspace.getConfiguration('gba-kit').get<boolean>('runOnScreen', true)) {
       return;
     }
     ranForScreen.add(session.id);

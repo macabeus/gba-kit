@@ -1088,6 +1088,7 @@ describe('emulator requests', () => {
       ['gba-kit/stream', {}, /missing 'path'/],
       ['gba-kit/stream', { path: '' }, /'path' is empty/],
       ['gba-kit/loadState', {}, /give a state name or path/],
+      ['gba-kit/loadState', { name: '' }, /'name' is empty/],
     ];
     for (const [command, args, message] of cases) {
       const r = await client.request(command, args);

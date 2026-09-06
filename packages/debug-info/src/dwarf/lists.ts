@@ -36,7 +36,8 @@ export function entryRanges(entry: DwarfEntry, unit: UnitInfo, sections: DwarfSe
         return [];
       }
       offset =
-        unit.rnglistsBase + new DataView(section.buffer, section.byteOffset, section.byteLength).getUint32(at, true);
+        unit.rnglistsBase +
+        new DataView(section.buffer, section.byteOffset, section.byteLength).getUint32(at, sections.littleEndian);
     }
     return readRnglist(section, offset, unit, sections);
   }
@@ -172,7 +173,8 @@ export function locationAt(
         return { kind: 'unsupported', reason: 'loclistx out of range' };
       }
       offset =
-        unit.loclistsBase + new DataView(section.buffer, section.byteOffset, section.byteLength).getUint32(at2, true);
+        unit.loclistsBase +
+        new DataView(section.buffer, section.byteOffset, section.byteLength).getUint32(at2, sections.littleEndian);
     }
     return readLoclist(section, offset, pc, unit, sections);
   }

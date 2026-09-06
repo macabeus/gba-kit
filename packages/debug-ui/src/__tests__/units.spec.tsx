@@ -281,8 +281,13 @@ describe('views', () => {
       />,
     );
     expect(events).toContain('vblank');
+    // a write into a modelled register is named, as the stop description names it
     expect(describeEvent({ kind: 'mmio-write', address: 0x04000000, value: 0x403, size: 2 } as never)).toBe(
-      'address=0x4000000 value=0x403 size=2',
+      'address=DISPCNT (0x4000000) value=0x403 size=2',
+    );
+    // one the table does not model keeps its address
+    expect(describeEvent({ kind: 'mmio-write', address: 0x040000e0, value: 1, size: 2 } as never)).toBe(
+      'address=0x40000e0 value=1 size=2',
     );
   });
 

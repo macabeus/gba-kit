@@ -13,7 +13,7 @@ import { browserStorage, storageFiles } from './browser-files';
 
 export interface DebugSessionHandle {
   session: Session | null;
-  /** bumps on every stop, resume and label edit: re-read what you show */
+  /** bumps on every stop, resume, write and label edit: re-read what you show */
   revision: number;
   state: SessionState | 'none';
   error: string | null;
@@ -95,7 +95,7 @@ export function useDebugSession(
       setState(session.state);
     };
     bump();
-    return session.on({ stopped: bump, continued: bump, state: bump, labels: bump });
+    return session.on({ stopped: bump, continued: bump, state: bump, labels: bump, written: bump });
   }, [session]);
 
   // take turns with the Play page

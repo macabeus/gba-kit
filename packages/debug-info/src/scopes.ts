@@ -71,6 +71,7 @@ export class DwarfScopes {
     this.index = new EntryIndex(roots);
     this.types = new TypeResolver(this.index);
     this.#sections = {
+      littleEndian: elf.littleEndian,
       addr: elf.sectionData('.debug_addr'),
       loclists: elf.sectionData('.debug_loclists'),
       loc: elf.sectionData('.debug_loc'),

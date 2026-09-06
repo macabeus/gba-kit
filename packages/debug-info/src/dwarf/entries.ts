@@ -22,6 +22,8 @@ export interface UnitInfo {
 
 /** The DWARF sections the readers consult, as raw bytes (absent when the ELF lacks them). */
 export interface DwarfSections {
+  /** byte order of the payload, from the ELF's `e_ident`; the index tables are read in it */
+  littleEndian: boolean;
   addr?: Uint8Array;
   loclists?: Uint8Array;
   loc?: Uint8Array;
@@ -76,7 +78,7 @@ export function addrxValue(index: number, unit: UnitInfo, sections: DwarfSection
   if (at + 4 > table.length) {
     return undefined;
   }
-  return new DataView(table.buffer, table.byteOffset, table.byteLength).getUint32(at, true);
+  return new DataView(table.buffer, table.byteOffset, table.byteLength).getUint32(at, sections.littleEndian);
 }
 
 /** Index of every DIE by offset, with reference following and origin inheritance. */
@@ -116,9 +118,20 @@ export class EntryIndex {
     };
   }
 
-  /** The unit an entry belongs to; the first unit when its `unitOffset` is unknown. */
+  /**
+   * The unit an entry belongs to. An entry whose `unitOffset` names no parsed unit is a
+   * programming error, not a datum: answering with another unit would hand its `lowPc` and
+   * its `.debug_addr`/loclists/rnglists bases to a stranger's DIE and misplace every address
+   * derived from them.
+   */
   unit(entry: DwarfEntry): UnitInfo {
-    return this.#unitByOffset.get(entry.unitOffset) ?? this.units[0]!;
+    const unit = this.#unitByOffset.get(entry.unitOffset);
+    if (!unit) {
+      throw new Error(
+        `DIE at 0x${entry.offset.toString(16)} belongs to no indexed unit (unit offset 0x${entry.unitOffset.toString(16)})`,
+      );
+    }
+    return unit;
   }
 
   at(offset: number | undefined): DwarfEntry | undefined {

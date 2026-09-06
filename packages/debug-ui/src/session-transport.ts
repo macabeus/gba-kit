@@ -170,7 +170,11 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       }
       case 'gba-kit/loadState': {
         const { name, path } = a as A<'gba-kit/loadState'>;
-        const key = path ?? name ?? '';
+        // named the same way the adapter names it, so a client reads one rejection either way
+        const key = (path ?? name ?? '').trim();
+        if (!key) {
+          throw new Error(path !== undefined ? "'path' is empty" : "'name' is empty");
+        }
         const text = options.states ? await options.states.load(key) : (memoryStates.get(key)?.text ?? null);
         if (text === null) {
           throw new Error(`no such state: ${key}`);

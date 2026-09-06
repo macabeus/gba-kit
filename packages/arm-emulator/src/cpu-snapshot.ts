@@ -13,5 +13,4 @@ export interface CpuSnapshot {
   usrBankedR8to12: Uint32Array;
   spsr: Uint32Array;
   halted: boolean;
-  haltedBySWI: boolean;
 }

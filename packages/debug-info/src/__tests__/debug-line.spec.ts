@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { type LineRow, parseDebugLine } from '../debug-line.js';
+import { type LineRow, LineTable, parseDebugLine } from '../debug-line.js';
 import { ElfFile } from '../elf.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -53,6 +53,37 @@ function unmodellableUnit(version: number, body = 24): Uint8Array {
   view.setUint32(0, 2 + body, true); // unit_length covers everything after itself
   view.setUint16(4, version, true);
   unit.fill(0xaa, 6); // header we never read
+  return unit;
+}
+
+/**
+ * A DWARF 5 unit whose header is walkable all the way to the directory table, which
+ * then describes its entries with a form no reader can size — the one shape that
+ * reaches `readV5Tables`' null return.
+ */
+function unreadableEntryFormatUnit(): Uint8Array {
+  const header = [
+    1, // minimum_instruction_length
+    1, // maximum_operations_per_instruction
+    1, // default_is_stmt
+    0xfb, // line_base (-5)
+    14, // line_range
+    1, // opcode_base: no standard_opcode_lengths follow
+    // directory_entry_format: one (DW_LNCT_path, <a form with no encoding>) pair
+    1,
+    1,
+    0x7f,
+    1, // directories_count
+    0, // where that directory's bytes would start
+  ];
+  const unit = new Uint8Array(12 + header.length);
+  const view = new DataView(unit.buffer);
+  view.setUint32(0, 8 + header.length, true); // unit_length
+  view.setUint16(4, 5, true); // version
+  unit[6] = 4; // address_size
+  unit[7] = 0; // segment_selector_size
+  view.setUint32(8, header.length, true); // header_length: the program starts past the tables
+  unit.set(header, 12);
   return unit;
 }
 
@@ -100,9 +131,15 @@ describe('units we cannot decode are skipped by their own unit_length', () => {
     expect(rowsOf(concat(unmodellableUnit(6), section))).toEqual(pristine);
   });
 
-  it('keeps the rest of the section when a DWARF 5 unit’s tables cannot be read', () => {
-    // Version 5 with garbage after it: the header length points past the unit, so it is skipped whole.
+  it('keeps the rest of the section when a header_length points past the unit', () => {
+    // Version 5 with garbage after it: the header length lands outside the unit, so it is skipped whole.
     expect(rowsOf(concat(unmodellableUnit(5), section))).toEqual(pristine);
+  });
+
+  it('keeps the rest of the section when a DWARF 5 unit’s tables cannot be read', () => {
+    // A well-formed v5 header whose directory table is described by a form this reader
+    // cannot size: the file table is unknowable, so the unit is skipped by its length.
+    expect(rowsOf(concat(unreadableEntryFormatUnit(), section))).toEqual(pristine);
   });
 
   it('keeps the rest of the section when a 64-bit DWARF unit comes first', () => {
@@ -201,5 +238,35 @@ describe('a section that cannot be walked degrades instead of throwing', () => {
 
   it('handles an empty section', () => {
     expect(rowsOf(new Uint8Array(0))).toEqual([]);
+  });
+});
+
+describe('one address per run of rows for a line', () => {
+  // Hand-built rows: what a producer emits for a line the optimizer split, where the
+  // first row of a piece is mid-expression (is_stmt=0) and the stop is the next one.
+  const row = (address: number, line: number, isStmt: boolean): LineRow => ({
+    address,
+    fileIndex: 1,
+    file: 'main.c',
+    line,
+    endSequence: false,
+    isStmt,
+  });
+  const table = new LineTable([
+    row(0x100, 42, false),
+    row(0x104, 42, true),
+    row(0x108, 50, true),
+    row(0x10c, 42, true),
+    row(0x110, 60, false),
+    { ...row(0x114, 60, true), endSequence: true },
+  ]);
+
+  it('records the run’s first statement row, not its first row', () => {
+    expect(table.sourceToPcs('main.c', 42)).toEqual([0x104, 0x10c]);
+  });
+
+  it('gives a line whose every row is a non-statement no code at all', () => {
+    expect(table.sourceToPcs('main.c', 60)).toEqual([]);
+    expect(table.linesWithCode('main.c')).toEqual([42, 50]);
   });
 });

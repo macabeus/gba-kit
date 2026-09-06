@@ -1,4 +1,4 @@
-import type { EventEntry } from '@gba-kit/debug-core';
+import { type EventEntry, ioRegisterAt } from '@gba-kit/debug-core';
 import { useState } from 'react';
 
 import { Button, Empty, Hex, newest } from '../components.js';
@@ -37,9 +37,15 @@ export function EventsPanel({ transport }: { transport: Transport }) {
   );
 }
 
-/** A one-line account of a hardware event's fields, the kind aside. */
+/** A one-line account of a hardware event's fields, the kind aside. An I/O write names the register it landed in. */
 export function describeEvent(event: EventEntry['event']): string {
   const { kind: _kind, ...rest } = event as { kind: string } & Record<string, unknown>;
+  if (event.kind === 'mmio-write') {
+    const register = ioRegisterAt(event.address);
+    if (register) {
+      rest.address = `${register.name} (0x${event.address.toString(16)})`;
+    }
+  }
   return Object.entries(rest)
     .map(
       ([k, v]) =>

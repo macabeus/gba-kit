@@ -1,14 +1,14 @@
 /**
  * The extension activated against a stand-in `vscode`: what the panels are told
  * when a session starts, wants audio, ends, or ends before its frame stream was
- * attached, and that a screen runs the machine on from the entry stop, once, and
- * never from a breakpoint.
+ * attached, and that a screen runs the machine on from the entry stop, once, never
+ * from a breakpoint, and never while `gba-kit.runOnScreen` is off.
  */
 import { FrameStream, STREAM } from '@gba-kit/debug-adapter';
 import type { HostToTransport, TransportToHost } from '@gba-kit/debug-ui/transport';
 import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 interface Listener {
   (e: unknown): void;
@@ -64,6 +64,8 @@ const stub = vi.hoisted(() => ({
   created: [] as string[],
   log: [] as string[],
   createPanel: null as (() => unknown) | null,
+  /** settings the workspace answers with, by `<section>.<key>`; anything else takes the caller's default */
+  settings: new Map<string, unknown>(),
 }));
 
 vi.mock('vscode', () => {
@@ -91,7 +93,11 @@ vi.mock('vscode', () => {
       showInformationMessage: () => undefined,
       setStatusBarMessage: () => undefined,
     },
-    workspace: { getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }) },
+    workspace: {
+      getConfiguration: (section: string) => ({
+        get: (key: string, fallback: unknown) => stub.settings.get(`${section}.${key}`) ?? fallback,
+      }),
+    },
     commands: {
       registerCommand: (id: string, fn: (...args: unknown[]) => unknown) => {
         stub.commands.set(id, fn);
@@ -156,6 +162,10 @@ describe('extension', () => {
       extensionUri: { path: '/ext', toString: () => '/ext' },
       asAbsolutePath: (p: string) => `/ext/${p}`,
     } as never);
+  });
+
+  afterEach(() => {
+    stub.settings.clear();
   });
 
   afterAll(() => {
@@ -265,6 +275,30 @@ describe('extension', () => {
     expect(atBreakpoint.calls.filter((c) => c.command === 'continue')).toEqual([]);
     stub.terminate.forEach((l) => l(atBreakpoint));
     stub.terminate.forEach((l) => l(started));
+    await wait(20);
+  });
+
+  it('leaves the entry stop alone while gba-kit.runOnScreen is off', async () => {
+    stub.settings.set('gba-kit.runOnScreen', false);
+    const held = fakeSession('held');
+    stub.start.forEach((l) => l(held));
+    await until(() => held.calls.some((c) => c.command === 'gba-kit/stream'));
+    const resumes = (): number => held.calls.filter((c) => c.command === 'continue').length;
+    const entry = (): void => {
+      stub.custom.forEach((l) =>
+        l({ session: held, event: 'gba-kit/state', body: { state: 'stopped', reason: 'entry' } }),
+      );
+    };
+
+    entry();
+    await wait(20);
+    expect(resumes()).toBe(0);
+
+    // the setting off is the only thing holding it: unset, the session runs on as it does by default
+    stub.settings.delete('gba-kit.runOnScreen');
+    entry();
+    await until(() => resumes() === 1);
+    stub.terminate.forEach((l) => l(held));
     await wait(20);
   });
 });

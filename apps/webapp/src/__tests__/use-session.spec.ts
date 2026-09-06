@@ -169,6 +169,19 @@ describe('useDebugSession', () => {
     expect(session!.disassemble(pc, 1)[0]!.label).toBe('renamed');
   });
 
+  it('a write to the machine bumps the revision, so the memory and register views re-read at once', async () => {
+    const { rom, elf } = fixture('thumb-O0');
+    const emulator = bridgeOver(rom);
+    await render({ emulator, romData: bufferOf(rom), elfData: elf, active: true });
+    const { session, revision } = await settle();
+    const address = session!.program.symbolAddress('g_frame')!;
+    await act(async () => session!.writeMemory(address, new Uint8Array([0x2a, 0, 0, 0])));
+    expect(latest!.revision).toBe(revision + 1);
+    expect(session!.readMemory(address, 1).data[0]).toBe(0x2a);
+    await act(async () => session!.setRegister(0, 1));
+    expect(latest!.revision).toBe(revision + 2);
+  });
+
   it('a session rebuilt for another ELF still has the labels saved for the ROM', async () => {
     const { rom, elf } = fixture('thumb-O0');
     const emulator = bridgeOver(rom);

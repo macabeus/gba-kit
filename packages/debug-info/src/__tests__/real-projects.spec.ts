@@ -515,6 +515,14 @@ describe.each(BE_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) =
     expect(src?.line).toBe(want.line);
   });
 
+  it.each(FUNCS)("scopes.functionAt(%s entry) matches nm — DWARF's own DW_AT_low_pc", (fn) => {
+    // pcToFunction answers from the ELF symbol table; this answers from the DIE tree, so
+    // it is the assertion that pins DW_FORM_addr being read MSB-first. A byte-swapped
+    // low_pc puts every subprogram at an address no PC of the program ever reaches.
+    const entry = di.scopes.functionAt(oracle.symbols[fn]!);
+    expect(entry && di.scopes.name(entry)).toBe(fn);
+  });
+
   it('returns null for a PC outside any function/sequence', () => {
     expect(di.pcToSource(0x7f000000)).toBeNull();
     expect(di.pcToFunction(0x7f000000)).toBeNull();

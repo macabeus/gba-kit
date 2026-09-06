@@ -8,10 +8,9 @@
  * enough to read any field straight out of memory.
  *
  * Handles the DIE forest in `.debug_info` (resolved against `.debug_abbrev` and
- * `.debug_str`) for DWARF 2–5. Constants, strings and references follow the payload's
- * byte order; the address-class forms {@link readBytes} decodes are assembled LSB-first
- * either way, so a big-endian `DW_FORM_addr` is misread. Bitfields on a big-endian target
- * are allocated from the opposite end of the storage unit (see {@link bitfieldAbsBitOffset}).
+ * `.debug_str`) for DWARF 2–5. Constants, strings, references and addresses all follow
+ * the payload's byte order. Bitfields on a big-endian target are allocated from the
+ * opposite end of the storage unit (see {@link bitfieldAbsBitOffset}).
  * 64-bit DWARF is not supported (the ELFs are 32-bit).
  */
 import { ElfFile } from './elf.js';
@@ -943,7 +942,16 @@ export class TypeIndex {
     member: Die,
   ): Pick<
     StructMember,
-    'signed' | 'pointer' | 'pointeeSize' | 'pointeeSigned' | 'volatile' | 'const' | 'elemSize' | 'elemSigned' | 'length'
+    | 'signed'
+    | 'pointer'
+    | 'pointeeSize'
+    | 'pointeeSigned'
+    | 'volatile'
+    | 'const'
+    | 'elemSize'
+    | 'elemSigned'
+    | 'length'
+    | 'dims'
   > {
     const cv = { volatile: false, const: false };
     const die = this.#stripTypedefs(member.attrs.get(DW_AT_type), cv);
@@ -1530,17 +1538,18 @@ function readForm(
 }
 
 /**
- * Read `n` little-endian bytes, returning the low 32 bits. Bytes at index ≥ 4 are
- * consumed (to advance the cursor) but don't contribute — JS bitwise ops are 32-bit,
- * so OR-ing them in would wrap the shift mod 32 and corrupt the low word. Meaningful
- * values therefore require n ≤ 4; for n = 8 (data8/ref8) the high word is dropped.
+ * Read `n` bytes in the payload's byte order, returning the low 32 bits. Bytes outside
+ * the low word are consumed (to advance the cursor) but don't contribute — JS bitwise ops
+ * are 32-bit, so OR-ing them in would wrap the shift mod 32 and corrupt the low word.
+ * Meaningful values therefore require n ≤ 4; for n = 8 (data8/ref8) the high word is dropped.
  */
 function readBytes(c: Cursor, n: number): number {
   let value = 0;
   for (let i = 0; i < n; i++) {
     const byte = c.u8();
-    if (i < 4) {
-      value |= byte << (8 * i);
+    const place = c.littleEndian ? i : n - 1 - i;
+    if (place < 4) {
+      value |= byte << (8 * place);
     }
   }
   return value >>> 0;

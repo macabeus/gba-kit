@@ -221,10 +221,23 @@ export const IO_REGISTERS: IoRegisterDef[] = [
 
 const BY_ADDRESS = new Map(IO_REGISTERS.map((r) => [r.address, r]));
 
-/** The register at (or containing) `address`, or null. */
+/**
+ * The register at `address`, or the one whose bytes it falls in: a byte or halfword
+ * write lands part-way into a register as readily as at its start.
+ */
 export function ioRegisterAt(address: number): IoRegisterDef | null {
   const a = address >>> 0;
-  return BY_ADDRESS.get(a) ?? BY_ADDRESS.get(a & ~1) ?? BY_ADDRESS.get(a & ~3) ?? null;
+  const exact = BY_ADDRESS.get(a);
+  if (exact) {
+    return exact;
+  }
+  for (const base of [a & ~1, a & ~3]) {
+    const def = BY_ADDRESS.get(base);
+    if (def && a < base + def.size) {
+      return def;
+    }
+  }
+  return null;
 }
 
 export interface IoRegisterValue extends IoRegisterDef {
