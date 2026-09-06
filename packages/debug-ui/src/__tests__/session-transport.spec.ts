@@ -247,6 +247,13 @@ describe('session transport', () => {
           calls.push(`load:${nameOrPath}`);
           return store.get(nameOrPath.replace('/states/', '')) ?? null;
         },
+        rename: async (nameOrPath, to) => {
+          const from = nameOrPath.replace('/states/', '');
+          store.set(to, store.get(from)!);
+          store.delete(from);
+          return `/states/${to}`;
+        },
+        remove: async (nameOrPath) => store.delete(nameOrPath.replace('/states/', '')),
       },
     });
     await transport.request('gba-kit/stepFrame');
@@ -258,6 +265,47 @@ describe('session transport', () => {
     expect(await frameOf(transport)).toBe(1);
     await expect(transport.request('gba-kit/loadState', { name: 'nowhere' })).rejects.toThrow('no such state');
     expect(calls).toEqual(['save:here:1', 'load:/states/here', 'load:nowhere']);
+
+    await transport.request('gba-kit/renameState', { path: '/states/here', to: 'there' });
+    expect((await transport.request('gba-kit/listStates')).states.map((s) => s.name)).toEqual(['there']);
+    expect(await transport.request('gba-kit/deleteState', { path: '/states/there' })).toEqual({ deleted: true });
+    expect((await transport.request('gba-kit/listStates')).states).toEqual([]);
+  });
+
+  it('keeps states in memory when no store is given, with the screen each was saved on', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session);
+    await transport.request('gba-kit/stepFrame');
+    const saved = await transport.request('gba-kit/saveState', {});
+    expect(saved.name).toBe('frame-1');
+    expect(saved.width).toBe(120);
+    expect(saved.height).toBe(80);
+    expect(saved.thumbnail).toBeTruthy();
+
+    const renamed = await transport.request('gba-kit/renameState', { name: 'frame-1', to: 'the first' });
+    expect(renamed).toMatchObject({ name: 'the first', frame: 1, thumbnail: saved.thumbnail });
+    // the old name is gone, and the new one loads
+    await expect(transport.request('gba-kit/loadState', { name: 'frame-1' })).rejects.toThrow('no such state');
+    await transport.request('gba-kit/stepFrame');
+    await transport.request('gba-kit/loadState', { name: 'the first' });
+    expect(await frameOf(transport)).toBe(1);
+
+    await transport.request('gba-kit/saveState', { name: 'other' });
+    await expect(transport.request('gba-kit/renameState', { name: 'other', to: 'the first' })).rejects.toThrow(
+      'already there',
+    );
+    expect(await transport.request('gba-kit/deleteState', { name: 'the first' })).toEqual({ deleted: true });
+    expect(await transport.request('gba-kit/deleteState', { name: 'the first' })).toEqual({ deleted: false });
+    expect((await transport.request('gba-kit/listStates')).states.map((s) => s.name)).toEqual(['other']);
+  });
+
+  it('says so when the store given cannot rename or delete', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session, {
+      states: { list: async () => [], save: async (name) => name, load: async () => null },
+    });
+    await expect(transport.request('gba-kit/renameState', { name: 'x', to: 'y' })).rejects.toThrow('cannot rename');
+    await expect(transport.request('gba-kit/deleteState', { name: 'x' })).rejects.toThrow('cannot delete');
   });
 
   it('maps every control onto the session', async () => {

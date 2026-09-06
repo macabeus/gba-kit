@@ -374,3 +374,78 @@
   display: block;
   margin-bottom: 2px;
 }
+
+/* ─── save state drawer ──────────────────────────────────────────── */
+.gk-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-self: stretch;
+  border-top: 1px solid var(--gk-border);
+  padding-top: 6px;
+}
+.gk-drawer-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  padding: 2px 0;
+  color: var(--gk-dim);
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+.gk-drawer-bar:hover {
+  color: var(--gk-fg);
+}
+.gk-caret {
+  transition: transform 0.15s;
+}
+.gk-caret-open {
+  transform: rotate(180deg);
+}
+.gk-cards {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.gk-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 0 0 auto;
+  width: 120px;
+  padding: 4px;
+  background: var(--gk-panel);
+  border: 1px solid var(--gk-border);
+  border-radius: var(--gk-radius);
+}
+.gk-card-screen {
+  display: block;
+  min-height: 40px;
+  padding: 0;
+  background: #000;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.gk-card-screen:hover:not(:disabled) {
+  outline: 1px solid var(--gk-accent);
+}
+.gk-card-screen:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.gk-card-name {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gk-card-actions {
+  justify-content: flex-end;
+}

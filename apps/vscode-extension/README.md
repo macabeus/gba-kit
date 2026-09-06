@@ -58,8 +58,9 @@ stale ELF land in the wrong places).
   `u32(addr)`, registers, `frame`/`scanline`/`cycle`, symbols, `a.b[3].c`
   paths, enumerators, `&symbol`, labels.
 - **GBA: Show Screen**: the display with keyboard (arrows, Z, X, Enter,
-  Backspace, A, S) and gamepad input, audio, run/pause, frame step, rewind and
-  input recording.
+  Backspace, A, S) and gamepad input, audio, run/pause, frame step, rewind,
+  input recording, and a drawer of this ROM's save states, each shown as the
+  screen it was saved on, to load, rename or delete.
 - **GBA: Show Tools**: I/O registers decoded, palette, tiles, tilemaps, sprites,
   the instruction trace, the hardware event log, memory search, labels (with
   `.sym` import and export), save states, recordings.

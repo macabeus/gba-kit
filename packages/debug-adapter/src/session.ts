@@ -15,6 +15,7 @@ import {
   type EventBreakpointKind,
   type InputRecording,
   REGISTER_NAMES,
+  type SaveStateFile,
   type Scope,
   type SearchOptions,
   Session,
@@ -22,6 +23,8 @@ import {
   type VarNode,
   hex8,
   regionOf,
+  renameSaveState,
+  saveStateMeta,
   splitAssignment,
 } from '@gba-kit/debug-core';
 import { createNodeHost, fileExists } from '@gba-kit/debug-core/node';
@@ -99,7 +102,8 @@ const MAX_READ_MEMORY = 16 * 1024 * 1024;
 /** bytes one data breakpoint may watch: a whole RAM region at most, never all of memory */
 const MAX_WATCH_BYTES = 0x40000;
 /** how much of a save state holds its metadata (the snapshot follows; see `encodeSaveState`) */
-const STATE_HEAD_BYTES = 1024;
+/** enough of a state file for its metadata, whose largest key is the 120×80 screen it was saved on */
+const STATE_HEAD_BYTES = 64 * 1024;
 const DATA_ACCESS: readonly DataAccess[] = ['read', 'write', 'readWrite'];
 
 /**
@@ -241,12 +245,22 @@ function existingFile(file: string, what: string): string {
   return file;
 }
 
-interface StateMeta {
-  format?: string;
-  name?: string;
-  frame?: number;
-  createdAt?: string;
-  romHash?: string;
+type StateMeta = Partial<Omit<SaveStateFile, 'snapshot'>>;
+
+/** The arguments of one `gba-kit/*` request. */
+type Args<K extends GbaKitCommand> = NonNullable<GbaKitRequests[K]['args']>;
+
+/** What a client is told about a saved state. */
+function stateInfo(name: string, file: string, meta: StateMeta | null): SavedStateInfo {
+  return {
+    name,
+    path: file,
+    frame: meta?.frame ?? 0,
+    createdAt: meta?.createdAt ?? '',
+    thumbnail: meta?.thumbnail?.rgba,
+    width: meta?.thumbnail?.width,
+    height: meta?.thumbnail?.height,
+  };
 }
 
 export class GbaDebugSession extends DebugSession {
@@ -1242,7 +1256,6 @@ export class GbaDebugSession extends DebugSession {
     args: NonNullable<GbaKitRequests[C]['args']>,
     response: DebugProtocol.Response,
   ): Promise<GbaKitRequests[C]['body'] | typeof SENT> {
-    type Args<K extends GbaKitCommand> = NonNullable<GbaKitRequests[K]['args']>;
     switch (command) {
       case 'gba-kit/state':
         return this.#stateBody();
@@ -1375,6 +1388,10 @@ export class GbaDebugSession extends DebugSession {
       }
       case 'gba-kit/listStates':
         return { states: await this.#listStates(s) };
+      case 'gba-kit/renameState':
+        return this.#renameState(s, args as Args<'gba-kit/renameState'>);
+      case 'gba-kit/deleteState':
+        return { deleted: await this.#deleteState(s, args as Args<'gba-kit/deleteState'>) };
       case 'gba-kit/ppu':
         return this.#ppu(s, args as PpuArguments);
       case 'gba-kit/ioRegisters':
@@ -1487,23 +1504,24 @@ export class GbaDebugSession extends DebugSession {
   async #saveState(session: Session, name?: string): Promise<SavedStateInfo> {
     const stateName = name?.trim() || `frame-${session.frame}`;
     const file = this.#statePath(session, stateName);
-    await this.#files(session).writeText(file, session.saveState(stateName));
+    const text = session.saveState(stateName);
+    await this.#files(session).writeText(file, text);
     this.#log(`gba-kit: state '${stateName}' saved to ${file}\n`);
-    return { name: stateName, path: file, frame: session.frame, createdAt: new Date().toISOString() };
+    return stateInfo(stateName, file, saveStateMeta(text));
   }
 
   /**
-   * The text of a saved state, by name or by a path `saveState` / `listStates`
-   * gave out. Only the states directory is read from: a state name is the request's
+   * The file a saved state names, by name or by a path `saveState` / `listStates`
+   * gave out. Only the states directory is reached: a state name is the request's
    * whole reach into the file system.
    */
-  async #readState(session: Session, args: { name?: unknown; path?: unknown }): Promise<string> {
+  #stateFile(session: Session, args: { name?: unknown; path?: unknown }): string {
     const dir = path.resolve(this.#statesDir(session));
     let file: string;
     if (args.path !== undefined) {
       file = path.resolve(dir, needString(args.path, 'path'));
     } else if (args.name !== undefined) {
-      // `#saveState` trims before naming the file; loading has to trim the same way
+      // `#saveState` trims before naming the file; reaching it has to trim the same way
       const name = needString(args.name, 'name').trim();
       if (!name) {
         throw new Error("'name' is empty");
@@ -1515,6 +1533,12 @@ export class GbaDebugSession extends DebugSession {
     if (!file.startsWith(dir + path.sep)) {
       throw new Error(`state files live under ${dir}`);
     }
+    return file;
+  }
+
+  /** The text of a saved state; throws when it is not there. */
+  async #readState(session: Session, args: { name?: unknown; path?: unknown }): Promise<string> {
+    const file = this.#stateFile(session, args);
     const text = await this.#files(session)
       .readText(file)
       .catch(() => null);
@@ -1522,6 +1546,54 @@ export class GbaDebugSession extends DebugSession {
       throw new Error(`no such state: ${path.basename(file)}`);
     }
     return text;
+  }
+
+  /**
+   * Give a saved state another name. The file is named after the state, so it moves
+   * with it; a rename onto a name already taken is refused rather than overwriting it.
+   */
+  async #renameState(session: Session, args: Args<'gba-kit/renameState'>): Promise<SavedStateInfo> {
+    const files = this.#files(session);
+    const from = this.#stateFile(session, args);
+    const to = needString(args.to, 'to').trim();
+    if (!to) {
+      throw new Error("'to' is empty");
+    }
+    const target = this.#stateFile(session, { name: to });
+    const text = await this.#readState(session, { path: from });
+    if (target !== from && (await files.readText(target).catch(() => null)) !== null) {
+      throw new Error(`a state named '${to}' is already there`);
+    }
+    const renamed = renameSaveState(text, to);
+    await files.writeText(target, renamed);
+    if (target !== from) {
+      await this.#removeFile(session, from);
+    }
+    return stateInfo(to, target, saveStateMeta(renamed));
+  }
+
+  /** Delete a saved state's file. False when it was already gone. */
+  async #deleteState(session: Session, args: Args<'gba-kit/deleteState'>): Promise<boolean> {
+    const file = this.#stateFile(session, args);
+    if (
+      (await this.#files(session)
+        .readText(file)
+        .catch(() => null)) === null
+    ) {
+      return false;
+    }
+    await this.#removeFile(session, file);
+    this.#log(`gba-kit: state ${path.basename(file)} deleted\n`);
+    return true;
+  }
+
+  /** Delete through the host, which need not offer one. */
+  async #removeFile(session: Session, file: string): Promise<void> {
+    const files = this.#files(session);
+    if (!files.remove) {
+      throw new Error('this host cannot delete files');
+    }
+    await files.remove(file);
   }
 
   async #listStates(session: Session): Promise<SavedStateInfo[]> {
@@ -1535,12 +1607,7 @@ export class GbaDebugSession extends DebugSession {
       const file = files.join(dir, entry);
       const meta = await this.#stateMeta(session, file);
       if (meta?.format === 'gba-kit-savestate' && (!meta.romHash || meta.romHash === session.romHash)) {
-        out.push({
-          name: meta.name ?? entry.replace(/\.json$/, ''),
-          path: file,
-          frame: meta.frame ?? 0,
-          createdAt: meta.createdAt ?? '',
-        });
+        out.push(stateInfo(meta.name ?? entry.replace(/\.json$/, ''), file, meta));
       }
     }
     return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -1554,17 +1621,9 @@ export class GbaDebugSession extends DebugSession {
    */
   async #stateMeta(session: Session, file: string): Promise<StateMeta | null> {
     const files = this.#files(session);
-    let text = files.readHead ? await files.readHead(file, STATE_HEAD_BYTES) : null;
-    const snapshotAt = text?.indexOf(',"snapshot":') ?? -1;
-    text = snapshotAt >= 0 ? text!.slice(0, snapshotAt) + '}' : await files.readText(file);
-    if (!text) {
-      return null;
-    }
-    try {
-      return JSON.parse(text) as StateMeta;
-    } catch {
-      return null;
-    }
+    const head = files.readHead ? await files.readHead(file, STATE_HEAD_BYTES) : null;
+    const text = head?.includes(',"snapshot":') ? head : await files.readText(file);
+    return text ? saveStateMeta(text) : null;
   }
 }
 

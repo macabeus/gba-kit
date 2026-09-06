@@ -95,6 +95,8 @@ export interface SaveStateFile {
   name?: string;
   createdAt: string;
   frame: number;
+  /** the screen at the moment it was saved, for a view that lists states */
+  thumbnail?: { width: number; height: number; rgba: string };
   snapshot: unknown;
 }
 
@@ -104,7 +106,7 @@ export interface SaveStateFile {
  */
 export function encodeSaveState(
   snapshot: GbaSnapshot,
-  meta: { romHash?: string; name?: string; frame: number },
+  meta: { romHash?: string; name?: string; frame: number; thumbnail?: SaveStateFile['thumbnail'] },
 ): string {
   const file: SaveStateFile = {
     format: 'gba-kit-savestate',
@@ -113,9 +115,34 @@ export function encodeSaveState(
     name: meta.name,
     createdAt: new Date().toISOString(),
     frame: meta.frame,
+    thumbnail: meta.thumbnail,
     snapshot: encode(snapshot),
   };
   return JSON.stringify(file);
+}
+
+/**
+ * A save state's metadata, from the whole file or from a head that reaches at least
+ * `,"snapshot":`, so a listing skips the snapshot that follows. Null when what came
+ * back is not JSON.
+ */
+export function saveStateMeta(text: string): Omit<SaveStateFile, 'snapshot'> | null {
+  const snapshotAt = text.indexOf(',"snapshot":');
+  try {
+    return JSON.parse(snapshotAt >= 0 ? text.slice(0, snapshotAt) + '}' : text) as Omit<SaveStateFile, 'snapshot'>;
+  } catch {
+    return null;
+  }
+}
+
+/** The same state under another name, without decoding its snapshot. */
+export function renameSaveState(text: string, name: string): string {
+  const file = JSON.parse(text) as SaveStateFile;
+  if (file.format !== 'gba-kit-savestate') {
+    throw new Error('not a gba-kit save state');
+  }
+  const { snapshot, ...meta } = file;
+  return JSON.stringify({ ...meta, name, snapshot });
 }
 
 export function decodeSaveState(text: string): { snapshot: GbaSnapshot; meta: Omit<SaveStateFile, 'snapshot'> } {

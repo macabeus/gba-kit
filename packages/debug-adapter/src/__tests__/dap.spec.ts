@@ -4,14 +4,14 @@
  * test wants another build of it).
  */
 import type { DebugProtocol } from '@vscode/debugprotocol';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { type Server, type Socket, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { type GbaKitRequests, LOG, STREAM, type StateBody } from '../protocol.js';
+import { type GbaKitRequests, LOG, STREAM, type SavedStateInfo, type StateBody } from '../protocol.js';
 import { StreamReader } from '../stream.js';
 import { DapClient } from './client.js';
 
@@ -29,6 +29,11 @@ async function lineOf(file: string, snippet: string): Promise<number> {
     throw new Error(`no line containing ${snippet}`);
   }
   return index + 1;
+}
+
+/** How many bytes a base64 string carries, for asserting a screen's size without decoding it. */
+function base64Bytes(text: string): number {
+  return Buffer.from(text, 'base64').length;
 }
 
 const clients: DapClient[] = [];
@@ -1144,6 +1149,45 @@ describe('emulator requests', () => {
     expect(readText.mock.calls.map((c) => c[0])).not.toContain(saved.path);
     expect((await stopped(client, 'gba-kit/loadState', { path: saved.path })).reason).toBe('restart');
     expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(1);
+
+    // the screen it was saved on comes back with it, small enough to read from the head
+    expect(saved.width).toBe(120);
+    expect(saved.height).toBe(80);
+    expect(base64Bytes(saved.thumbnail!)).toBe(120 * 80 * 4);
+    expect(states[0]!.thumbnail).toBe(saved.thumbnail);
+  });
+
+  it('renames and deletes save states, and refuses a name already taken', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(projectDir);
+    const client = await launch({ projectDir, stopOnEntry: true });
+    const dir = join(projectDir, '.gba-kit', 'states');
+    await client.event('stopped');
+    const one = await client.body<SavedStateInfo>('gba-kit/saveState', { name: 'one' });
+    await stopped(client, 'gba-kit/stepFrame');
+    const two = await client.body<SavedStateInfo>('gba-kit/saveState', { name: 'two' });
+
+    const renamed = await client.body<SavedStateInfo>('gba-kit/renameState', { path: one.path, to: 'the start' });
+    expect(renamed).toMatchObject({ name: 'the start', frame: 0, thumbnail: one.thumbnail });
+    expect(renamed.path).toBe(join(dir, 'the_start.json'));
+    expect(await readdir(dir)).toEqual(['the_start.json', 'two.json'].sort());
+    // the name inside the file moved with it: the listing reads it back, not the file name
+    const listed = await client.body<{ states: SavedStateInfo[] }>('gba-kit/listStates');
+    expect(listed.states.map((s) => s.name).sort()).toEqual(['the start', 'two']);
+    // and it still loads
+    expect((await stopped(client, 'gba-kit/loadState', { path: renamed.path })).reason).toBe('restart');
+    expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(0);
+
+    const clash = await client.request('gba-kit/renameState', { path: two.path, to: 'the start' });
+    expect(clash.success).toBe(false);
+    expect(clash.message).toMatch(/already there/);
+    expect(await readdir(dir)).toEqual(['the_start.json', 'two.json'].sort());
+
+    expect(await client.body('gba-kit/deleteState', { path: two.path })).toEqual({ deleted: true });
+    expect(await readdir(dir)).toEqual(['the_start.json']);
+    // deleting what is not there says so instead of failing
+    expect(await client.body('gba-kit/deleteState', { path: two.path })).toEqual({ deleted: false });
+    expect((await client.body<{ states: SavedStateInfo[] }>('gba-kit/listStates')).states.length).toBe(1);
   });
 
   it('labels persist under the project directory and import symbol files', async () => {

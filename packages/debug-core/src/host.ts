@@ -25,6 +25,11 @@ export interface HostFiles {
   readBytes(path: string): Promise<Uint8Array | null>;
   writeBytes(path: string, bytes: Uint8Array): Promise<void>;
   list(dir: string): Promise<string[]>;
+  /**
+   * Delete a file. Optional: a host without it refuses the requests that delete
+   * (a save state), which is better than pretending the file went away.
+   */
+  remove?(path: string): Promise<void>;
   join(...parts: string[]): string;
 }
 

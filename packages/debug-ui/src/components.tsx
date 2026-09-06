@@ -1,5 +1,7 @@
 /** Small building blocks the panels share. */
-import type { ReactNode } from 'react';
+import { type ReactNode, useEffect, useRef } from 'react';
+
+import { base64ToBytes } from './render.js';
 
 export function Panel({
   title,
@@ -193,6 +195,47 @@ export function attempt(setError: (message: string | null) => void, action: Prom
   action.then(
     () => setError(null),
     (err: Error) => setError(err.message),
+  );
+}
+
+/**
+ * A screen painted from base64 RGBA, at `scale` device pixels per GBA pixel. The
+ * screens a recording and a save state carry are already reduced, so `width` and
+ * `height` come with them rather than being assumed.
+ */
+export function Screenshot({
+  rgba,
+  width,
+  height,
+  scale = 1,
+  label,
+}: {
+  rgba: string;
+  width: number;
+  height: number;
+  scale?: number;
+  label: string;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) {
+      return;
+    }
+    canvas.width = width;
+    canvas.height = height;
+    const image = ctx.createImageData(width, height);
+    image.data.set(base64ToBytes(rgba));
+    ctx.putImageData(image, 0, 0);
+  }, [rgba, width, height]);
+  return (
+    <canvas
+      ref={canvasRef}
+      className="gk-pixels"
+      style={{ width: width * scale, height: height * scale }}
+      aria-label={label}
+    />
   );
 }
 

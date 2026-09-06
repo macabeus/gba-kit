@@ -70,6 +70,10 @@ export interface SavedStateInfo {
   path: string;
   frame: number;
   createdAt: string;
+  /** the screen it was saved on: base64 RGBA, `width` × `height`; absent on a state saved before thumbnails */
+  thumbnail?: string;
+  width?: number;
+  height?: number;
 }
 
 /** An input recording as `gba-kit/recordStop` hands it out: the log, and the same as a `press`/`wait` script. */
@@ -155,6 +159,10 @@ export interface GbaKitRequests {
   /** Load a saved state by name, or by a `path` that `saveState` or `listStates` gave out (only the states directory is read). */
   'gba-kit/loadState': { args: { name?: string; path?: string }; body: undefined };
   'gba-kit/listStates': { args?: Record<string, never>; body: { states: SavedStateInfo[] } };
+  /** Rename a saved state, by the same `name` or `path` `loadState` takes; the file is renamed with it. */
+  'gba-kit/renameState': { args: { name?: string; path?: string; to: string }; body: SavedStateInfo };
+  /** Delete a saved state, by the same `name` or `path` `loadState` takes. */
+  'gba-kit/deleteState': { args: { name?: string; path?: string }; body: { deleted: boolean } };
 
   /** A PPU view; a `tiles` request answers `TILES.defaultCount` tiles unless told how many, at most `TILES.maxCount`. */
   'gba-kit/ppu': { args: PpuArguments; body: PpuBody };

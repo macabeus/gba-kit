@@ -6,7 +6,13 @@
  * notification after everything that changes the state body — so a panel sees no
  * difference between the two.
  */
-import { EVENT_BREAKPOINT_KINDS, type InputRecording, type Session } from '@gba-kit/debug-core';
+import {
+  EVENT_BREAKPOINT_KINDS,
+  type InputRecording,
+  type Session,
+  renameSaveState,
+  saveStateMeta,
+} from '@gba-kit/debug-core';
 import {
   AUDIO_SAMPLE_RATE,
   type GbaKitCommand,
@@ -15,6 +21,7 @@ import {
   type PpuArguments,
   type PpuBody,
   STREAM,
+  type SavedStateInfo,
   type StateBody,
   entryCount,
   rewindFrameCount,
@@ -25,13 +32,42 @@ import type { PanelId } from './panels/DebugPanels.js';
 import type { ControlAction, Transport } from './transport.js';
 
 export interface SessionTransportOptions {
-  /** where a save state goes; without it, states live in memory for the page's lifetime */
+  /**
+   * Where a save state goes; without it, states live in memory for the page's
+   * lifetime. A store that leaves out `rename` or `remove` is read-only in those
+   * respects, and the request says so rather than pretending it worked.
+   */
   states?: {
-    list(): Promise<Array<{ name: string; path: string; frame: number; createdAt: string }>>;
+    list(): Promise<SavedStateInfo[]>;
     save(name: string, text: string, frame: number): Promise<string>;
     load(nameOrPath: string): Promise<string | null>;
+    rename?(nameOrPath: string, to: string): Promise<string>;
+    remove?(nameOrPath: string): Promise<boolean>;
   };
   openText?: Transport['openText'];
+}
+
+/** Which state a request names, rejected the way the adapter rejects it so one message serves both. */
+function stateKey(name: string | undefined, path: string | undefined): string {
+  const key = (path ?? name ?? '').trim();
+  if (!key) {
+    throw new Error(path !== undefined ? "'path' is empty" : "'name' is empty");
+  }
+  return key;
+}
+
+/** What a client is told about a saved state, read back from the state itself. */
+function infoOf(name: string, path: string, text: string): SavedStateInfo {
+  const meta = saveStateMeta(text);
+  return {
+    name,
+    path,
+    frame: meta?.frame ?? 0,
+    createdAt: meta?.createdAt ?? '',
+    thumbnail: meta?.thumbnail?.rgba,
+    width: meta?.thumbnail?.width,
+    height: meta?.thumbnail?.height,
+  };
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -167,15 +203,11 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         if (!options.states) {
           memoryStates.set(name, { text, frame: session.frame, createdAt });
         }
-        return { name, path, frame: session.frame, createdAt } as never;
+        return { ...infoOf(name, path, text), createdAt } as never;
       }
       case 'gba-kit/loadState': {
         const { name, path } = a as A<'gba-kit/loadState'>;
-        // named the same way the adapter names it, so a client reads one rejection either way
-        const key = (path ?? name ?? '').trim();
-        if (!key) {
-          throw new Error(path !== undefined ? "'path' is empty" : "'name' is empty");
-        }
+        const key = stateKey(name, path);
         const text = options.states ? await options.states.load(key) : (memoryStates.get(key)?.text ?? null);
         if (text === null) {
           throw new Error(`no such state: ${key}`);
@@ -186,13 +218,48 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       case 'gba-kit/listStates': {
         const states = options.states
           ? await options.states.list()
-          : [...memoryStates.entries()].map(([name, s]) => ({
-              name,
-              path: name,
-              frame: s.frame,
-              createdAt: s.createdAt,
-            }));
+          : [...memoryStates.entries()].map(([name, s]) => ({ ...infoOf(name, name, s.text), createdAt: s.createdAt }));
         return { states } as never;
+      }
+      case 'gba-kit/renameState': {
+        const { name, path, to } = a as A<'gba-kit/renameState'>;
+        const key = stateKey(name, path);
+        const target = to.trim();
+        if (!target) {
+          throw new Error("'to' is empty");
+        }
+        if (options.states) {
+          if (!options.states.rename) {
+            throw new Error('this store cannot rename states');
+          }
+          const at = await options.states.rename(key, target);
+          const text = await options.states.load(at);
+          return (
+            text === null ? { name: target, path: at, frame: 0, createdAt: '' } : infoOf(target, at, text)
+          ) as never;
+        }
+        const held = memoryStates.get(key);
+        if (!held) {
+          throw new Error(`no such state: ${key}`);
+        }
+        if (target !== key && memoryStates.has(target)) {
+          throw new Error(`a state named '${target}' is already there`);
+        }
+        const text = renameSaveState(held.text, target);
+        memoryStates.delete(key);
+        memoryStates.set(target, { ...held, text });
+        return { ...infoOf(target, target, text), createdAt: held.createdAt } as never;
+      }
+      case 'gba-kit/deleteState': {
+        const { name, path } = a as A<'gba-kit/deleteState'>;
+        const key = stateKey(name, path);
+        if (options.states) {
+          if (!options.states.remove) {
+            throw new Error('this store cannot delete states');
+          }
+          return { deleted: await options.states.remove(key) } as never;
+        }
+        return { deleted: memoryStates.delete(key) } as never;
       }
       case 'gba-kit/ppu':
         return ppu(a as PpuArguments) as never;

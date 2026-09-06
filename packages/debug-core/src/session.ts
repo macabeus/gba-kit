@@ -46,7 +46,7 @@ import { Program } from './program.js';
 import { BUTTON_COUNT, type InputRecording, type RecordedTake, recordingToScript } from './recorder.js';
 import { RewindHistory, type RewindOptions } from './rewind.js';
 import { type EventEntry, Ring, type TraceEntry } from './rings.js';
-import { decodeSaveState, encodeSaveState } from './snapshot-codec.js';
+import { bytesToBase64, decodeSaveState, encodeSaveState } from './snapshot-codec.js';
 import type { SourceMapperOptions } from './source-map.js';
 import {
   type StepContext,
@@ -1538,8 +1538,15 @@ export class Session {
 
   // ─── save states ───────────────────────────────────────────────────
 
+  /** The machine as a save state, with the screen it was saved on for a view that lists states. */
   saveState(name?: string): string {
-    return encodeSaveState(this.machine.snapshot(), { romHash: this.romHash, name, frame: this.machine.frame });
+    const shot = thumbnailRgba(this.machine.framebufferRgba());
+    return encodeSaveState(this.machine.snapshot(), {
+      romHash: this.romHash,
+      name,
+      frame: this.machine.frame,
+      thumbnail: { width: shot.width, height: shot.height, rgba: bytesToBase64(shot.rgba) },
+    });
   }
 
   loadState(text: string): void {

@@ -11,6 +11,7 @@ import { Button, attempt } from '../components.js';
 import { useDebugState } from '../hooks.js';
 import { KEYBOARD_HINT, buttonForKey, gamepadMask } from '../keys.js';
 import type { Transport } from '../transport.js';
+import { SaveStateDrawer } from './SaveStateDrawer.js';
 
 export interface ScreenPanelProps {
   transport: Transport;
@@ -22,6 +23,8 @@ export interface ScreenPanelProps {
   rewindFrames?: number;
   /** offer an audio toggle (default true; needs a host that streams audio) */
   audio?: boolean;
+  /** offer the save state drawer under the screen (default true) */
+  saveStates?: boolean;
 }
 
 export function ScreenPanel({
@@ -30,6 +33,7 @@ export function ScreenPanel({
   controls = true,
   rewindFrames = 60,
   audio = true,
+  saveStates = true,
 }: ScreenPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const state = useDebugState(transport);
@@ -227,6 +231,7 @@ export function ScreenPanel({
         {error && <span className="gk-bad"> · {error}</span>}
       </div>
       <div className="gk-hint">Click the screen, then: {KEYBOARD_HINT}</div>
+      {saveStates && <SaveStateDrawer transport={transport} stopped={stopped} />}
     </div>
   );
 }

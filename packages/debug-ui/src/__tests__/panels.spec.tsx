@@ -7,11 +7,16 @@ import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
+import { SaveStatesView } from '../panels/SaveStateDrawer.js';
 import { ScreenPanel } from '../panels/ScreenPanel.js';
 import type { Transport } from '../transport.js';
 
 const current = vi.hoisted(() => ({ state: null as StateBody | null }));
-vi.mock('../hooks.js', () => ({ useDebugState: () => current.state }));
+// only the state hook is stood in for; the rest run as they are, with no host to answer them
+vi.mock(import('../hooks.js'), async (importOriginal) => ({
+  ...(await importOriginal()),
+  useDebugState: () => current.state,
+}));
 
 const transport = {
   request: () => Promise.reject(new Error('not in this test')),
@@ -32,6 +37,7 @@ function stoppedAt(frame: number, extra: Partial<StateBody> = {}): StateBody {
     epoch: 0,
     history: { earliestFrame: 0, keyframes: 1, bytes: 0, recording: false, recordingStart: null },
     recording: false,
+    replaying: false,
     tracing: false,
     ...extra,
   };
@@ -61,6 +67,38 @@ describe('screen panel controls', () => {
     expect(html).toContain('aria-label="Unmute sound"');
     expect(html).toContain('aria-pressed="false"');
     expect(renderToString(<ScreenPanel transport={transport} audio={false} />)).not.toContain('Unmute sound');
+  });
+
+  it('carries the save state drawer, which a host can turn off', () => {
+    current.state = stoppedAt(0);
+    const html = renderToString(<ScreenPanel transport={transport} />);
+    expect(html).toContain('gk-drawer-bar');
+    expect(html).toContain('+ Save state');
+    expect(renderToString(<ScreenPanel transport={transport} saveStates={false} />)).not.toContain('gk-drawer');
+  });
+});
+
+describe('save state drawer', () => {
+  it('shows a card per state, newest first, and says where one without a screen sits', () => {
+    const states = [
+      {
+        name: 'the start',
+        path: '/states/the_start.json',
+        frame: 0,
+        createdAt: '',
+        thumbnail: 'AAAAAA==',
+        width: 1,
+        height: 1,
+      },
+      { name: 'boss', path: '/states/boss.json', frame: 900, createdAt: '' },
+    ];
+    const html = renderToString(
+      <SaveStatesView states={states} onLoad={() => {}} onRename={() => {}} onRemove={() => {}} />,
+    );
+    expect(html.indexOf('boss')).toBeLessThan(html.indexOf('the start'));
+    expect(html).toContain('the screen at frame 0');
+    expect(html).toContain('frame 900'); // saved before thumbnails: the frame stands in for the screen
+    expect(html).toContain('Load &#x27;boss&#x27; (frame 900)');
   });
 });
 

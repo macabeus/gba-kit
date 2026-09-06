@@ -41,7 +41,7 @@ export const PANELS: ReadonlyArray<{ id: PanelId; label: string }> = [
   { id: 'events', label: 'Events' },
   { id: 'search', label: 'Memory search' },
   { id: 'labels', label: 'Labels' },
-  { id: 'states', label: 'States' },
+  { id: 'states', label: 'Save states' },
   { id: 'recording', label: 'Recording' },
 ];
 

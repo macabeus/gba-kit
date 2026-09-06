@@ -1,4 +1,4 @@
-import type { StateBody } from '@gba-kit/debug-core/protocol';
+import type { SavedStateInfo, StateBody } from '@gba-kit/debug-core/protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { Transport } from './transport.js';
@@ -76,4 +76,67 @@ export function usePixels(
     image.data.set(pixels.rgba);
     ctx.putImageData(image, 0, 0);
   }, [canvasRef, pixels]);
+}
+
+/**
+ * The save states of this ROM, and the four things a view does with them. Every
+ * action refreshes the list and reports its own failure, so a view renders
+ * `error` and needs no error handling of its own.
+ */
+export function useSaveStates(transport: Transport): {
+  states: SavedStateInfo[];
+  error: string | null;
+  busy: boolean;
+  refresh: () => void;
+  save: (name?: string) => Promise<void>;
+  load: (state: SavedStateInfo) => Promise<void>;
+  rename: (state: SavedStateInfo, to: string) => Promise<void>;
+  remove: (state: SavedStateInfo) => Promise<void>;
+} {
+  const state = useDebugState(transport);
+  const [states, setStates] = useState<SavedStateInfo[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const connected = state !== null;
+
+  const refresh = useCallback(() => {
+    transport
+      .request('gba-kit/listStates')
+      .then((b) => setStates(b.states))
+      .catch((err: Error) => setError(err.message));
+  }, [transport]);
+  useEffect(() => {
+    if (connected) {
+      refresh();
+    }
+  }, [refresh, connected]);
+
+  const act = useCallback(
+    async (what: () => Promise<unknown>, relist: boolean): Promise<void> => {
+      setBusy(true);
+      try {
+        await what();
+        setError(null);
+        if (relist) {
+          refresh();
+        }
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh],
+  );
+
+  return {
+    states,
+    error,
+    busy,
+    refresh,
+    save: (name) => act(() => transport.request('gba-kit/saveState', { name: name?.trim() || undefined }), true),
+    load: (s) => act(() => transport.request('gba-kit/loadState', { path: s.path }), false),
+    rename: (s, to) => act(() => transport.request('gba-kit/renameState', { path: s.path, to }), true),
+    remove: (s) => act(() => transport.request('gba-kit/deleteState', { path: s.path }), true),
+  };
 }

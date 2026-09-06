@@ -2,7 +2,7 @@
  * A host for Node: platform timers plus the file system for `.gba-kit/` files.
  */
 import { existsSync } from 'node:fs';
-import { mkdir, open, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { type Host, type HostFiles, timerHost } from './host.js';
@@ -60,6 +60,9 @@ export const nodeFiles: HostFiles = {
     } catch {
       return [];
     }
+  },
+  async remove(path) {
+    await rm(path, { force: true });
   },
   join,
 };

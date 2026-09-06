@@ -44,6 +44,7 @@ export { TracePanel, TraceView } from './panels/TracePanel.js';
 export { EventsPanel, EventsView, describeEvent } from './panels/EventsPanel.js';
 export { MemorySearchPanel } from './panels/MemorySearchPanel.js';
 export { LabelsPanel, LabelsView } from './panels/LabelsPanel.js';
+export { SaveStateDrawer, SaveStatesView, type SaveStatesViewProps } from './panels/SaveStateDrawer.js';
 export { SaveStatesPanel } from './panels/SaveStatesPanel.js';
 export { RecordingPanel, RecordingsView } from './panels/RecordingPanel.js';
 export { DebugPanels, PANELS, PanelBody, type PanelId } from './panels/DebugPanels.js';

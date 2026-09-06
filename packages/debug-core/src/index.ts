@@ -51,6 +51,8 @@ export {
 export {
   decodeSaveState,
   encodeSaveState,
+  renameSaveState,
+  saveStateMeta,
   base64ToBytes,
   bytesToBase64,
   type SaveStateFile,
