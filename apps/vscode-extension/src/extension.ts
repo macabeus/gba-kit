@@ -73,6 +73,17 @@ class Panels {
     live?.setAudio(this.wantsAudio);
   }
 
+  /**
+   * Make sure a panel exists, leaving one that already does exactly where it is: a
+   * session starting should put the screen up, not pull a tab the user is reading out
+   * from under them.
+   */
+  open(root: Root): void {
+    if (!this.#panels.has(root)) {
+      this.show(root);
+    }
+  }
+
   show(root: Root): void {
     const existing = this.#panels.get(root);
     if (existing) {
@@ -206,6 +217,9 @@ export function activate(context: vscode.ExtensionContext): void {
       if (session.type !== DEBUG_TYPE) {
         return;
       }
+      // The screen is what a session is for, so it comes up with one; it subscribes
+      // before the stream is attached, so the first frame reaches it.
+      panels.open('screen');
       const attach = attachStream(session, inline.get(session.id) ?? null, panels, output);
       pending.set(session.id, attach);
       attach.then(

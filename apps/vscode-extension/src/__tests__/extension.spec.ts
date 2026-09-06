@@ -58,6 +58,8 @@ const stub = vi.hoisted(() => ({
   terminate: [] as Array<(e: unknown) => void>,
   commands: new Map<string, (...args: unknown[]) => unknown>(),
   panels: [] as unknown[],
+  /** the view id of each panel created, in order */
+  created: [] as string[],
   log: [] as string[],
   createPanel: null as (() => unknown) | null,
 }));
@@ -76,9 +78,10 @@ vi.mock('vscode', () => {
     Uri: { joinPath: (base: { path: string }, ...parts: string[]) => uri([base.path, ...parts].join('/')) },
     window: {
       createOutputChannel: () => ({ appendLine: (line: string) => stub.log.push(line), dispose() {} }),
-      createWebviewPanel: () => {
+      createWebviewPanel: (id: string) => {
         const panel = stub.createPanel!();
         stub.panels.push(panel);
+        stub.created.push(id);
         return panel;
       },
       showWarningMessage: () => undefined,
@@ -164,6 +167,8 @@ describe('extension', () => {
     const gate = new Promise<void>((r) => (release = r));
     const dead = fakeSession('dead', gate);
     stub.start.forEach((l) => l(dead));
+    // a session brings the screen up on its own, before its stream is even attached
+    expect(stub.created).toEqual(['gba-kit.screen']);
     await until(() => dead.calls.some((c) => c.command === 'gba-kit/stream'));
     const pipes = boundPipes();
     stub.terminate.forEach((l) => l(dead));
@@ -174,7 +179,8 @@ describe('extension', () => {
       expect(boundPipes()).toEqual([]);
     }
 
-    stub.commands.get('gba-kit.showScreen')!();
+    stub.commands.get('gba-kit.showScreen')!(); // the panel is already up: revealed, not stacked
+    expect(stub.created).toEqual(['gba-kit.screen']);
     const screen = stub.panels[0] as FakePanel;
     screen.deliver({ type: 'subscribe', what: 'state' });
     await wait(20);
