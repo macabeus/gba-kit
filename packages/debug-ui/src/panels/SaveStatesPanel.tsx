@@ -6,9 +6,10 @@
 import type { SavedStateInfo } from '@gba-kit/debug-core/protocol';
 import { useState } from 'react';
 
-import { Button, EditableName, Empty, Icon, Screenshot } from '../components.js';
+import { Button, EditableName, Empty, Icon } from '../components.js';
 import { useDebugState, useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
+import { SaveStateActions, SaveStateScreen, useRenaming } from './save-states.js';
 
 export function SaveStatesPanel({ transport }: { transport: Transport }) {
   const state = useDebugState(transport);
@@ -22,7 +23,7 @@ export function SaveStatesPanel({ transport }: { transport: Transport }) {
 
   return (
     <div className="gk-col">
-      <div className="gk-row" style={{ padding: '6px 10px 0' }}>
+      <div className="gk-row gk-controls">
         <input
           className="gk-input gk-fill"
           placeholder={`name (default: frame-${state?.frame ?? 0})`}
@@ -38,11 +39,7 @@ export function SaveStatesPanel({ transport }: { transport: Transport }) {
           <Icon name="refresh" />
         </Button>
       </div>
-      {saves.error && (
-        <span className="gk-bad gk-small" style={{ padding: '0 10px' }}>
-          {saves.error}
-        </span>
-      )}
+      {saves.error && <span className="gk-bad gk-small gk-note">{saves.error}</span>}
       {saves.states.length === 0 ? (
         <Empty>No save states for this ROM. They live under the project's .gba-kit/states/.</Empty>
       ) : (
@@ -76,28 +73,18 @@ function SaveStateRow({
   saves: ReturnType<typeof useSaveStates>;
   disabled: boolean;
 }) {
-  const [renaming, setRenaming] = useState(false);
+  const [renaming, rename, done] = useRenaming();
 
   return (
     <tr>
       <td>
-        {state.thumbnail && state.width && state.height ? (
-          <Screenshot
-            rgba={state.thumbnail}
-            width={state.width}
-            height={state.height}
-            scale={1}
-            label={`the screen at frame ${state.frame}`}
-          />
-        ) : (
-          <span className="gk-muted gk-small">no screen</span>
-        )}
+        <SaveStateScreen state={state} scale={1} />
       </td>
       <td>
         <EditableName
           name={state.name}
           editing={renaming}
-          onStop={() => setRenaming(false)}
+          onStop={done}
           onRename={(to) => void saves.rename(state, to)}
         />
       </td>
@@ -109,24 +96,12 @@ function SaveStateRow({
             <Icon name="debug-restart" />
             Load
           </Button>
-          <Button
-            kind="icon"
-            onClick={() => setRenaming(true)}
-            disabled={saves.busy}
-            title="Rename"
-            label={`Rename '${state.name}'`}
-          >
-            <Icon name="edit" />
-          </Button>
-          <Button
-            kind="icon danger"
-            onClick={() => void saves.remove(state)}
-            disabled={saves.busy}
-            title="Delete"
-            label={`Delete '${state.name}'`}
-          >
-            <Icon name="trash" />
-          </Button>
+          <SaveStateActions
+            name={state.name}
+            busy={saves.busy}
+            onRename={rename}
+            onRemove={() => void saves.remove(state)}
+          />
         </div>
       </td>
     </tr>

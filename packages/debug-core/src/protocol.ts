@@ -21,8 +21,8 @@ import type { SearchOptions } from './memory-search.js';
 import { type BackgroundInfo, type SpriteInfo, type TilemapSnapshot, screenToJson } from './ppu.js';
 import type { InputRecording, RecordedTake } from './recorder.js';
 import type { EventEntry, TraceEntry } from './rings.js';
-import type { HistoryInfo, Position, SessionState, StopReason } from './session.js';
-import type { SaveStateFile } from './snapshot-codec.js';
+import type { HistoryInfo, Position, Session, SessionState, StopReason } from './session.js';
+import { type SaveStateFile, bytesToBase64 } from './snapshot-codec.js';
 
 /** What the head of a save-state file says about it. */
 export type SaveStateMeta = Partial<Omit<SaveStateFile, 'snapshot'>>;
@@ -273,6 +273,45 @@ export const STREAM = {
  * stream's audio payload, an in-process transport) reports the same rate.
  */
 export const AUDIO_SAMPLE_RATE = 32768;
+
+/** The screen as `gba-kit/frame` answers it: the whole framebuffer, base64. */
+export function frameBody(session: Session): GbaKitRequests['gba-kit/frame']['body'] {
+  return {
+    width: STREAM.width,
+    height: STREAM.height,
+    frame: session.frame,
+    rgba: bytesToBase64(session.machine.framebufferRgba()),
+  };
+}
+
+/**
+ * One of the PPU views, as `gba-kit/ppu` answers it. The arguments come from a
+ * client, so what they say a number is, is read as one.
+ */
+export function ppuBody(session: Session, args: PpuArguments): PpuBody {
+  switch (args.kind) {
+    case 'palette':
+      return { kind: 'palette', ...session.palette() };
+    case 'tiles': {
+      const tiles = session.tiles(Number(args.charBase) >>> 0, args.bpp === 8 ? 8 : 4, tileCount(args.count));
+      return {
+        kind: 'tiles',
+        charBase: tiles.charBase,
+        bpp: tiles.bpp,
+        count: tiles.count,
+        pixels: bytesToBase64(tiles.pixels),
+      };
+    }
+    case 'tilemap':
+      return { kind: 'tilemap', tilemap: session.tilemap(Number(args.index)) };
+    case 'sprites':
+      return { kind: 'sprites', sprites: session.sprites() };
+    case 'backgrounds':
+      return { kind: 'backgrounds', ...session.backgrounds() };
+    default:
+      throw new Error(`unknown ppu view '${(args as { kind: string }).kind}'`);
+  }
+}
 
 /**
  * A take as a body carries it: the screen as base64, the rest as the session holds

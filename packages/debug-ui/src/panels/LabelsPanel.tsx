@@ -28,7 +28,7 @@ export function LabelsPanel({ transport }: { transport: Transport }) {
       return;
     }
     try {
-      const b = await transport.request('gba-kit/setLabel', {
+      await transport.request('gba-kit/setLabel', {
         address: address >>> 0,
         label: form.label.trim(),
         comment: form.comment.trim() || undefined,
@@ -75,7 +75,7 @@ export function LabelsPanel({ transport }: { transport: Transport }) {
 
   return (
     <div className="gk-col" style={{ height: '100%' }}>
-      <div className="gk-row" style={{ padding: '6px 10px 0' }}>
+      <div className="gk-row gk-controls">
         <Button onClick={() => setMode('list')} active={mode === 'list'}>
           {labels?.length ?? 0} labels
         </Button>
@@ -84,13 +84,9 @@ export function LabelsPanel({ transport }: { transport: Transport }) {
         </Button>
         <Button onClick={() => void doExport()}>Export</Button>
       </div>
-      {error && (
-        <span className="gk-bad gk-small" style={{ padding: '0 10px' }}>
-          {error}
-        </span>
-      )}
+      {error && <span className="gk-bad gk-small gk-note">{error}</span>}
       {mode === 'import' && (
-        <div className="gk-col" style={{ padding: 10 }}>
+        <div className="gk-col gk-pad">
           <textarea
             className="gk-textarea"
             rows={8}

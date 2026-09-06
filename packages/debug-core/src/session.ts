@@ -634,10 +634,23 @@ export class Session {
 
   continue(): void {
     this.#requireStopped('continue');
+    this.#runPaced();
+  }
+
+  /**
+   * The machine is about to run, however briefly: forget the last stop, say so, and
+   * let anything watching read the new state.
+   */
+  #beginRun(): void {
     this.#armResume();
-    this.#pauseRequested = false;
     this.#setState('running');
     this.#emit('continued');
+  }
+
+  /** Run a frame per tick of the host's clock, until something stops it. */
+  #runPaced(): void {
+    this.#pauseRequested = false;
+    this.#beginRun();
     this.#cancelLoop = this.host.interval(this.#tick, FRAME_MS);
   }
 
@@ -655,13 +668,11 @@ export class Session {
    */
   #runStep(step: StepOutcome, label: string): void {
     this.#requireStopped(label);
-    this.#armResume();
     this.#stepper = step;
     this.#pauseRequested = false;
     this.#busy = true;
     try {
-      this.#setState('running');
-      this.#emit('continued');
+      this.#beginRun();
       const started = this.host.now();
       let frames = 0;
       for (; frames < MAX_STEP_FRAMES && this.host.now() - started < MAX_STEP_MS; frames++) {
@@ -770,18 +781,14 @@ export class Session {
   /** Run to the end of the current hardware frame (a breakpoint inside it still stops). */
   stepFrame(): void {
     this.#requireStopped('step frame');
-    this.#armResume();
-    this.#setState('running');
-    this.#emit('continued');
+    this.#beginRun();
     const stop = this.#runOneFrame();
     this.#stop(stop ?? { reason: 'step', address: this.machine.pc, description: 'frame' });
   }
 
   stepScanline(): void {
     this.#requireStopped('step scanline');
-    this.#armResume();
-    this.#setState('running');
-    this.#emit('continued');
+    this.#beginRun();
     this.#beginFrameIfNew();
     const outcome = this.#drive(() => this.machine.runScanline(this.#predicate));
     const stop = this.#stopRequest;
@@ -1106,18 +1113,20 @@ export class Session {
       return;
     }
     const current = this.#pendingButtons ?? this.machine.buttons;
-    const next = down ? current | (1 << button) : current & ~(1 << button);
-    if (this.#state === 'stopped' && this.#instrInFrame === 0) {
-      this.machine.setButtons(next);
-      this.#pendingButtons = null;
-    } else {
-      this.#pendingButtons = next;
-    }
+    this.#holdButtons(down ? current | (1 << button) : current & ~(1 << button));
   }
 
   /** Set every button at once from a mask (bits 0–9, `BUTTON_NAMES` order); applied like `setButton`. */
   setButtons(mask: number): void {
-    const next = mask & ((1 << BUTTON_COUNT) - 1);
+    this.#holdButtons(mask & ((1 << BUTTON_COUNT) - 1));
+  }
+
+  /**
+   * What is held from now on. It reaches the machine at once only between frames,
+   * where the input log records it; mid-frame it waits for the boundary, so replaying
+   * the log presses what was pressed, when it was pressed.
+   */
+  #holdButtons(next: number): void {
     if (this.#state === 'stopped' && this.#instrInFrame === 0) {
       this.machine.setButtons(next);
       this.#pendingButtons = null;
@@ -1578,12 +1587,8 @@ export class Session {
       }
     }
     this.history.truncateAfter(this.machine.frame);
-    this.#armResume();
-    this.#pauseRequested = false;
     this.#playback = { frames: [...recording.frames], index: 0 };
-    this.#setState('running');
-    this.#emit('continued');
-    this.#cancelLoop = this.host.interval(this.#tick, FRAME_MS);
+    this.#runPaced();
     return true;
   }
 

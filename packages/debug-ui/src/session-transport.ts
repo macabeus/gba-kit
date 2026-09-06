@@ -10,7 +10,6 @@ import {
   EVENT_BREAKPOINT_KINDS,
   type InputRecording,
   type Session,
-  bytesToBase64,
   renameSaveState,
   saveStateMeta,
 } from '@gba-kit/debug-core';
@@ -20,15 +19,14 @@ import {
   type GbaKitRequests,
   LOG,
   type PpuArguments,
-  type PpuBody,
-  STREAM,
   type SavedStateInfo,
   type StateBody,
   entryCount,
+  frameBody,
+  ppuBody,
   rewindFrameCount,
   savedStateInfo,
   takeBody,
-  tileCount,
 } from '@gba-kit/debug-core/protocol';
 
 import type { PanelId } from './panels/DebugPanels.js';
@@ -99,23 +97,6 @@ export function createSessionTransport(session: Session, options: SessionTranspo
     lastState = null;
   });
 
-  const ppu = (args: PpuArguments): PpuBody => {
-    switch (args.kind) {
-      case 'palette':
-        return { kind: 'palette', ...session.palette() };
-      case 'tiles': {
-        const t = session.tiles(args.charBase, args.bpp === 8 ? 8 : 4, tileCount(args.count));
-        return { kind: 'tiles', charBase: t.charBase, bpp: t.bpp, count: t.count, pixels: bytesToBase64(t.pixels) };
-      }
-      case 'tilemap':
-        return { kind: 'tilemap', tilemap: session.tilemap(args.index) };
-      case 'sprites':
-        return { kind: 'sprites', sprites: session.sprites() };
-      case 'backgrounds':
-        return { kind: 'backgrounds', ...session.backgrounds() };
-    }
-  };
-
   /**
    * The labels changed in memory: every view hears of it, then the host's copy is
    * written. A failed write rejects the request that caused it, so the panel that
@@ -156,12 +137,7 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       case 'gba-kit/rewindToFrame':
         return { rewound: session.rewindToFrame((a as A<'gba-kit/rewindToFrame'>).frame) } as never;
       case 'gba-kit/frame':
-        return {
-          width: STREAM.width,
-          height: STREAM.height,
-          frame: session.frame,
-          rgba: bytesToBase64(session.machine.framebufferRgba()),
-        } as never;
+        return frameBody(session) as never;
       case 'gba-kit/stream':
         return { connected: false } as never;
       case 'gba-kit/requestFrame':
@@ -267,7 +243,7 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         return { deleted: memoryStates.delete(key) } as never;
       }
       case 'gba-kit/ppu':
-        return ppu(a as PpuArguments) as never;
+        return ppuBody(session, a as PpuArguments) as never;
       case 'gba-kit/ioRegisters':
         return { registers: session.ioRegisters() } as never;
       case 'gba-kit/trace': {

@@ -1,4 +1,5 @@
 /** Small building blocks the panels share. */
+import type { TimeStamp } from '@gba-kit/debug-core';
 import { type ReactNode, useMemo, useRef } from 'react';
 
 import { usePixels } from './hooks.js';
@@ -316,6 +317,39 @@ export function EditableName({
       }}
     />
   );
+}
+
+/**
+ * When a log entry happened: the three columns the trace and the event log both
+ * begin with. Where it happened follows, which each of them spells its own way.
+ */
+export function StampHeader() {
+  return (
+    <>
+      <th className="gk-right">frame</th>
+      <th className="gk-right">line</th>
+      <th className="gk-right">cycle</th>
+    </>
+  );
+}
+
+export function StampCells({ at }: { at: TimeStamp }) {
+  return (
+    <>
+      <td className="gk-right gk-muted">{at.frame}</td>
+      <td className="gk-right gk-muted">{at.scanline}</td>
+      <td className="gk-right gk-muted">{at.cycle}</td>
+    </>
+  );
+}
+
+/** The row that stands for the entries a log is not showing. Nothing, when it shows them all. */
+export function OmittedRow({ omitted, columns }: { omitted: number; columns: number }) {
+  return omitted > 0 ? (
+    <tr>
+      <td colSpan={columns} className="gk-muted">{`… ${omitted} older not shown`}</td>
+    </tr>
+  ) : null;
 }
 
 /** How many rows a log view mounts at most; older entries are counted, not rendered. */

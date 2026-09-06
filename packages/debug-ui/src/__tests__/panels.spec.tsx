@@ -8,8 +8,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { EditableName } from '../components.js';
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
-import { SaveStatesView } from '../panels/SaveStateDrawer.js';
 import { ScreenPanel } from '../panels/ScreenPanel.js';
+import { SaveStatesView } from '../panels/save-states.js';
 import type { Transport } from '../transport.js';
 
 const current = vi.hoisted(() => ({ state: null as StateBody | null }));

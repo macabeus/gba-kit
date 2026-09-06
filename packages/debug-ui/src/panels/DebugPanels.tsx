@@ -92,7 +92,7 @@ export function PanelBody({ id, transport }: { id: PanelId; transport: Transport
   switch (id) {
     case 'screen':
       return (
-        <div style={{ padding: 8 }}>
+        <div className="gk-pad">
           <ScreenPanel transport={transport} />
         </div>
       );

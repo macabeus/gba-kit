@@ -3,12 +3,12 @@
  * Collapsed it is one bar; open it is a strip of cards, newest first, each of which
  * loads, renames or deletes the state it shows.
  */
-import type { SavedStateInfo } from '@gba-kit/debug-core/protocol';
 import { useState } from 'react';
 
-import { Button, EditableName, Icon, Screenshot } from '../components.js';
+import { Button, Icon } from '../components.js';
 import { useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
+import { SaveStatesView } from './save-states.js';
 
 export function SaveStateDrawer({ transport, stopped }: { transport: Transport; stopped: boolean }) {
   const saves = useSaveStates(transport);
@@ -55,89 +55,6 @@ export function SaveStateDrawer({ transport, stopped }: { transport: Transport; 
             onRemove={(s) => void saves.remove(s)}
           />
         ))}
-    </div>
-  );
-}
-
-export interface SaveStatesViewProps {
-  states: SavedStateInfo[];
-  /** loading needs a stopped machine; renaming and deleting do not */
-  disabled?: boolean;
-  busy?: boolean;
-  onLoad(state: SavedStateInfo): void;
-  onRename(state: SavedStateInfo, to: string): void;
-  onRemove(state: SavedStateInfo): void;
-}
-
-/** The states as cards, newest first: click a screen to load it back. */
-export function SaveStatesView({ states, ...actions }: SaveStatesViewProps) {
-  return (
-    <div className="gk-cards">
-      {[...states].reverse().map((s) => (
-        <SaveStateCard key={s.path} state={s} {...actions} />
-      ))}
-    </div>
-  );
-}
-
-function SaveStateCard({
-  state,
-  disabled,
-  busy,
-  onLoad,
-  onRename,
-  onRemove,
-}: Omit<SaveStatesViewProps, 'states'> & { state: SavedStateInfo }) {
-  const [renaming, setRenaming] = useState(false);
-
-  return (
-    <div className="gk-card">
-      <button
-        type="button"
-        className="gk-card-screen"
-        onClick={() => onLoad(state)}
-        disabled={disabled}
-        title={`Load '${state.name}' (frame ${state.frame})`}
-      >
-        {state.thumbnail && state.width && state.height ? (
-          // no scale: the card is the width, and the screen fits itself to it
-          <Screenshot
-            rgba={state.thumbnail}
-            width={state.width}
-            height={state.height}
-            label={`the screen at frame ${state.frame}`}
-          />
-        ) : (
-          <span className="gk-muted gk-small">frame {state.frame}</span>
-        )}
-      </button>
-      <EditableName
-        name={state.name}
-        editing={renaming}
-        className="gk-card-name"
-        onStop={() => setRenaming(false)}
-        onRename={(to) => onRename(state, to)}
-      />
-      <div className="gk-row gk-card-actions">
-        <Button
-          kind="icon"
-          onClick={() => setRenaming(true)}
-          disabled={busy}
-          title="Rename"
-          label={`Rename '${state.name}'`}
-        >
-          <Icon name="edit" />
-        </Button>
-        <Button
-          kind="icon danger"
-          onClick={() => onRemove(state)}
-          disabled={busy}
-          title="Delete"
-          label={`Delete '${state.name}'`}
-        >
-          <Icon name="trash" />
-        </Button>
-      </div>
     </div>
   );
 }

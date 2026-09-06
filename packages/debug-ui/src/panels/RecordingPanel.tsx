@@ -46,7 +46,7 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
 
   return (
     <div className="gk-col" style={{ height: '100%' }}>
-      <div className="gk-row" style={{ padding: '6px 10px 0' }}>
+      <div className="gk-row gk-controls">
         <Button onClick={() => void toggle()} kind="primary" active={recording} disabled={busy}>
           <Icon name={recording ? 'debug-stop' : 'record'} />
           {recording ? 'Stop recording' : 'Record inputs'}
@@ -61,11 +61,7 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
                 : `${takes.length} recording${takes.length === 1 ? '' : 's'} for this ROM`}
         </span>
       </div>
-      {error && (
-        <span className="gk-bad gk-small" style={{ padding: '0 10px' }}>
-          {error}
-        </span>
-      )}
+      {error && <span className="gk-bad gk-small gk-note">{error}</span>}
       {takes.length === 0 ? (
         <Empty>Recordings of this ROM are listed here, with the screen each begins on.</Empty>
       ) : (

@@ -75,7 +75,7 @@ export function SpritesView({
   const shown = onlyEnabled ? sprites.filter((s) => s.enabled) : sprites;
   return (
     <div className="gk-col">
-      <div className="gk-row" style={{ padding: '6px 10px 0' }}>
+      <div className="gk-row gk-controls">
         <label className="gk-check">
           <input type="checkbox" checked={onlyEnabled} onChange={(e) => onOnlyEnabled(e.target.checked)} /> only enabled
         </label>

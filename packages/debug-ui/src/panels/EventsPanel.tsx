@@ -1,7 +1,7 @@
 import { type EventEntry, ioRegisterAt } from '@gba-kit/debug-core';
 import { useState } from 'react';
 
-import { Button, Empty, Hex, newest } from '../components.js';
+import { Button, Empty, Hex, OmittedRow, StampCells, StampHeader, newest } from '../components.js';
 import { useAtStop } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
@@ -22,7 +22,7 @@ export function EventsPanel({ transport }: { transport: Transport }) {
     });
   return (
     <div className="gk-col">
-      <div className="gk-row" style={{ padding: '6px 10px 0' }}>
+      <div className="gk-row gk-controls">
         {KINDS.map((k) => (
           <label key={k} className="gk-check gk-small">
             <input type="checkbox" checked={!hidden.has(k)} onChange={() => toggle(k)} /> {k}
@@ -64,25 +64,17 @@ export function EventsView({ entries }: { entries: EventEntry[] }) {
     <table className="gk-table">
       <thead>
         <tr>
-          <th className="gk-right">frame</th>
-          <th className="gk-right">line</th>
-          <th className="gk-right">cycle</th>
+          <StampHeader />
           <th>pc</th>
           <th>event</th>
           <th>details</th>
         </tr>
       </thead>
       <tbody>
-        {omitted > 0 && (
-          <tr>
-            <td colSpan={6} className="gk-muted">{`… ${omitted} older not shown`}</td>
-          </tr>
-        )}
+        <OmittedRow omitted={omitted} columns={6} />
         {shown.map((e, i) => (
           <tr key={i}>
-            <td className="gk-right gk-muted">{e.frame}</td>
-            <td className="gk-right gk-muted">{e.scanline}</td>
-            <td className="gk-right gk-muted">{e.cycle}</td>
+            <StampCells at={e} />
             <td>
               <Hex value={e.pc} />
             </td>

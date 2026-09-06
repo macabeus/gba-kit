@@ -10,6 +10,7 @@
  */
 import {
   BUTTON_COUNT,
+  type Breakpoint,
   type DataAccess,
   EVENT_BREAKPOINT_KINDS,
   type EventBreakpointKind,
@@ -43,16 +44,15 @@ import {
   type GbaKitRequests,
   LOG,
   type PpuArguments,
-  type PpuBody,
-  STREAM,
   type SaveStateMeta,
   type SavedStateInfo,
   type StateBody,
   entryCount,
+  frameBody,
+  ppuBody,
   rewindFrameCount,
   savedStateInfo,
   takeBody,
-  tileCount,
 } from './protocol.js';
 import { FrameStream } from './stream.js';
 
@@ -249,6 +249,16 @@ function existingFile(file: string, what: string): string {
     throw new Error(`${what} is not a file: ${file}`);
   }
   return file;
+}
+
+/** A breakpoint as DAP reports it back: what the session made of what was asked for. */
+function breakpointBody(bp: Breakpoint): DebugProtocol.Breakpoint {
+  return {
+    id: bp.id,
+    verified: bp.verified,
+    message: bp.message,
+    instructionReference: bp.addresses[0] !== undefined ? `0x${hex8(bp.addresses[0])}` : undefined,
+  };
 }
 
 /** The arguments of one `gba-kit/*` request. */
@@ -677,9 +687,8 @@ export class GbaDebugSession extends DebugSession {
 
   /** Run an action that moves the machine, which (unless told otherwise) must be stopped. */
   #exec(response: DebugProtocol.Response, action: (session: Session) => void, requireStopped = true): void {
-    const session = this.#session;
+    const session = this.#requireSession(response);
     if (!session) {
-      this.#fail(response, ERR.noSession, 'no emulator session');
       return;
     }
     if (requireStopped && session.state !== 'stopped') {
@@ -906,18 +915,24 @@ export class GbaDebugSession extends DebugSession {
     return value >>> 0;
   }
 
+  /** The session a request needs, or null having already answered that there is none. */
+  #requireSession(response: DebugProtocol.Response): Session | null {
+    if (!this.#session) {
+      this.#fail(response, ERR.noSession, 'no emulator session');
+    }
+    return this.#session;
+  }
+
   /** Answer an inspection request; errors become error responses, never a dead client. */
   #inspect<R extends DebugProtocol.Response>(
     response: R,
     fill: (session: Session) => void,
     code: number = ERR.request,
   ): void {
-    const session = this.#session;
-    if (!session) {
-      this.#fail(response, ERR.noSession, 'no emulator session');
-      return;
+    const session = this.#requireSession(response);
+    if (session) {
+      this.#answer(response, () => fill(session), code);
     }
-    this.#answer(response, () => fill(session), code);
   }
 
   #source(localPath: string): DebugProtocol.Source {
@@ -942,12 +957,9 @@ export class GbaDebugSession extends DebugSession {
       const results = s.setSourceBreakpoints(localPath, specs);
       response.body = {
         breakpoints: results.map((bp, i) => ({
-          id: bp.id,
-          verified: bp.verified,
-          message: bp.message,
+          ...breakpointBody(bp),
           line: bp.line ?? specs[i]!.line,
           source: args.source,
-          instructionReference: bp.addresses[0] !== undefined ? `0x${hex8(bp.addresses[0])}` : undefined,
         })),
       };
     });
@@ -966,12 +978,7 @@ export class GbaDebugSession extends DebugSession {
       this.#breakpoints.functions = specs;
       const results = s.setFunctionBreakpoints(specs);
       response.body = {
-        breakpoints: results.map((bp) => ({
-          id: bp.id,
-          verified: bp.verified,
-          message: bp.message,
-          instructionReference: bp.addresses[0] !== undefined ? `0x${hex8(bp.addresses[0])}` : undefined,
-        })),
+        breakpoints: results.map(breakpointBody),
       };
     });
   }
@@ -989,12 +996,7 @@ export class GbaDebugSession extends DebugSession {
       this.#breakpoints.instructions = specs;
       const results = s.setInstructionBreakpoints(specs);
       response.body = {
-        breakpoints: results.map((bp) => ({
-          id: bp.id,
-          verified: bp.verified,
-          message: bp.message,
-          instructionReference: bp.addresses[0] !== undefined ? `0x${hex8(bp.addresses[0])}` : undefined,
-        })),
+        breakpoints: results.map(breakpointBody),
       };
     });
   }
@@ -1292,15 +1294,8 @@ export class GbaDebugSession extends DebugSession {
         });
         return SENT;
       }
-      case 'gba-kit/frame': {
-        const rgba = s.machine.framebufferRgba();
-        return {
-          width: STREAM.width,
-          height: STREAM.height,
-          frame: s.frame,
-          rgba: Buffer.from(rgba).toString('base64'),
-        };
-      }
+      case 'gba-kit/frame':
+        return frameBody(s);
       case 'gba-kit/stream': {
         const a = args as Args<'gba-kit/stream'>;
         const pipe = needString(a.path, 'path');
@@ -1398,7 +1393,7 @@ export class GbaDebugSession extends DebugSession {
       case 'gba-kit/deleteState':
         return { deleted: await this.#deleteState(s, args as Args<'gba-kit/deleteState'>) };
       case 'gba-kit/ppu':
-        return this.#ppu(s, args as PpuArguments);
+        return ppuBody(s, args as PpuArguments);
       case 'gba-kit/ioRegisters':
         return { registers: s.ioRegisters() };
       case 'gba-kit/trace': {
@@ -1463,31 +1458,6 @@ export class GbaDebugSession extends DebugSession {
   async #labelsChanged(session: Session): Promise<void> {
     await session.saveLabels();
     this.#emit(new Event('gba-kit/labels', { count: session.labels.size }));
-  }
-
-  #ppu(s: Session, args: PpuArguments): PpuBody {
-    switch (args.kind) {
-      case 'palette':
-        return { kind: 'palette', ...s.palette() };
-      case 'tiles': {
-        const t = s.tiles(Number(args.charBase) >>> 0, args.bpp === 8 ? 8 : 4, tileCount(args.count));
-        return {
-          kind: 'tiles',
-          charBase: t.charBase,
-          bpp: t.bpp,
-          count: t.count,
-          pixels: Buffer.from(t.pixels).toString('base64'),
-        };
-      }
-      case 'tilemap':
-        return { kind: 'tilemap', tilemap: s.tilemap(Number(args.index)) };
-      case 'sprites':
-        return { kind: 'sprites', sprites: s.sprites() };
-      case 'backgrounds':
-        return { kind: 'backgrounds', ...s.backgrounds() };
-      default:
-        throw new Error(`unknown ppu view '${(args as { kind: string }).kind}'`);
-    }
   }
 
   #files(session: Session): NonNullable<Session['host']['files']> {

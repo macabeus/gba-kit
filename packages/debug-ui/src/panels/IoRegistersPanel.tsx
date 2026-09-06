@@ -16,7 +16,7 @@ export function IoRegistersPanel({ transport }: { transport: Transport }) {
   }
   return (
     <div className="gk-col">
-      <div className="gk-row" style={{ padding: '6px 10px 0' }}>
+      <div className="gk-row gk-controls">
         <input
           className="gk-input gk-fill"
           placeholder="filter (DISPCNT, DMA, TM…)"

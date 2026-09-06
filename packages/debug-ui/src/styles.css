@@ -79,6 +79,17 @@
   gap: 8px;
   flex-wrap: wrap;
 }
+/* a panel that pads its own edge, the controls at the top of one, and a line of text under them */
+.gk-pad {
+  padding: 8px;
+}
+/* the controls at the top of a panel, and a line of text that lines up under them */
+.gk-controls {
+  padding: 6px 10px 0;
+}
+.gk-note {
+  padding: 0 10px;
+}
 .gk-col {
   display: flex;
   flex-direction: column;

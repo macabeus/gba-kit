@@ -28,6 +28,14 @@ export function base64ToBytes(text: string): Uint8Array {
  * with `palette` (256 packed colors). A 4bpp tile uses the 16-color bank
  * `paletteBank`; index 0 is transparent unless `opaqueZero`.
  */
+/** One opaque pixel of `0xRRGGBB` at byte offset `at`. */
+function putPixel(rgba: Uint8ClampedArray, at: number, color: number): void {
+  rgba[at] = (color >> 16) & 0xff;
+  rgba[at + 1] = (color >> 8) & 0xff;
+  rgba[at + 2] = color & 0xff;
+  rgba[at + 3] = 255;
+}
+
 export function tilesToRgba(
   pixels: Uint8Array,
   count: number,
@@ -52,11 +60,7 @@ export function tilesToRgba(
       const color = palette[bpp === 4 ? paletteBank * 16 + index : index] ?? 0;
       const x = tx + (i & 7);
       const y = ty + (i >> 3);
-      const o = (y * width + x) * 4;
-      rgba[o] = (color >> 16) & 0xff;
-      rgba[o + 1] = (color >> 8) & 0xff;
-      rgba[o + 2] = color & 0xff;
-      rgba[o + 3] = 255;
+      putPixel(rgba, (y * width + x) * 4, color);
     }
   }
   return { width, height, rgba };
@@ -139,11 +143,7 @@ export function spriteToRgba(
         if (sprite.vFlip) {
           y = height - 1 - y;
         }
-        const o = (y * width + x) * 4;
-        rgba[o] = (color >> 16) & 0xff;
-        rgba[o + 1] = (color >> 8) & 0xff;
-        rgba[o + 2] = color & 0xff;
-        rgba[o + 3] = 255;
+        putPixel(rgba, (y * width + x) * 4, color);
       }
     }
   }

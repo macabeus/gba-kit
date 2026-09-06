@@ -37,7 +37,7 @@ export function MemorySearchPanel({ transport }: { transport: Transport }) {
   };
 
   return (
-    <div className="gk-col" style={{ padding: 8 }}>
+    <div className="gk-col gk-pad">
       <div className="gk-row">
         <input
           className="gk-input"

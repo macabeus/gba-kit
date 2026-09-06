@@ -71,7 +71,7 @@ export function TilesPanel({ transport }: { transport: Transport }) {
 
   const bytesPerTile = bpp === 4 ? 32 : 64;
   return (
-    <div className="gk-col" style={{ padding: 8 }}>
+    <div className="gk-col gk-pad">
       <div className="gk-row">
         <Select value={charBase} options={CHAR_BASES} onChange={setCharBase} />
         <Button onClick={() => setBpp(bpp === 4 ? 8 : 4)} title="Bits per pixel">

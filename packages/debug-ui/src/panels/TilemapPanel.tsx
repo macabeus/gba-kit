@@ -48,7 +48,7 @@ export function TilemapPanel({ transport }: { transport: Transport }) {
   const bg = data?.map.background;
   const entry = bg && hover ? data.map.entries[hover.y * bg.width + hover.x] : undefined;
   return (
-    <div className="gk-col" style={{ padding: 8 }}>
+    <div className="gk-col gk-pad">
       <div className="gk-row">
         <Select value={index} options={[0, 1, 2, 3].map((i) => ({ value: i, label: `BG${i}` }))} onChange={setIndex} />
         {bg && (
