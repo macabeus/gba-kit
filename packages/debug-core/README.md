@@ -18,9 +18,9 @@ What a session does:
   instruction addresses, function names, conditions, hit counts (`3`, `>= 3`,
   `% 4`) and logpoints with `{expressions}`. Data breakpoints on a variable path,
   a symbol, a label or an address, for writes, reads or both, which name the
-  writer (or the DMA channel and the instruction that started it). Event
-  breakpoints on VBlank, HBlank, interrupt request/entry, DMA, I/O writes and
-  halts.
+  code that touched it (or the DMA channel and the instruction that started it).
+  Event breakpoints on VBlank, HBlank, interrupt request/entry, DMA, I/O writes
+  and halts.
 - **Steps like gdb.** By instruction, statement (over, into, out), frame and
   scanline. Frames are told apart by their canonical frame address, so recursion
   and leaf functions step correctly. Inlined calls are hidden layers: a step-over
@@ -30,13 +30,13 @@ What a session does:
   through `.debug_frame` (with a link-register fallback for hand-written
   assembly), inlined frames in between, locals and parameters with their location
   at this PC, globals, registers and machine state. Values unfold structs,
-  unions, bitfields, arrays, enums and pointers; scalars in memory or registers
-  are writable.
+  unions, bitfields, arrays, enums and pointers; a scalar that lives in memory is
+  writable, as are the `r0`–`r15` rows of the Registers scope, while a local the
+  compiler kept in a register is shown rather than written.
 - **Evaluates a Mesen-style expression grammar** for conditions, logpoints and
   watches: C operators, `[addr]` / `{addr}` / `u32(addr)` reads, registers,
   `frame` / `scanline` / `cycle`, symbols and `a.b[3].c` paths (locals of the
-  frame included, signed as their C type), enumerators, `&symbol`,
-  labels.
+  frame included, signed as their C type), enumerators, `&symbol`, labels.
 - **Rewinds exactly.** Keyframes (XOR + run-length deltas, a full snapshot every
   N) plus a per-frame input log put the machine back at any earlier position by
   replaying it. `stepBack`, `reverseContinue` (to the previous breakpoint hit) and
@@ -74,7 +74,7 @@ session.continue(); // runs on the host's timer until a stop
 
 // once stopped:
 session.callStack(); // [{ name: 'main', source: { path: '.../main.c', line: 76 }, ... }]
-session.scopes(0); // Locals, Globals, Registers, Machine — each a tree of VarNodes
+session.scopes(0); // Locals, Globals (this file), Registers, Machine — each a tree of VarNodes
 session.evaluate('g_player.pos.x + 1').node.value; // '13 (0xd)'
 session.stepOver();
 session.stepBack(); // exactly one instruction back, replayed

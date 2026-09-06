@@ -44,7 +44,7 @@ export interface WatchpointWrite {
 export interface WatchpointRead {
   /** The watched byte that was read (within the access, clamped to the watch range). */
   address: number;
-  /** Value the read returned, masked to `size` bytes. */
+  /** Value the load returned, masked to `size` bytes — the whole access, not just the watched bytes. */
   value: number;
   /** Access size in bytes (1, 2 or 4). */
   size: number;
@@ -162,8 +162,8 @@ export class GbaSystemBus implements MemoryBus {
 
   /**
    * Register a read watchpoint over [address, address+length); returns a disposer.
-   * Fires after the load, with the value it returned. Only bus loads count: a
-   * debugger's `peek` and the instruction fetch do not.
+   * Fires after the load, with the value it returned. Every load through the bus
+   * counts, the CPU's instruction fetch included; a debugger's `peek` does not.
    */
   addReadWatchpoint(address: number, length: number, onRead: (info: WatchpointRead) => void): () => void {
     const len = length >= 1 ? length : 1;
@@ -809,8 +809,8 @@ export class GbaSystemBus implements MemoryBus {
   // ─── VRAM Mirroring ───────────────────────────────────────────────
 
   /**
-   * Canonical (un-mirrored) address of the byte a write stores to, so writes via a
-   * region mirror match watchpoints registered on the canonical address.
+   * Canonical (un-mirrored) address of the byte an access touches, so a read or write
+   * through a region mirror matches watchpoints registered on the canonical address.
    */
   #canonicalAddress(address: number): number {
     switch ((address >>> 24) & 0xff) {

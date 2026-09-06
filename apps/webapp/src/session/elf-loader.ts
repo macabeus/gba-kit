@@ -4,12 +4,10 @@
  * ELF's loadable bytes match the ROM, so addresses line up.
  */
 
-/** The ELF file from the browser file picker. */
 export async function readElfFile(file: File): Promise<Uint8Array> {
   return new Uint8Array(await file.arrayBuffer());
 }
 
-/** The sidecar ELF the dev server serves at /api/loadElf. */
 export async function fetchElfFromServer(): Promise<Uint8Array> {
   const res = await fetch('/api/loadElf');
   if (!res.ok) {

@@ -31,7 +31,7 @@ function walk(obj: unknown, path: ArrayPath, out: Array<{ path: ArrayPath; array
   }
 }
 
-/** Every typed array of a snapshot, in a stable order. */
+/** Every typed array of a snapshot except `ppu.framebuffer`, in a stable order. */
 export function snapshotArrays(snap: GbaSnapshot): Array<{ path: ArrayPath; array: Uint8Array }> {
   const out: Array<{ path: ArrayPath; array: Uint8Array }> = [];
   walk(snap, [], out);
@@ -95,7 +95,7 @@ export function encodeDelta(base: Uint8Array, next: Uint8Array): Uint8Array {
   return out;
 }
 
-/** Apply a delta produced by {@link encodeDelta} to `base`, in place into a fresh array. */
+/** Apply a delta produced by {@link encodeDelta} to `base`, into a fresh array. */
 export function decodeDelta(base: Uint8Array, delta: Uint8Array): Uint8Array {
   const out = base.slice();
   const view = new DataView(delta.buffer, delta.byteOffset, delta.byteLength);

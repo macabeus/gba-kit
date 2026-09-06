@@ -208,7 +208,11 @@ export function isCodeAddress(address: number): boolean {
   return region === 'rom' || region === 'iwram' || region === 'ewram' || region === 'bios';
 }
 
-/** SHA-256 of a ROM, hex — the identity save states and recordings are bound to. */
+/**
+ * SHA-256 of a ROM, hex — the identity save states and recordings are bound to.
+ * A host without `crypto.subtle` (an insecure origin, say) gets a length-based
+ * stand-in.
+ */
 export async function romHash(rom: Uint8Array): Promise<string> {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) {

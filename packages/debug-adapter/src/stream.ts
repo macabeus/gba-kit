@@ -129,7 +129,7 @@ export class FrameStream {
   }
 
   /**
-   * Send a frame. When the pipe already holds `MAX_BACKLOG` bytes unsent the
+   * Send a frame. When the pipe already holds more than `MAX_BACKLOG` bytes unsent the
    * frame is held instead — replacing (and counting as dropped) an older held one —
    * and written once the pipe drains.
    */

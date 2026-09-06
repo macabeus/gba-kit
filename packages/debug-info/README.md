@@ -15,6 +15,10 @@ queries a source-level debugger needs:
 - **function signatures** (`types.functionSignature`) — return and parameter types of
   every function the ELF compiled from C; `null` means "not compiled here", never
   "takes no arguments".
+- **scopes, variables and unwinding** (`scopes`) — the function and the inlined
+  calls containing a PC, the variables visible there and where they live at that
+  PC (location lists, DWARF expressions, `.debug_frame` CFA), typed value trees,
+  and call-frame unwinding.
 - **the `-g3` macro table** (`macros`, `parseDebugMacinfo`) — the only place an
   address-cast `#define gCounter (*(u16 *)0x03001234)` name survives: a macro leaves
   no symbol and no DIE.
@@ -22,8 +26,10 @@ queries a source-level debugger needs:
 This is the general ELF/DWARF piece of gba-kit, not a GBA-only one:
 
 - **both byte orders** — the order is read from `e_ident` and threaded through the
-  container and the DWARF payload alike. Big-endian bitfields are allocated from
-  the most significant end of the storage unit, and are reported that way.
+  container, the symbol table, the line table and the type payloads. Big-endian
+  bitfields are allocated from the most significant end of the storage unit, and are
+  reported that way. Address-class DWARF forms (`DW_FORM_addr`, so `DW_AT_low_pc`)
+  are assembled LSB-first, so DIE addresses are wrong on a big-endian target.
 - **linked ELFs and relocatable objects** — in a `.o` whose relocations are
   RELA-style (PowerPC), the raw `.debug_*` fields are zeros and the real values sit
   in `.rela.<section>` addends; those are applied on read.
@@ -31,7 +37,9 @@ This is the general ELF/DWARF piece of gba-kit, not a GBA-only one:
 
 It is exercised against real ARM, MIPS and PowerPC toolchain output (see
 [Testing](#testing)). It's a small, dependency-free, DOM-free parser, shared by
-the headless runtime, the scripting engine, and the webapp's source debug view.
+the headless runtime, the scripting engine, the webapp's source debug view and
+`@gba-kit/debug-core` — the session behind the VS Code extension and the DAP
+server.
 For the GBA case: the shipped `.gba` ROM carries no debug info
 (`objcopy -O binary` strips it); load the sidecar ELF — its loadable bytes are
 identical to the ROM, so addresses line up.

@@ -65,11 +65,11 @@ const DMA_IRQ_FLAGS = [IrqFlag.Dma0, IrqFlag.Dma1, IrqFlag.Dma2, IrqFlag.Dma3] a
 export interface DmaTransferInfo {
   source: number;
   destination: number;
-  /** transfer units (halfwords or words) */
+  /** Transfer units (halfwords or words) */
   count: number;
   wordSize: 2 | 4;
   timing: DmaStartTiming;
-  /** the instruction that enabled the channel */
+  /** Instruction that enabled the channel */
   origin: WriteOrigin;
 }
 

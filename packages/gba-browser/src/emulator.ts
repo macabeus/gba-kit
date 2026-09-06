@@ -94,8 +94,8 @@ export class EmulatorBridge {
 
   /**
    * Re-read the PPU framebuffer into the persistent image and the attached canvas.
-   * Call after something else moved the machine (a debug session sharing this `Gba`
-   * renders through its own screen), so the canvas shows the screen as it is now.
+   * Call after something else moved the machine: a debug session sharing this `Gba`
+   * renders its frames through its own screen, not through this bridge.
    */
   refreshFrame(): void {
     this.#renderFrame();
@@ -382,7 +382,7 @@ export class EmulatorBridge {
     snapshot.cpu = this.#gba.armCpu.serialize();
 
     // The thumbnail must show the screen the snapshot holds, whoever moved the
-    // machine last (a debug session's frames never pass through this bridge).
+    // machine last — a debug session's frames never pass through this bridge.
     this.#renderFrame();
 
     // Generate thumbnail (60x40)
@@ -414,8 +414,8 @@ export class EmulatorBridge {
 
     // Restore GBA subsystems (CPU included)
     this.#gba.deserialize(snapshot);
-    // The snapshot restores the buttons that were held when it was taken; the
-    // player's keys are not held now, so release them.
+    // The snapshot restores the buttons held when it was taken, but the player is
+    // not holding them now.
     this.#gba.input.setButtons(0);
 
     // Re-render frame from restored framebuffer

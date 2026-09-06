@@ -21,7 +21,7 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
   const stopped = state?.state === 'stopped';
   const connected = state !== null;
 
-  // Whatever the session has, refreshed when a recording ends. There is nothing to ask
+  // The session's recordings, refreshed when one ends. There is nothing to ask
   // for before a session reports itself, and this refresh happens on its own rather
   // than because the user asked, so a failure leaves the list as it is instead of
   // writing to the error line, which reports what the user just did.
@@ -107,7 +107,7 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
   );
 }
 
-/** The recordings as a grid: the screen each begins on, its script, and how to press it again. Newest first. */
+/** The recordings as a table: the screen each begins on, its script, and how to press it again. Newest first. */
 export function RecordingsView({
   takes,
   disabled,

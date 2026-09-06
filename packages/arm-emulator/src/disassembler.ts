@@ -680,8 +680,8 @@ export interface DisassembledInstruction {
 
 /**
  * Disassemble the Thumb instruction at `address`, reading halfwords through
- * `read16`. A `bl` prefix/suffix pair is presented as one 4-byte `bl <target>`,
- * the way every other disassembler shows it, instead of two halves.
+ * `read16`. A `bl` prefix/suffix pair is presented as one 4-byte `bl <target>`
+ * instead of two halves.
  */
 export function disassembleThumbAt(
   read16: (address: number) => number,

@@ -27,7 +27,7 @@ export interface LineStringSections {
 export interface LineRow {
   /** Absolute address (VMA) of the first byte this row covers. */
   address: number;
-  /** 1-based file index into the unit's file table. */
+  /** File index as the unit numbers its files: 1-based in DWARF 2–4, 0-based in DWARF 5. */
   fileIndex: number;
   /** Resolved file path (dir + name) for convenience. */
   file: string;
@@ -323,7 +323,7 @@ interface FileTables {
   resolveFile(idx: number): string;
 }
 
-/** DWARF 2–4: NUL-terminated directory and file lists, both 1-based (entry 0 is the compilation directory). */
+/** DWARF 2–4: NUL-terminated directory and file lists, both 1-based (directory 0 is the compilation directory). */
 function readLegacyTables(c: Cursor, programStart: number): FileTables {
   const dirs: string[] = ['']; // index 0 = compilation directory (implicit)
   while (c.offset < programStart) {
@@ -441,7 +441,8 @@ function readForm(c: Cursor, form: number, limit: number, strings: LineStringSec
   }
 }
 
-/** The NUL-terminated string at `offset` of a string section (a placeholder when the section is absent). */
+/** The NUL-terminated string at `offset` of a string section (a `<str N>` placeholder when the section
+ * is absent or the offset is past its end). */
 function stringAt(section: Uint8Array | undefined, offset: number): string {
   if (!section || offset >= section.length) {
     return `<str ${offset}>`;
@@ -507,7 +508,7 @@ export class LineTable {
     this.rows = rows;
   }
 
-  /** Every file the table mentions, normalized (`./`, `..` and `\\` folded). */
+  /** Every file the table has code for, normalized (`./`, `..` and `\\` folded). */
   get files(): string[] {
     return [...this.#index().keys()];
   }

@@ -33,9 +33,8 @@ interface BiosCpu {
  */
 
 /**
- * What the HLE BIOS needs from the machine it runs in. Passed per call so two
- * `Gba` instances in one process (two debug sessions, a test next to a session)
- * never share state through this module.
+ * What the HLE BIOS needs from the machine it runs in. Passed per call, so two
+ * `Gba` instances in one process never share state through this module.
  */
 export interface BiosEnv {
   /** IntrWait: tell the interrupt controller which flags end the halt. */
@@ -54,6 +53,7 @@ export interface BiosEnv {
  *
  * @param cpu - The CPU instance
  * @param swiNumber - The SWI function number (0x00-0xFF)
+ * @param env - Hooks back into the machine this call runs in
  */
 export function handleSwi(cpu: BiosCpu, swiNumber: number, env: BiosEnv = {}): void {
   switch (swiNumber) {

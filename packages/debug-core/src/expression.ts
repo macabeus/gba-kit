@@ -57,9 +57,9 @@ export type CompiledExpr = (env: ExprEnv) => number;
 
 /** The widest literal a 32-bit machine holds. */
 const U32_MAX = 0xffffffff;
-/** Longer than this and it is not a condition anyone typed; also bounds the error echo. */
+/** Longer than this and it is not a condition anyone typed. */
 const MAX_LENGTH = 4096;
-/** Deeper nesting than this overflows the recursive-descent parser's stack before it means anything. */
+/** Nesting bound for the recursive-descent parser, so a pathological expression cannot exhaust the stack. */
 const MAX_DEPTH = 128;
 
 const SUBSCRIPT_HINT =
@@ -465,7 +465,6 @@ function apply(op: string, l: Node, r: Node): Node {
   }
 }
 
-/** A comparison's 0/1 from a predicate. */
 function unsignedBool(p: (env: ExprEnv) => boolean): Node {
   return unsigned((env) => (p(env) ? 1 : 0));
 }
@@ -527,7 +526,7 @@ export function splitAssignment(line: string): { target: string; value: string }
   return null;
 }
 
-/** `value` as an expression result reads: decimal, with the hex word for anything past a digit. */
+/** `value` as an expression result reads: decimal, with the hex word beside it. */
 export function formatNumber(value: number): string {
   return `${value} (0x${(value >>> 0).toString(16)})`;
 }

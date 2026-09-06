@@ -29,7 +29,7 @@ export interface ElfSymbol {
    * `STB_LOCAL` / `STB_GLOBAL` / `STB_WEAK`. A debugger joining a C `extern`
    * declaration to storage must only accept a global: a file-static with the same
    * spelling in another translation unit is a different object. Defaults to global
-   * for symbols built without one (tests, older callers).
+   * when absent.
    */
   bind?: number;
   /** Section header index, or `SHN_ABS` / `SHN_UNDEF` / `SHN_COMMON`. Defaults to a defined section. */
@@ -108,8 +108,8 @@ export class SymbolIndex {
     // resolves to it, not just to functions). Linker-defined globals are included
     // because in a decomp they ARE the data globals: an ldscript `gFoo = 0x03000000;`
     // is NOTYPE/SHN_ABS, a `gFoo = .;` inside a section is NOTYPE with that section's
-    // index, and excluding them left addressToSymbol unable to name a single global in
-    // such an ELF. They carry no st_size, so their extent is inferred and reported as
+    // index, and excluding them would leave addressToSymbol unable to name a single global
+    // in such an ELF. They carry no st_size, so their extent is inferred and reported as
     // such — see `exact`.
     this.#all = buildRanges(
       symbols.filter((s) => s.type === STT_FUNC || s.type === STT_OBJECT || s.type === STT_NOTYPE),

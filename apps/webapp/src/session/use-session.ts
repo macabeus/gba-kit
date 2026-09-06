@@ -13,7 +13,7 @@ import { browserStorage, storageFiles } from './browser-files';
 
 export interface DebugSessionHandle {
   session: Session | null;
-  /** bumps on every stop, resume, machine change and label edit: re-read what you show */
+  /** bumps on every stop, resume and label edit: re-read what you show */
   revision: number;
   state: SessionState | 'none';
   error: string | null;
@@ -135,7 +135,7 @@ export function useDebugSession(
     };
   }, [session, active, emulator]);
 
-  // A state loaded while Play is showing is caught up with when Debug is entered.
+  // a state loaded while Play is showing is caught up with on the next Debug entry
   const onStateLoaded = useCallback(() => {
     if (active) {
       sessionRef.current?.resync('a save state was loaded');

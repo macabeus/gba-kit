@@ -138,7 +138,7 @@ export async function run(): Promise<void> {
   await vscode.commands.executeCommand('gba-kit.stepFrame');
   await stepped;
 
-  // the panels open (their contents run in a webview the test cannot read)
+  // the tools panel opens and the screen is revealed (their contents run in a webview the test cannot read)
   await vscode.commands.executeCommand('gba-kit.showScreen');
   await vscode.commands.executeCommand('gba-kit.showTools');
   const screen = (await session.customRequest('gba-kit/frame')) as { rgba: string };

@@ -186,7 +186,10 @@ export class ArmCpu {
   /** Whether the CPU has halted (function returned to sentinel) */
   #halted = false;
 
-  /** Halt flag for SWI 0x02 (Halt) */
+  /**
+   * Nothing sets this: GBA's SWI 0x02 halts through the interrupt controller, not the CPU.
+   * Kept because snapshots carry it.
+   */
   #haltedBySWI = false;
 
   /** Map of stub addresses to symbol names */
@@ -431,8 +434,8 @@ export class ArmCpu {
   // ─── Public API ──────────────────────────────────────────────────
 
   /**
-   * Whether `step()` refuses to run because the CPU itself has halted (reached the
-   * sentinel, or SWI Halt) — as opposed to a debug hook having refused one instruction.
+   * Whether `step()` refuses to run because the CPU stopped itself at the sentinel return
+   * address, as opposed to a debug hook having refused one instruction.
    */
   get halted(): boolean {
     return this.#halted || this.#haltedBySWI;
@@ -607,7 +610,7 @@ export class ArmCpu {
 
   /**
    * Execute one instruction (ARM or Thumb based on T bit).
-   * Returns false if halted.
+   * Returns false when nothing ran: the CPU is halted, or a debug hook refused the instruction.
    */
   step(): boolean {
     if (this.#halted || this.#haltedBySWI) {

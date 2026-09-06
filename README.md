@@ -30,7 +30,7 @@
 - **TypeScript-native** — Emulator built entirely in TypeScript, designed for the JS/TS ecosystem
 - **Modular npm packages** — Use just the ARM CPU core, the GBA emulator, or the Node.js, browser, and React runtimes
 - **First-class scripting API** — Run headless emulation from Node.js scripts for automated testing, TAS, ROM research, and tooling
-- **Built-in debugger** — Run the disassemblier, set breakpoints, open the memory viewer, inspect registers, and more
+- **Built-in debugger** — Run the disassembler, set breakpoints, open the memory viewer, inspect registers, and more
 
 ## Packages
 
@@ -121,8 +121,12 @@ gba-kit/
     gba-browser/      # Browser runtime (Canvas, keyboard, IndexedDB)
     gba-react/        # React hooks (wraps gba-browser)
     debug-info/       # ELF/DWARF parser (PC→source)
+    debug-core/       # IDE-agnostic debug session (breakpoints, stepping, rewind)
+    debug-adapter/    # Debug Adapter Protocol server
+    debug-ui/         # React debugger panels (screen, PPU, I/O, trace, labels)
   apps/
     webapp/           # Browser debugger UI + dev server
+    vscode-extension/ # VS Code debugger extension
 ```
 
 ### Using with npm link

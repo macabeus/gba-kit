@@ -1,7 +1,8 @@
 /**
  * The extension activated against a stand-in `vscode`: what the panels are told
  * when a session starts, wants audio, ends, or ends before its frame stream was
- * attached.
+ * attached, and that a screen runs the machine on from the entry stop, once, and
+ * never from a breakpoint.
  */
 import { FrameStream, STREAM } from '@gba-kit/debug-adapter';
 import type { HostToTransport, TransportToHost } from '@gba-kit/debug-ui/transport';

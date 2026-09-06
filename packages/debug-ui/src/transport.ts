@@ -34,7 +34,7 @@ export interface Transport {
   control(action: ControlAction): Promise<void>;
   /** Called with the current state on subscription (when known), then on every change. */
   onState(listener: (state: StateBody) => void): Unsubscribe;
-  /** 240×160 RGBA frames; the host asks for one on subscription. */
+  /** 240×160 RGBA frames; subscribing asks the host for a current one. */
   onFrame(listener: (rgba: Uint8Array, frame: number) => void): Unsubscribe;
   /** Interleaved stereo samples, when the host streams audio. */
   onAudio(listener: (samples: Float32Array, sampleRate: number) => void): Unsubscribe;
@@ -142,9 +142,9 @@ export function createMessageTransport(port: MessagePort): Transport {
   /**
    * Keep the host's idea of a feed in step with its listeners: subscribed while it
    * has any, unsubscribed once the last leaves (so 150 KB frames and audio stop
-   * crossing to a panel that no longer shows them). A feed `always` subscribes on
-   * every listener when the host does something on each subscription (it resends
-   * the last frame).
+   * crossing to a panel that no longer shows them). Frames pass `always`: every new
+   * listener subscribes again so the host asks the machine for a current frame, since
+   * a stopped one sends no more and the frame cached here can predate the stop.
    */
   function listen<L>(what: Feed, set: Set<L>, listener: L, always = false): Unsubscribe {
     if (set.size === 0 || always) {

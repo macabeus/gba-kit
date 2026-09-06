@@ -59,12 +59,15 @@ export type StopPredicate = () => boolean;
  * How a run ended:
  * - `done`: the requested extent (a frame, a scanline) completed;
  * - `stopped`: the predicate or a CPU debug hook stopped it first;
- * - `halted`: the CPU halted itself (sentinel / SWI Halt) and cannot continue;
+ * - `halted`: the CPU stopped itself at the sentinel return address and cannot continue;
  * - `stalled`: the CPU is halted and no event is scheduled to wake it.
  */
 export type RunOutcome = 'done' | 'stopped' | 'halted' | 'stalled';
 
-/** A hardware event, stamped by the reader with the cycle/frame/scanline it happened at. */
+/**
+ * A hardware event, delivered as it happens and carrying no timestamp: a sink that needs one
+ * reads the machine's cycle, frame and scanline when it fires.
+ */
 export type HardwareEvent =
   | { kind: 'irq-request'; flag: number }
   | { kind: 'irq-enter'; pc: number }
@@ -86,10 +89,9 @@ export class Gba {
   readonly armCpu: ArmCpu;
 
   #currentScanline = 0;
-  /** Hardware frames completed since reset (a frame ends when the scanline wraps to 0). */
   #frameCount = 0;
   #running = false;
-  /** Set when a StopPredicate or a CPU hook refused an instruction during the current run. */
+  /** Set when a `StopPredicate` or a CPU debug hook refused an instruction during the current run. */
   #stopped = false;
   /** Tracks whether the CPU is currently inside the BIOS IRQ handler */
   #inIrqHandler = false;
@@ -139,7 +141,7 @@ export class Gba {
       clearDmaSource: () => this.bus.clearDmaSource(),
     });
 
-    // The HLE BIOS talks to THIS machine's interrupt controller, never to a shared one.
+    // The HLE BIOS reaches this machine's interrupt controller and no other.
     this.#biosEnv = {
       onIntrWait: (flags) => {
         this.interrupts.intrWaitFlags = flags;
@@ -190,7 +192,7 @@ export class Gba {
     return this.#eventSink;
   }
 
-  /** Hardware frames completed since reset. */
+  /** Hardware frames completed since reset (a frame ends when the scanline wraps to 0). */
   get frameCount(): number {
     return this.#frameCount;
   }
@@ -480,7 +482,7 @@ export class Gba {
    * Scheduled events come back at exactly the cycles the snapshot recorded — only
    * their callbacks (which cannot be serialized) are reattached. Running K frames
    * from a restored snapshot therefore yields the same machine as running K frames
-   * from the original, which is what replay-based rewind relies on.
+   * from the original — what replay-based rewind relies on.
    */
   deserialize(snap: GbaSnapshot): void {
     this.#running = false;

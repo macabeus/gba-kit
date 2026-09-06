@@ -1,7 +1,8 @@
 /**
- * What the toolbar says about the ELF next to the PC. An ELF the user picked
- * or the dev server serves stays loaded across ROM changes, so a program whose
- * ELF does not describe the ROM must say so where every other readout is.
+ * What the toolbar says about the ELF beside the PC. The ELF loaded can
+ * describe another ROM — the dev server's sidecar is fetched again after a ROM
+ * change, a picked one can simply be the wrong file — so a program whose ELF
+ * does not describe the ROM must say so where every other readout is.
  */
 import type { Program } from '@gba-kit/debug-core';
 

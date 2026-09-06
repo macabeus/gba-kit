@@ -27,7 +27,8 @@ DWARF reader and the debug adapter are the same packages any other editor uses.
    }
    ```
 
-3. Press F5. The machine stops at the entry point; set breakpoints and continue.
+3. Press F5. The screen panel opens and the machine runs on from the entry stop;
+   it stops at the breakpoints you set.
 
 `sourceMap` rewrites DWARF path prefixes when the sources were compiled
 elsewhere (`{"/build-container/src": "${workspaceFolder}/src"}`), `projectDir`
@@ -41,17 +42,18 @@ stale ELF land in the wrong places).
 - **Breakpoints**: lines (a line without code slides forward), functions,
   instruction addresses (Disassembly view), conditions, hit counts, logpoints;
   **data breakpoints** from the Variables view or by name, for reads, writes
-  or both, whose stop names the writer or the DMA that did it; **hardware
-  events** as breakpoint filters: VBlank, HBlank, interrupts, DMA, I/O writes,
-  halts.
+  or both, whose stop names the code that touched it, or the DMA that did it;
+  **hardware events** as breakpoint filters: VBlank, HBlank, interrupts, DMA,
+  I/O writes, halts.
 - **Stepping**: Step Over / Into / Out by statement, by instruction from the
   Disassembly view, **Step Back** one instruction (replay-exact) and Reverse
-  Continue to the previous breakpoint; `GBA: Step One Frame`, `Step One
-Scanline`, `Rewind One Second` from the debug toolbar and the palette.
+  Continue to the previous breakpoint; `GBA: Step One Frame`,
+  `GBA: Step One Scanline` and `GBA: Rewind One Second` from the palette; the
+  frame step and the rewind also sit on the debug toolbar.
 - **Variables** with structs, unions, bitfields, arrays, enums and pointers
-  unfolded; `Locals`, the file's `Globals`, `Registers`, `Machine`; every value
-  has a memory reference for the Memory view and an evaluate name for Watch;
-  scalars and registers are editable.
+  unfolded; `Locals`, the file's `Globals`, `Registers`, `Machine`; a value with
+  an address carries a memory reference for the Memory view and a named one an
+  evaluate name for Watch; scalars and registers other than `cpsr` are editable.
 - **Hover and Watch** expressions: C operators, `[addr]`, `{addr}`,
   `u32(addr)`, registers, `frame`/`scanline`/`cycle`, symbols, `a.b[3].c`
   paths, enumerators, `&symbol`, labels.
@@ -72,12 +74,12 @@ debug protocol, so inspection stays responsive while the game runs.
 ## Develop
 
 ```bash
-pnpm --filter gba-kit-vscode build        # dist/extension.js, adapter.js, webview.js
-pnpm --filter gba-kit-vscode test         # unit tests (host bridge, webview shell)
+pnpm --filter gba-kit-vscode build        # dist/extension.js, adapter.js, webview.js and .css
+pnpm --filter gba-kit-vscode test         # unit tests (sessions and panels, host bridge, frame server, webview shell, manifest, bundling)
 pnpm --filter gba-kit-vscode test:vscode  # Extension Development Host tests (downloads VS Code once)
 pnpm --filter gba-kit-vscode package      # .vsix
 ```
 
 Open `apps/vscode-extension` in VS Code and press F5 to run the extension in a
-development host; the `packages/debug-core/test-fixtures` folder is a ready
-workspace with a ROM, its ELF and the C it was built from.
+development host; the `packages/debug-core/test-fixtures` folder is a workspace
+to try it on, with a ROM, its ELF and the C it was built from.

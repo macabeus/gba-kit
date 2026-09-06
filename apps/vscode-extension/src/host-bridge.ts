@@ -81,7 +81,6 @@ export class HostBridge {
     };
   }
 
-  /** The debug session this panel follows; null when none is active. */
   get session(): BridgeSession | null {
     return this.#session;
   }

@@ -1,4 +1,4 @@
-/** The debug-core fixtures (a small game loop built as Thumb -O0 and -O2), booted the way the Debug page boots. */
+/** The debug-core fixtures (a small game loop built as Thumb -O0 and -O2), and a session booted over one. */
 import { ManualHost, Session } from '@gba-kit/debug-core';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

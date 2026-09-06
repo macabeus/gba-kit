@@ -1,7 +1,8 @@
 /**
  * Helpers over the raw DIE tree (`DwarfEntry`): typed attribute access, reference
  * following (with `abstract_origin` / `specification` inheritance), and the
- * per-unit facts (address size, bases) that list and address forms depend on.
+ * per-unit facts (the CU low_pc, the `.debug_addr`/loclists/rnglists bases) that list
+ * and address forms depend on.
  */
 import type { AttrValue, DwarfEntry } from '../types.js';
 import { DW_AT, DW_FORM, formClass } from './constants.js';
@@ -115,7 +116,7 @@ export class EntryIndex {
     };
   }
 
-  /** The unit an entry belongs to. */
+  /** The unit an entry belongs to; the first unit when its `unitOffset` is unknown. */
   unit(entry: DwarfEntry): UnitInfo {
     return this.#unitByOffset.get(entry.unitOffset) ?? this.units[0]!;
   }

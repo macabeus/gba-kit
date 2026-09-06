@@ -1,7 +1,8 @@
 /**
  * Breakpoints of every kind the session honors, resolved to what the machine can
- * check cheaply: a map from instruction address to the breakpoints there, bus
- * watchpoints for data, and a set of hardware events to stop on.
+ * check cheaply: a map from instruction address to the breakpoints there, the
+ * data ranges the session arms as bus watchpoints, and a set of hardware events
+ * to stop on.
  */
 import type { HardwareEvent } from '@gba-kit/gba-emulator';
 
@@ -215,7 +216,6 @@ export class BreakpointStore {
     return this.#data;
   }
 
-  /** The specs the data breakpoints were set from (to install their watchpoints again). */
   get dataSpecs(): DataBreakpointSpec[] {
     return this.#data.map(({ address, length, name, access, condition, hitCondition }) => ({
       address,

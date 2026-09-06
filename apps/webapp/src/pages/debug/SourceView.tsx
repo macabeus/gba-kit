@@ -84,7 +84,7 @@ export function SourceView({ session, revision, onElfLoad }: SourceViewProps) {
             fn.end,
           )
         : [],
-    // `revision` re-reads the ROM's bytes after a memory write, and labels after a rename
+    // `revision` re-disassembles at each stop, resume and label edit: the rows carry the label names
     [di, fn, session, revision],
   );
   const current = useMemo(() => (di ? di.lines.pcToSource(pc) : null), [di, pc]);

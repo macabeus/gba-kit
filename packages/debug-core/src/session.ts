@@ -1,9 +1,10 @@
 /**
- * Session — the one owner of a debugged machine. Every command that moves or
- * mutates it comes through here, in order, on one thread; every observation
- * carries the revision it was taken at, so a client can tell stale data from
- * fresh. The session knows addresses, frames, symbols and snapshots; it knows
- * nothing about DAP or any editor.
+ * Session — the debugger's single point of control over a machine. Every command
+ * that moves or mutates it comes through here, in order, on one thread; every
+ * observation is valid only for the revision it was taken at, which the session
+ * publishes, so a client can tell stale data from fresh. The session knows
+ * addresses, frames, symbols and snapshots; it knows nothing about DAP or any
+ * editor.
  *
  * Execution: the machine runs frame by frame under a stop predicate that the
  * breakpoints, the current step and the hardware hooks feed. A stop is decided
@@ -210,7 +211,7 @@ export class Session {
   #pendingButtons: number | null = null;
   #frameButtons = 0;
   #recordingStart: number | null = null;
-  /** what `stopRecording` last returned, for a view that shows recordings whoever stopped them */
+  /** what `stopRecording` last returned, for a view that shows recordings no matter who stopped them */
   #lastRecording: InputRecording | null = null;
   /** finished recordings, oldest first, for a view that lists and replays them */
   #recordings: RecordedTake[] = [];
@@ -290,7 +291,7 @@ export class Session {
     return this.#revision;
   }
 
-  /** Bumps on every restart: breakpoints survive, everything else is new. */
+  /** Bumps on a restart or a resync: breakpoints survive, everything else is new. */
   get epoch(): number {
     return this.#epoch;
   }
@@ -415,7 +416,7 @@ export class Session {
     return ids.length > 0 ? { reason: kind, address: pc, breakpointIds: ids } : null;
   }
 
-  /** Whether a breakpoint's condition holds. A condition that fails to evaluate holds, so the user sees the failure. */
+  /** Whether a breakpoint's condition holds. One that fails to evaluate holds — a broken condition must not silently skip the stop — and `report` prints the failure. */
   #conditionHolds(
     condition: CompiledExpr,
     who: string,
@@ -734,7 +735,7 @@ export class Session {
     this.#runStep(runToAddress(address), `run to 0x${address.toString(16)}`);
   }
 
-  /** Advance exactly one hardware frame (a breakpoint inside it still stops). */
+  /** Run to the end of the current hardware frame (a breakpoint inside it still stops). */
   stepFrame(): void {
     this.#requireStopped('step frame');
     this.#armResume();
@@ -1400,12 +1401,11 @@ export class Session {
 
   /** Record the buttons held on every frame from this one, until `stopRecording`. */
   startRecording(): void {
-    // the screen as the recording begins: what a view shows to say where it replays from
     this.#recordingThumbnail = thumbnailRgba(this.machine.framebufferRgba());
     this.#setRecordingStart(this.machine.frame);
   }
 
-  /** Every finished recording of this session, oldest first, each with the screen it began on. */
+  /** The last {@link MAX_RECORDINGS} finished recordings, oldest first, each with the screen it began on. */
   get recordings(): readonly RecordedTake[] {
     return this.#recordings;
   }
@@ -1467,8 +1467,8 @@ export class Session {
   }
 
   /**
-   * Replay a recording from its start frame (which must be reachable in history,
-   * or 0 after a restart) and stop at its end.
+   * Replay a recording and stop at its end. False when `from` is `'start'` and the
+   * frame the recording was made at cannot be reached.
    */
   replayRecording(recording: InputRecording, from: 'start' | 'here' = 'start'): boolean {
     this.#requireStopped('replay');

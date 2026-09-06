@@ -31,7 +31,7 @@ export interface StateBody {
   position: Position;
   /** bumps whenever the machine changes: variable handles from an older revision are stale */
   revision: number;
-  /** bumps on restart and state loads: everything derived from the old machine is stale */
+  /** bumps on a restart or a resync: everything derived from the old machine is stale */
   epoch: number;
   /** what rewind can reach, and the input recording in progress (`recordingStart`) */
   history: HistoryInfo;
@@ -134,8 +134,7 @@ export interface GbaKitRequests {
    * a recording has been stopped in this session.
    */
   'gba-kit/lastRecording': { args?: Record<string, never>; body: { last: RecordingBody | null } };
-  /** Replay a recording from its start frame (rewinding to it when it is in history). */
-  /** Every finished recording of this session, oldest first, each with the screen it begins on. */
+  /** The finished recordings of this session, oldest first, at most the newest 20, each with the screen it begins on. */
   'gba-kit/recordings': { args?: Record<string, never>; body: { takes: TakeBody[] } };
   /**
    * Press a recording's buttons again: `start` (the default) puts the machine back
@@ -147,7 +146,8 @@ export interface GbaKitRequests {
   /**
    * Save the machine to `<projectDir>/.gba-kit/states/<name>.json`, with `name`
    * reduced to `[\w.-]` for the file (other characters become `_`, at most 80 of
-   * them; empty falls back to `state`); `body.name` keeps the name as given.
+   * them); an unnamed state is called `frame-<n>`, and `body.name` is the name the
+   * state was saved under.
    */
   'gba-kit/saveState': { args?: { name?: string }; body: SavedStateInfo };
   /** Load a saved state by name, or by a `path` that `saveState` or `listStates` gave out (only the states directory is read). */
@@ -254,7 +254,7 @@ export const LOG = {
   max: 20_000,
 } as const;
 
-/** How many tiles a `gba-kit/ppu` `tiles` request answers by default, and at most (64 KB of 8bpp tiles: all of a background's reach). */
+/** How many tiles a `gba-kit/ppu` `tiles` request answers by default, and at most (2048 4bpp tiles fill the 64 KB of background VRAM). */
 export const TILES = {
   defaultCount: 512,
   maxCount: 2048,

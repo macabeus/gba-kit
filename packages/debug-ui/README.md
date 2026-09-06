@@ -9,7 +9,7 @@ The debugger panels an editor has no native view for, as React components:
 | `TilesPanel`        | the tiles of any character base at 4 or 8 bpp, painted with a palette bank                      |
 | `TilemapPanel`      | a background's map rendered from its tiles, with the entry under the mouse                      |
 | `SpritesPanel`      | OAM as a table, each sprite painted, in 1D or 2D mapping                                        |
-| `IoRegistersPanel`  | every modelled I/O register with its decoded fields                                             |
+| `IoRegistersPanel`  | the display, sound-control, DMA, timer, keypad, interrupt and system registers, fields decoded  |
 | `TracePanel`        | the instruction trace ring                                                                      |
 | `EventsPanel`       | the hardware event log: VBlank, HBlank, interrupts, DMA, I/O writes, halts                      |
 | `MemorySearchPanel` | find a value in RAM and narrow the candidates as it changes                                     |
@@ -18,15 +18,16 @@ The debugger panels an editor has no native view for, as React components:
 | `RecordingPanel`    | record the buttons pressed, replay them, read them as a script                                  |
 
 `DebugPanels` puts them behind tabs. Everything talks to the debugger through a
-`Transport`: the VS Code extension implements it with `postMessage` to the
-extension host (`createMessageTransport` on the webview side, `serveTransport`
-on the host side — importable alone from `@gba-kit/debug-ui/transport`, so a
-host that only routes messages bundles no React), the webapp with direct calls
-into a `@gba-kit/debug-core` session (`createSessionTransport`). The panels never know which. The request
-vocabulary is `@gba-kit/debug-core/protocol`; the panels never touch the Node
-debug adapter. A transport may also offer `showPanel` — the Screen panel uses
-it when a recording stops, so the Recording tab (which shows the session's
-last recording, whoever stopped it) comes up instead of a text editor.
+`Transport`, which the panels never look behind: the VS Code extension
+implements it with `postMessage` to the extension host (`createMessageTransport`
+on the webview side, `serveTransport` on the host side — importable alone from
+`@gba-kit/debug-ui/transport`, so a host that only routes messages bundles no
+React), the webapp with direct calls into a `@gba-kit/debug-core` session
+(`createSessionTransport`). The request vocabulary is
+`@gba-kit/debug-core/protocol`; nothing here imports the Node debug adapter. A
+transport may also offer `showPanel` — the Screen panel uses it when a recording
+stops, so the Recording tab (which lists the last twenty recordings the session
+kept, whoever stopped them) comes up instead of a text editor.
 
 ## Usage
 

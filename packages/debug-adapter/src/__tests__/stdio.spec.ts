@@ -1,7 +1,7 @@
 /**
  * The adapter as another editor sees it: a child process on stdio, driven with
- * hand-framed DAP messages. The first "second client", so a VS Code-only
- * assumption shows up here before it does in a real editor.
+ * hand-framed DAP messages. Nothing in the test holds the session object, so an
+ * assumption that only holds in-process shows up here before it does in a real editor.
  */
 import type { DebugProtocol } from '@vscode/debugprotocol';
 import { type ChildProcess, spawn } from 'node:child_process';

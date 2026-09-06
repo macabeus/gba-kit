@@ -92,7 +92,7 @@ type DataSpec = BreakpointSet['data'][number];
 
 const THREAD_ID = 1;
 const CONFIGURATION_TIMEOUT_MS = 5000;
-/** instructions one `disassemble` answers at most; an editor pages by a few dozen, so the cap is never seen */
+/** instructions one `disassemble` answers at most; a larger `instructionCount` is clamped, not refused */
 const MAX_DISASSEMBLE = 4096;
 /** bytes one `readMemory` answers at most, so a count cannot allocate gigabytes */
 const MAX_READ_MEMORY = 16 * 1024 * 1024;
@@ -210,7 +210,7 @@ function searchOptions(args: { value?: unknown; size?: unknown; region?: unknown
   return options;
 }
 
-/** r0–r15 by name; -1 for anything else (cpsr is not written directly). */
+/** `r0`–`r12`, `sp`, `lr` and `pc` by name; -1 for anything else (`cpsr` is not written directly). */
 function registerIndex(name: string): number {
   const i = (REGISTER_NAMES as readonly string[]).indexOf(name);
   return i >= 0 && i <= 15 ? i : -1;
@@ -445,7 +445,7 @@ export class GbaDebugSession extends DebugSession {
         this.#emit(new Event('continued', { threadId: THREAD_ID, allThreadsContinued: true }));
         this.#emit(new Event('gba-kit/state', this.#stateBody()));
       },
-      // the body changed in place: a client keys its record and trace toggles on it
+      // a client keys its record and trace toggles on the state body
       recording: () => this.#emit(new Event('gba-kit/state', this.#stateBody())),
       tracing: () => this.#emit(new Event('gba-kit/state', this.#stateBody())),
       output: (text, category) => this.#emit(new OutputEvent(text, category === 'log' ? 'console' : category)),
@@ -496,8 +496,8 @@ export class GbaDebugSession extends DebugSession {
 
   /**
    * Tell the client that what it is holding no longer describes the machine, so the
-   * variables it shows are re-fetched. Only clients that asked for the event get it;
-   * the rest re-read on their own schedule.
+   * variables it shows are re-fetched: `invalidated` for a client that takes it, and
+   * `gba-kit/state` for every client.
    */
   #invalidateVariables(): void {
     if (this.#clientTakesInvalidated) {
@@ -780,9 +780,10 @@ export class GbaDebugSession extends DebugSession {
   }
 
   /**
-   * The nodes behind a reference, refusing one from before the machine last moved
-   * (handles are dropped on every stop and resume) or was restarted. A write in
-   * between does not invalidate the handle; its nodes are read again.
+   * The nodes behind a reference. Handles are dropped on every stop and resume, and
+   * their numbers reissued from the start, so one held across a move is refused only
+   * until its number is handed out again; a bumped epoch refuses it outright. A write
+   * in between does not invalidate the handle; its nodes are read again.
    */
   #resolveHandle(session: Session, reference: number): HandleTarget {
     const target = this.#handles.get(reference);

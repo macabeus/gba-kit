@@ -33,7 +33,7 @@ export function App() {
     },
   });
 
-  // The Debug page runs a debug-core session over the same machine, while it is shown.
+  // The Debug page runs a debug-core session over the same machine, while it is shown
   const debug = useDebugSession(emulator, romData, elfData, mode === 'debug');
 
   // Lazily create the recorder
@@ -63,7 +63,7 @@ export function App() {
       emulator.loadRom(data);
       setRomLoaded(true);
       setRomData(data);
-      // an ELF describes one ROM: the sidecar is fetched again, a picked one must be picked again
+      // An ELF describes one ROM: the sidecar is fetched again, a picked one must be picked again
       setElfData(null);
     },
     [emulator],

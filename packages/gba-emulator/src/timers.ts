@@ -213,7 +213,7 @@ export class TimerController {
       if (this.#scheduler.isScheduled(id)) {
         this.#scheduler.reattach(id, () => this.#onOverflow(i));
       } else if (ch.enabled && !ch.cascade) {
-        this.#scheduleOverflow(i); // a snapshot from before events were saved
+        this.#scheduleOverflow(i); // an older snapshot, with no overflow event of its own
       }
     }
   }

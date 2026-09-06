@@ -1,4 +1,4 @@
-/** The protocol module keeps its old home: a DAP client imports the vocabulary from the adapter. */
+/** A DAP client imports the protocol vocabulary from the adapter, which re-exports it. */
 import { describe, expect, it } from 'vitest';
 
 import { LOG, STREAM, entryCount } from '../protocol.js';

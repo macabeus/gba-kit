@@ -7,7 +7,8 @@
  *
  *   1. apply the user's `sourceMap` prefix rewrites (longest prefix first);
  *   2. resolve a relative path against `cwd`;
- *   3. for an absolute path, drop leading segments until something exists under `cwd`.
+ *   3. take an absolute path as it stands, else drop leading segments from it until
+ *      something exists under `cwd`.
  *
  * Existence is asked of the host through `exists`, so this works the same for a
  * Node file system and a browser workspace listing.

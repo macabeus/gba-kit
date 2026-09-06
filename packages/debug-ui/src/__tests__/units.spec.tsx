@@ -65,7 +65,7 @@ describe('message transport', () => {
     const offFrameA = transport.onFrame(() => {});
     const offFrameB = transport.onFrame(() => {});
     const offAudio = transport.onAudio(() => {});
-    // every frame listener subscribes (the host resends the last frame); audio once
+    // every frame listener subscribes, so the host asks for a current frame; audio once
     expect(toHost).toEqual([
       { type: 'subscribe', what: 'frame' },
       { type: 'subscribe', what: 'frame' },

@@ -2,7 +2,7 @@
  * The Debug page: a `@gba-kit/debug-core` session over the Play page's machine,
  * the views VS Code would render natively (disassembly, source, registers,
  * breakpoints, memory) built here, and the emulator views (screen, PPU, I/O,
- * trace, events, search, labels) from `@gba-kit/debug-ui`.
+ * trace, events, search, labels, recording) from `@gba-kit/debug-ui`.
  */
 import type { Session } from '@gba-kit/debug-core';
 import { DebugPanels, ScreenPanel, createSessionTransport } from '@gba-kit/debug-ui';
@@ -19,7 +19,7 @@ import { programStatus } from './program-status';
 
 interface DebugViewProps {
   session: Session | null;
-  /** bumps on every stop, resume, machine change and label edit */
+  /** bumps on every stop, resume and label edit */
   revision: number;
   error: string | null;
   onElfLoad: (elf: Uint8Array) => void;

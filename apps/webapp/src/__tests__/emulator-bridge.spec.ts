@@ -1,8 +1,9 @@
 /**
  * The Play page's bridge over a machine the Debug session also drives: what its
  * canvas and save-state thumbnails show after the session moved the `Gba`, and
- * whose CPU debug hooks `run()` may clear. The DOM the bridge touches (ImageData,
- * canvases, the animation frame) is stubbed so each paint can be read back.
+ * what its `run()` and its breakpoint edits do to a CPU debug hook it did not
+ * install. The DOM the bridge touches (ImageData, canvases, the animation
+ * frame) is stubbed so each paint can be read back.
  */
 import { Machine, ManualHost, Session } from '@gba-kit/debug-core';
 import { EmulatorBridge } from '@gba-kit/gba-browser';

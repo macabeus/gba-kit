@@ -41,7 +41,6 @@ export function ScreenPanel({
   const padRef = useRef(0);
   const sentRef = useRef(0);
 
-  // frames → canvas
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) {
@@ -113,7 +112,6 @@ export function ScreenPanel({
     return () => cancelAnimationFrame(raf);
   }, [sendMask]);
 
-  // audio
   useEffect(() => {
     if (!soundOn) {
       playerRef.current?.mute();

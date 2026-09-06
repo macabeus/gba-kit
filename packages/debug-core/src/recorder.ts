@@ -16,7 +16,7 @@ export interface InputRecording {
 }
 
 const BUTTON_NAMES = ['a', 'b', 'select', 'start', 'right', 'left', 'up', 'down', 'r', 'l'] as const;
-/** how many buttons the GBA has: bits 0–9 of a mask, in `BUTTON_NAMES` order */
+
 /** A finished recording, with the screen it began on, so a view can show what it replays. */
 export interface RecordedTake {
   /** unique within a session, and stable while it is listed */
@@ -28,6 +28,7 @@ export interface RecordedTake {
   thumbnail: { width: number; height: number; rgba: Uint8Array };
 }
 
+/** how many buttons the GBA has: bits 0–9 of a mask, in `BUTTON_NAMES` order */
 export const BUTTON_COUNT = BUTTON_NAMES.length;
 
 export function buttonsToNames(mask: number): string[] {

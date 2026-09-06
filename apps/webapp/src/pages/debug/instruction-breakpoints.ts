@@ -15,7 +15,10 @@ export function instructionAddresses(session: Session): number[] {
     .sort((a, b) => a - b);
 }
 
-/** Clear the instruction breakpoint at `address` when there is one, else set one; returns the new list. */
+/**
+ * Clear the instruction breakpoint at `address` when there is one, else set one;
+ * returns the new list. `address` is aligned down to a halfword first.
+ */
 export function toggleInstructionBreakpoint(session: Session, address: number): number[] {
   const aligned = (address & ~1) >>> 0;
   const current = instructionAddresses(session);

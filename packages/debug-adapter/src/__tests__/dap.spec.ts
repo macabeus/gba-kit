@@ -1,6 +1,7 @@
 /**
  * The adapter driven the way an editor drives it: real DAP messages over streams,
- * against the debug-core fixtures (one C program built as Thumb -O0).
+ * against the debug-core fixtures (one C program, built as Thumb -O0 except where a
+ * test wants another build of it).
  */
 import type { DebugProtocol } from '@vscode/debugprotocol';
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -726,7 +727,7 @@ describe('inspection', () => {
     });
     expect(written.result).toBe('42 (0x0000002a)');
     expect(await num(client, 'g_player.pos.x')).toBe(42);
-    // the value the console reports can be expanded under the name of the place written
+    // an assignment answers with the value as the debugger reads it back: the enumerator, not the 2 that was written
     const struct = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
       expression: 'g_player.mode = 2',
       context: 'repl',
@@ -1197,7 +1198,7 @@ describe('emulator requests', () => {
     expect((client.events('gba-kit/state').at(-1)!.body as StateBody).recording).toBe(false);
     expect((client.events('gba-kit/state').at(-1)!.body as StateBody).history.recordingStart).toBeNull();
     expect(rec.recording.frames).toEqual([1, 1, 0]);
-    expect(await client.body('gba-kit/lastRecording')).toEqual({ last: rec }); // whoever stopped it
+    expect(await client.body('gba-kit/lastRecording')).toEqual({ last: rec });
     expect(rec.script).toContain("press('a', { hold: 2 })");
     const keysAfter = await num(client, 'g_keys');
 
@@ -1254,7 +1255,7 @@ describe('emulator requests', () => {
       expect(last).toMatchObject({ width: 240, height: 160, frame: 1 });
       expect(last.rgba.length).toBe(240 * 160 * 4);
 
-      // audio only when asked for: a run's audio follows its frame, so the next frame proves none came
+      // audio only when asked for: a run's audio goes out before its frame, so the next frame proves none came
       await stopped(client, 'gba-kit/stepFrame');
       await until(() => connections[0]!.frames.includes(2));
       expect(connections[0]!.audio).toBe(0);

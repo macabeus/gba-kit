@@ -12,8 +12,8 @@ Standard DAP, as an editor expects it:
   functions, instruction addresses, conditions, hit counts (`3`, `>= 3`, `% 4`),
   logpoints with `{expressions}`; data breakpoints on a variable, a struct member
   picked in the Variables view, a symbol, a label or an address, for reads,
-  writes or both, whose stop names the writer (or the DMA channel and the
-  instruction that started it); hardware events as **exception filters**
+  writes or both, whose stop names the code that touched it (or the DMA channel
+  and the instruction that started it); hardware events as **exception filters**
   (VBlank, HBlank, interrupt request and entry, DMA, I/O write, halt).
 - **Stepping**: statement or instruction granularity for over, into and out;
   `stepBack` is one instruction back, replay-exact; `reverseContinue` lands on
@@ -22,10 +22,11 @@ Standard DAP, as an editor expects it:
 - **Call stack** with inlined frames, unwound through `.debug_frame` (a
   link-register guess is marked `subtle`).
 - **Scopes and variables**: Locals, the file's Globals, Registers, Machine.
-  Values unfold structs, unions, bitfields, arrays, enums and pointers, carry a
-  memory reference for the Memory view and an evaluate name for Watch; scalars
-  and registers are writable. References from before the machine last moved are
-  refused as stale.
+  Values unfold structs, unions, bitfields, arrays, enums and pointers; one with
+  an address carries a memory reference for the Memory view, a named one an
+  evaluate name for Watch; scalars and registers other than `cpsr` are writable.
+  References are dropped whenever the machine moves: a client expands again at
+  the new stop.
 - **Evaluate** for hover, Watch and the console: C operators, `[addr]`,
   `{addr}`, `u32(addr)`, registers, `frame`/`scanline`/`cycle`, symbols,
   `a.b[3].c` paths, enumerators, `&symbol`, labels.
@@ -90,7 +91,7 @@ The screen is not part of DAP. `gba-kit-screen` serves a browser page with the
 display and a keyboard gamepad, fed by the adapter over a pipe it owns:
 
 ```bash
-npx -p @gba-kit/debug-adapter gba-kit-screen   # prints http://localhost:4712/ and the pipe path
+npx -p @gba-kit/debug-adapter gba-kit-screen   # prints http://127.0.0.1:4712/ and the pipe path
 # or: pnpm --package=@gba-kit/debug-adapter dlx gba-kit-screen
 ```
 
@@ -132,7 +133,8 @@ pnpm --filter @gba-kit/debug-adapter build
 pnpm --filter @gba-kit/debug-adapter test
 ```
 
-The tests drive the adapter with real DAP messages over in-memory streams,
-against the committed fixtures of `@gba-kit/debug-core`, and check what an editor
-would see: capabilities, breakpoint verification, the order of responses and
-events, stale references, and the custom requests.
+The tests drive the adapter with real DAP messages against the committed
+fixtures of `@gba-kit/debug-core` — over in-memory streams, and in
+`stdio.spec.ts` against the CLI spawned as a real child process on stdio — and
+check what an editor would see: capabilities, breakpoint verification, the order
+of responses and events, stale references, and the custom requests.

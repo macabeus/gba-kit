@@ -1,6 +1,6 @@
 /**
- * The cheat-device workflow: find every address holding a value, then narrow the
- * candidates as the value changes. Reads through the machine's side-effect-free
+ * The cheat-device workflow: find every size-aligned address in IWRAM or EWRAM
+ * holding a value, then narrow the candidates as the value changes. Reads through the machine's side-effect-free
  * peek, so a search never disturbs the game.
  */
 import type { Machine } from './machine.js';

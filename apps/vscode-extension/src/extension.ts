@@ -62,7 +62,6 @@ class Panels {
     return this.#live;
   }
 
-  /** The session every panel follows; frames flow from it. */
   setLive(live: Live | null): void {
     this.#live?.dispose();
     this.#live = live;
@@ -73,7 +72,6 @@ class Panels {
     live?.setAudio(this.wantsAudio);
   }
 
-  /** Whether a panel is up. */
   has(root: Root): boolean {
     return this.#panels.has(root);
   }
@@ -224,8 +222,8 @@ export function activate(context: vscode.ExtensionContext): void {
       if (session.type !== DEBUG_TYPE) {
         return;
       }
-      // The screen is what a session is for, so it comes up with one; it subscribes
-      // before the stream is attached, so the first frame reaches it.
+      // The screen is what a session is for, so it comes up with one; it is there before
+      // the stream is attached, and its bridge holds the newest frame until it subscribes.
       panels.open('screen');
       const attach = attachStream(session, inline.get(session.id) ?? null, panels, output);
       pending.set(session.id, attach);
@@ -349,8 +347,8 @@ export function activate(context: vscode.ExtensionContext): void {
    * A screen exists to be watched, so the machine runs once one is up. Only the entry
    * stop is resumed, and only once per session: opening the screen while stopped at a
    * breakpoint must leave the machine exactly where the user stopped it. This does mean
-   * a session with `stopOnEntry` runs on once its screen appears — set `stopOnEntry` to
-   * false to skip the stop entirely, or close the screen to sit at it.
+   * a session with `stopOnEntry` runs on once its screen appears; set `stopOnEntry` to
+   * false to skip the stop entirely.
    */
   function runForTheScreen(session: vscode.DebugSession, body: { state?: string; reason?: string }): void {
     if (body.state !== 'stopped' || body.reason !== 'entry' || ranForScreen.has(session.id) || !panels.has('screen')) {

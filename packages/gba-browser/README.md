@@ -41,11 +41,11 @@ window.addEventListener('keyup', (e) => emulator.handleKeyUp(e));
 // Breakpoints
 emulator.addBreakpoint(0x08001234);
 
-// Save/load states (the thumbnail is the screen as it is now)
+// Save/load states
 const { snapshot, thumbnail } = await emulator.saveState();
 emulator.loadState(snapshot);
 
-// Something else drove `emulator.gba` (a debug session sharing it): repaint the canvas
+// Repaint the canvas after something else drove emulator.gba
 emulator.refreshFrame();
 
 // Disassembly

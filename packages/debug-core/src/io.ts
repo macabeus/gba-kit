@@ -1,7 +1,8 @@
 /**
- * The I/O register file, decoded: every register the emulator models, its
- * current value, and its bit fields spelled out, for an I/O viewer and for
- * naming an address in the event log.
+ * The I/O registers worth a row in a viewer, decoded: the display, sound-control,
+ * DMA, timer, keypad, interrupt and system registers, each with its current value
+ * and its bit fields spelled out. The emulator models more than this — the APU
+ * channels and the sound FIFOs among them.
  */
 import type { Machine } from './machine.js';
 

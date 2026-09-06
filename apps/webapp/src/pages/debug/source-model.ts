@@ -59,7 +59,7 @@ export function matchSegmentsIndex(dwarfPath: string, candidates: { segments: st
 
 /**
  * Disassemble the function `[fnAddress, fnEnd)` and attach each instruction's C
- * location. Independent of the live PC (ROM is static).
+ * location. Independent of the live PC: the same rows for any PC inside the function.
  */
 export function buildSourceRows(
   disassemble: (address: number, count: number) => DisasmLine[],

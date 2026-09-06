@@ -72,14 +72,14 @@ interface NameScope {
   unit: UnitInfo | null;
 }
 
-/** Whether a data breakpoint's address came from a DWARF variable, an ELF symbol, a literal, or a computed value. */
+/** Whether an address came from a literal, a name (a DWARF variable or an ELF symbol), or a computed value. */
 type AddressSource = 'literal' | 'symbol' | 'value';
 
 const IDENT = /^[A-Za-z_]\w*$/;
 const PATH = /^[A-Za-z_]\w*(\.\w+|\[\d+\])+$/;
 /** `(Card*)0x0300243c`, `(struct PlayerState)gUnk_03005220`, `(u16)0x04000006`: `(T*)x` and `(T)x` both mean "the T at address x". */
 const CAST = /^\(\s*((?:struct|union|enum)\s+)?([A-Za-z_]\w*)\s*\*?\s*\)\s*(.+)$/;
-/** The largest read the memory tree answers in one go. */
+/** The largest typed read `memory` answers in one go. */
 const MAX_PEEK = 0x10000;
 /** Row caps of the untyped memory views. */
 const MAX_RAW_WORDS = 256;
@@ -476,7 +476,7 @@ export class Inspector {
     if (expr.toLowerCase() === 'cpsr') {
       return { node: this.#cpsrNode() };
     }
-    // 4. A bare address: raw memory there, unfoldable.
+    // 4. A bare address: the 64 bytes there, as an untyped tree.
     if (/^(0x[0-9a-f]+|\d+)$/i.test(expr)) {
       const address = parseU32Literal(expr);
       if (regionOf(address) === null) {

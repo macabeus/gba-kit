@@ -1,7 +1,8 @@
 /**
- * What `vsce package` would ship: exactly the files the extension loads at run
- * time, from a manifest vsce accepts. `.vscodeignore` is an allowlist, so a new
- * bundle or asset has to be named there, and a dropped one shows up here.
+ * What `vsce package` would ship, from a manifest vsce accepts: the bundles and
+ * stylesheet the extension loads at run time, plus package.json, README and LICENSE.
+ * `.vscodeignore` is an allowlist, so a new bundle or asset has to be named there, and
+ * a dropped one shows up here.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';

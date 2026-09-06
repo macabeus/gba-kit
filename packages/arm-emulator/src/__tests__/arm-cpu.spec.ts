@@ -1185,8 +1185,7 @@ describe('ArmCpu', () => {
     //
     // mGBA implements the same quirk in its STM_LOOP/LDM_LOOP macros (src/gba/memory.c): an
     // `if (UNLIKELY(!mask))` arm that transfers the PC and does `address += 64` before the
-    // per-register loop. This emulator previously did neither: the loop simply did not run and
-    // the base was left untouched.
+    // per-register loop.
     const DATA = 0x02001000;
 
     it('STMIA with an empty list stores the PC and adds 0x40 to the base', () => {

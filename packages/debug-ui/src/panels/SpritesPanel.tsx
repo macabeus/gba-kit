@@ -48,7 +48,7 @@ export function SpritesPanel({ transport }: { transport: Transport }) {
 function repack8bpp(tiles4: Uint8Array): Uint8Array {
   const out = new Uint8Array(tiles4.length / 2);
   for (let i = 0; i < out.length; i++) {
-    // 4bpp tile t holds bytes t*32..; two 4bpp tiles hold one 8bpp tile's 64 bytes
+    // a pair of 4bpp indices is the two nibbles of one VRAM byte: one 8bpp index
     const lo = tiles4[i * 2]!;
     const hi = tiles4[i * 2 + 1]!;
     out[i] = lo | (hi << 4);

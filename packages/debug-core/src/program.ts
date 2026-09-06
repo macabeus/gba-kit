@@ -88,7 +88,7 @@ export class Program {
     return fn ? { name: fn.name, lo: fn.address, hi: fn.end, exact: fn.exact } : null;
   }
 
-  /** `name` / `name+0xNN` / `0x........` for an address. */
+  /** `<BIOS stub +0xNN>` below 0x4000, else `name` / `name+0xNN` / `0x........`. */
   symbolName(address: number): string {
     if (address < 0x4000) {
       return `<BIOS stub +0x${address.toString(16)}>`;

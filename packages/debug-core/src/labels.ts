@@ -131,7 +131,7 @@ export class LabelStore {
 
   /**
    * Import a symbol file. Understood line shapes:
-   *   `08001234 name`            (no$gba / mGBA `.sym`)
+   *   `08001234 name`            (no$gba / mGBA `.sym`; `, 16` after the name gives a byte size)
    *   `0x08001234 name`          (address first, any prefix)
    *   `name = 0x08001234;`       (ldscript / a decomp's symbols.txt)
    *   `name 0x08001234`          (name first)

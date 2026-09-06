@@ -1,7 +1,8 @@
-// Three bundles from one workspace:
+// The bundles built here:
 //   dist/extension.js  the extension host side (CommonJS, `vscode` provided by the host)
 //   dist/adapter.js    the debug adapter as a standalone Node process (CommonJS)
 //   dist/webview.js    the panels for the webviews (browser, React + @gba-kit/debug-ui)
+//   dist/webview.css   the panels' stylesheet, emitted with that bundle
 //   dist/test/*.js     the Extension Development Host tests
 import * as esbuild from 'esbuild';
 

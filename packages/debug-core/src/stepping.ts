@@ -168,7 +168,7 @@ function stepOverStatements(ctx: StepContext, hiddenLayers: number): StepOutcome
   const predicate: StepPredicate = (a) => {
     const row = program.rowAt(a);
     if (!row || !row.isStmt) {
-      return false; // only statement rows can be stops; everything else is cheap to skip
+      return false; // only a statement row is a place to stop
     }
     const mode = cpu.getMode();
     if (mode !== startMode) {

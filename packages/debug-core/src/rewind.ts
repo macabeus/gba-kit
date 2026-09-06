@@ -3,8 +3,8 @@
  * frame. Any past frame is reached by restoring the nearest earlier keyframe and
  * replaying the input log through the machine — exact, because the machine is
  * deterministic and a restored snapshot replays exactly. Keyframes are
- * delta-encoded against the previous one; a full one is kept every `fullEvery`
- * so a restore never applies more than that many deltas.
+ * delta-encoded against the previous one; a full one is kept often enough that a
+ * restore never applies more than `fullEvery` deltas.
  */
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
@@ -20,7 +20,7 @@ interface Keyframe {
 export interface RewindOptions {
   /** frames between keyframes (default 10) */
   keyframeInterval?: number;
-  /** a full snapshot every N keyframes, deltas in between (default 12) */
+  /** at most N deltas between full snapshots (default 12) */
   fullEvery?: number;
   /** total bytes of history to keep (default 96 MiB) */
   maxBytes?: number;
@@ -108,7 +108,7 @@ export class RewindHistory {
     if (keep < this.#inputs.length) {
       this.#inputs.length = Math.max(0, keep);
     }
-    // The chain now ends on whatever entry is last; count deltas since the last full one.
+    // Count the deltas that end the chain, so the next `push` knows when a full one is due.
     this.#sinceFull = 0;
     for (let i = this.#keyframes.length - 1; i >= 0 && !this.#keyframes[i]!.full; i--) {
       this.#sinceFull++;

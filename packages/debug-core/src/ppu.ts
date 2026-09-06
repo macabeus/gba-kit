@@ -64,7 +64,7 @@ export interface BackgroundInfo {
   screenBase: number;
   bpp: 4 | 8;
   mosaic: boolean;
-  /** tile size of the map, in tiles */
+  /** the map's size in tiles */
   width: number;
   height: number;
   affine: boolean;
@@ -72,7 +72,7 @@ export interface BackgroundInfo {
   scrollY: number;
 }
 
-/** DISPCNT + BGxCNT decoded per layer. */
+/** DISPCNT, BGxCNT and the scroll registers, decoded per layer. */
 export function backgroundsSnapshot(machine: Machine): { mode: number; backgrounds: BackgroundInfo[] } {
   const io = machine.peekPartial(0x04000000, 0x60).data;
   const u16 = (off: number): number => io[off]! | (io[off + 1]! << 8);
@@ -230,7 +230,7 @@ export function spritesSnapshot(machine: Machine): SpriteInfo[] {
   return out;
 }
 
-/** The GBA screen, halved in each axis for a thumbnail: nearest pixel, no blending, so the art stays legible. */
+/** A screen scaled down by `factor` for a thumbnail: nearest pixel, no blending, so the art stays legible. */
 export function thumbnailRgba(
   rgba: Uint8Array,
   width = 240,
