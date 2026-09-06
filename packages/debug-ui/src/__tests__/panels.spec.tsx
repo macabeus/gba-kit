@@ -6,7 +6,7 @@ import type { StateBody } from '@gba-kit/debug-core/protocol';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
-import { RecordingPanel } from '../panels/RecordingPanel.js';
+import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
 import { ScreenPanel } from '../panels/ScreenPanel.js';
 import type { Transport } from '../transport.js';
 
@@ -73,5 +73,40 @@ describe('recording panel', () => {
     const html = renderToString(<RecordingPanel transport={transport} />);
     expect(html).toContain('recording since frame 42');
     expect(html).toContain('Stop recording');
+  });
+
+  it('lists a recording as a row of thumbnail, script and the two ways to replay it', () => {
+    const takes = [
+      {
+        id: 1,
+        recording: {
+          format: 'gba-kit-input' as const,
+          version: 1 as const,
+          romHash: 'r',
+          startFrame: 12,
+          frames: [1, 1, 0],
+        },
+        script: "await press('a', { hold: 2 });",
+        thumbnail: 'AAAAAA==',
+        width: 120,
+        height: 80,
+      },
+    ];
+    const opened: number[] = [];
+    const html = renderToString(
+      <RecordingsView takes={takes} onReplay={() => {}} onOpenScript={(t) => opened.push(t.id)} />,
+    );
+    for (const column of ['Thumbnail', 'Script', 'Actions']) {
+      expect(html).toContain(`<th>${column}</th>`);
+    }
+    expect(html).toContain('From where recorded');
+    expect(html).toContain('From here');
+    expect(html).toContain('await press(&#x27;a&#x27;, { hold: 2 });');
+    expect(html).toContain('frame 12');
+    expect(html).toContain('gk-float'); // the script's own open button, not a row of buttons
+    expect(html).not.toContain('Open log');
+    expect(html).not.toContain('Open as script');
+    // a host with nowhere to open a script simply does not offer it
+    expect(renderToString(<RecordingsView takes={takes} onReplay={() => {}} />)).not.toContain('gk-float');
   });
 });

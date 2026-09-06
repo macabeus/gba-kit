@@ -76,6 +76,16 @@ export interface RecordingBody {
   script: string;
 }
 
+/** A finished recording as a view lists it: the log, its script, and the screen it begins on. */
+export interface TakeBody extends RecordingBody {
+  /** unique within a session, and stable while it is listed */
+  id: number;
+  /** the screen where the recording begins: base64 RGBA, `width` × `height` */
+  thumbnail: string;
+  width: number;
+  height: number;
+}
+
 /**
  * Custom requests: `command` → its arguments and response body. `GbaKitRequests[C]['args']`
  * is what a client sends in `arguments`, `['body']` what comes back in `body`.
@@ -125,7 +135,14 @@ export interface GbaKitRequests {
    */
   'gba-kit/lastRecording': { args?: Record<string, never>; body: { last: RecordingBody | null } };
   /** Replay a recording from its start frame (rewinding to it when it is in history). */
-  'gba-kit/replay': { args: { recording: InputRecording }; body: { replayed: boolean } };
+  /** Every finished recording of this session, oldest first, each with the screen it begins on. */
+  'gba-kit/recordings': { args?: Record<string, never>; body: { takes: TakeBody[] } };
+  /**
+   * Press a recording's buttons again: `start` (the default) puts the machine back
+   * where the recording was made and reproduces it, `here` presses them from wherever
+   * the machine is now.
+   */
+  'gba-kit/replay': { args: { recording: InputRecording; from?: 'start' | 'here' }; body: { replayed: boolean } };
 
   /**
    * Save the machine to `<projectDir>/.gba-kit/states/<name>.json`, with `name`

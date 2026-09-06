@@ -351,3 +351,26 @@
   background: repeating-conic-gradient(#1e293b 0 25%, #0f172a 0 50%) 0 0 / 8px 8px;
   vertical-align: middle;
 }
+
+/* a recording's script, with the button that opens it floating in its corner */
+.gk-script {
+  max-height: 8.5em;
+  margin: 0;
+  padding-right: 28px;
+  background: transparent;
+}
+.gk-button.gk-float {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 1px 6px;
+  line-height: 1.2;
+  opacity: 0.55;
+}
+.gk-button.gk-float:hover {
+  opacity: 1;
+}
+.gk-table td .gk-pixels {
+  display: block;
+  margin-bottom: 2px;
+}

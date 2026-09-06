@@ -229,3 +229,26 @@ export function spritesSnapshot(machine: Machine): SpriteInfo[] {
   }
   return out;
 }
+
+/** The GBA screen, halved in each axis for a thumbnail: nearest pixel, no blending, so the art stays legible. */
+export function thumbnailRgba(
+  rgba: Uint8Array,
+  width = 240,
+  height = 160,
+  factor = 2,
+): { width: number; height: number; rgba: Uint8Array } {
+  const w = Math.max(1, Math.floor(width / factor));
+  const h = Math.max(1, Math.floor(height / factor));
+  const out = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const from = (y * factor * width + x * factor) * 4;
+      const to = (y * w + x) * 4;
+      out[to] = rgba[from] ?? 0;
+      out[to + 1] = rgba[from + 1] ?? 0;
+      out[to + 2] = rgba[from + 2] ?? 0;
+      out[to + 3] = 255;
+    }
+  }
+  return { width: w, height: h, rgba: out };
+}

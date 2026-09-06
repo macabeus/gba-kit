@@ -1326,14 +1326,26 @@ export class GbaDebugSession extends DebugSession {
         const last = s.lastRecording;
         return { last: last ? { recording: last, script: s.recordingAsScript(last) } : null };
       }
+      case 'gba-kit/recordings':
+        return {
+          takes: s.recordings.map((t) => ({
+            id: t.id,
+            recording: t.recording,
+            script: t.script,
+            thumbnail: Buffer.from(t.thumbnail.rgba).toString('base64'),
+            width: t.thumbnail.width,
+            height: t.thumbnail.height,
+          })),
+        };
       case 'gba-kit/replay': {
         const a = args as Args<'gba-kit/replay'>;
         const recording = need(a.recording, 'recording') as InputRecording;
         if (typeof recording !== 'object' || !Array.isArray(recording.frames)) {
           throw new Error("'recording' is not an input recording");
         }
+        const from = a.from === 'here' ? 'here' : 'start';
         this.#exec(response, () => {
-          const replayed = s.replayRecording(recording);
+          const replayed = s.replayRecording(recording, from);
           response.body = { replayed };
           if (!replayed) {
             this.#stayStopped(s, 'the recording starts before the history kept');

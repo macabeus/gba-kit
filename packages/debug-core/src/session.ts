@@ -37,11 +37,12 @@ import {
   backgroundsSnapshot,
   paletteSnapshot,
   spritesSnapshot,
+  thumbnailRgba,
   tilemapSnapshot,
   tilesSnapshot,
 } from './ppu.js';
 import { Program } from './program.js';
-import { BUTTON_COUNT, type InputRecording, recordingToScript } from './recorder.js';
+import { BUTTON_COUNT, type InputRecording, type RecordedTake, recordingToScript } from './recorder.js';
 import { RewindHistory, type RewindOptions } from './rewind.js';
 import { type EventEntry, Ring, type TraceEntry } from './rings.js';
 import { decodeSaveState, encodeSaveState } from './snapshot-codec.js';
@@ -139,6 +140,8 @@ const FRAME_MS = 1000 / 59.7275;
 export const DEFAULT_FRAME_EVENT_INTERVAL_MS = 33;
 /** `#hiddenInline` sentinel: hide the inlined layers that begin at the stop address */
 const AUTO_HIDDEN = -1;
+/** finished recordings a session keeps; the oldest is dropped past this, so a long session is bounded */
+const MAX_RECORDINGS = 20;
 const MAX_STEP_FRAMES = 300;
 const MAX_STEP_MS = 1500;
 
@@ -209,6 +212,11 @@ export class Session {
   #recordingStart: number | null = null;
   /** what `stopRecording` last returned, for a view that shows recordings whoever stopped them */
   #lastRecording: InputRecording | null = null;
+  /** finished recordings, oldest first, for a view that lists and replays them */
+  #recordings: RecordedTake[] = [];
+  #nextTakeId = 1;
+  /** the screen the recording in progress began on, kept for its take */
+  #recordingThumbnail: RecordedTake['thumbnail'] | null = null;
 
   /**
    * Prefer {@link Session.create}: it hashes the ROM (to bind save states and
@@ -1392,7 +1400,14 @@ export class Session {
 
   /** Record the buttons held on every frame from this one, until `stopRecording`. */
   startRecording(): void {
+    // the screen as the recording begins: what a view shows to say where it replays from
+    this.#recordingThumbnail = thumbnailRgba(this.machine.framebufferRgba());
     this.#setRecordingStart(this.machine.frame);
+  }
+
+  /** Every finished recording of this session, oldest first, each with the screen it began on. */
+  get recordings(): readonly RecordedTake[] {
+    return this.#recordings;
   }
 
   get recording(): boolean {
@@ -1425,6 +1440,16 @@ export class Session {
       frames,
     };
     this.#lastRecording = recording;
+    this.#recordings.push({
+      id: this.#nextTakeId++,
+      recording,
+      script: recordingToScript(recording),
+      thumbnail: this.#recordingThumbnail ?? thumbnailRgba(this.machine.framebufferRgba()),
+    });
+    if (this.#recordings.length > MAX_RECORDINGS) {
+      this.#recordings.shift();
+    }
+    this.#recordingThumbnail = null;
     return recording;
   }
 
@@ -1445,15 +1470,20 @@ export class Session {
    * Replay a recording from its start frame (which must be reachable in history,
    * or 0 after a restart) and stop at its end.
    */
-  replayRecording(recording: InputRecording): boolean {
+  replayRecording(recording: InputRecording, from: 'start' | 'here' = 'start'): boolean {
     this.#requireStopped('replay');
     if (recording.romHash !== this.romHash) {
       throw new Error('this recording was made with a different ROM');
     }
-    if (recording.startFrame === 0 && (this.history.earliestFrame ?? 0) > 0) {
-      this.restart();
-    } else if (recording.startFrame > this.machine.frame || !this.#replayTo(recording.startFrame, 0)) {
-      return false; // the past only: a start frame ahead of the machine is not in history
+    // `start` puts the machine back where the recording was made and presses the same
+    // buttons there, reproducing it; `here` presses them from wherever the machine is
+    // now, which is how a recorded move is used somewhere else.
+    if (from === 'start') {
+      if (recording.startFrame === 0 && (this.history.earliestFrame ?? 0) > 0) {
+        this.restart();
+      } else if (recording.startFrame > this.machine.frame || !this.#replayTo(recording.startFrame, 0)) {
+        return false; // the past only: a start frame ahead of the machine is not in history
+      }
     }
     this.history.truncateAfter(this.machine.frame);
     this.#armResume();

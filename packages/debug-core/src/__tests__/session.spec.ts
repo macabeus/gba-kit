@@ -1020,6 +1020,44 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(h.session.lastRecording).toBe(recording); // kept: a recording from frame 0 is replayed after a restart
   });
 
+  it('keeps each recording with the screen it began on, and replays it from there or from here', async () => {
+    const h = await boot(variant);
+    h.run(2);
+    h.session.startRecording();
+    h.session.setButton(0, true); // A
+    h.run(2);
+    h.session.setButton(0, false);
+    h.run(2);
+    h.session.stopRecording();
+    const takes = h.session.recordings;
+    expect(takes.length).toBe(1);
+    const take = takes[0]!;
+    expect(take.script).toContain("press('a'");
+    // the screen where it began, halved in each axis and opaque
+    expect(take.thumbnail).toMatchObject({ width: 120, height: 80 });
+    expect(take.thumbnail.rgba.length).toBe(120 * 80 * 4);
+    expect(take.thumbnail.rgba[3]).toBe(255);
+
+    // from where it was recorded: the machine goes back there and ends where it ended
+    const after = h.session.machine.snapshot();
+    const end = h.session.frame;
+    h.run(3);
+    expect(h.session.replayRecording(take.recording, 'start')).toBe(true);
+    expect(h.session.frame).toBe(end);
+    expect(h.session.machine.snapshot()).toEqual(after);
+
+    // from here: the same buttons, pressed from wherever the machine is now
+    const before = h.session.frame;
+    expect(h.session.replayRecording(take.recording, 'here')).toBe(true);
+    expect(h.session.frame).toBe(before + take.recording.frames.length);
+
+    // a second recording is kept beside the first, newest last
+    h.session.startRecording();
+    h.run(1);
+    h.session.stopRecording();
+    expect(h.session.recordings.map((t) => t.id)).toEqual([take.id, take.id + 1]);
+  });
+
   it('save states round-trip and are bound to the ROM', async () => {
     const h = await boot(variant);
     h.run(5);

@@ -138,8 +138,26 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         const last = session.lastRecording;
         return { last: last ? { recording: last, script: session.recordingAsScript(last) } : null } as never;
       }
-      case 'gba-kit/replay':
-        return { replayed: session.replayRecording((a as A<'gba-kit/replay'>).recording as InputRecording) } as never;
+      case 'gba-kit/recordings':
+        return {
+          takes: session.recordings.map((t) => ({
+            id: t.id,
+            recording: t.recording,
+            script: t.script,
+            thumbnail: bytesToBase64(t.thumbnail.rgba),
+            width: t.thumbnail.width,
+            height: t.thumbnail.height,
+          })),
+        } as never;
+      case 'gba-kit/replay': {
+        const replay = a as A<'gba-kit/replay'>;
+        return {
+          replayed: session.replayRecording(
+            replay.recording as InputRecording,
+            replay.from === 'here' ? 'here' : 'start',
+          ),
+        } as never;
+      }
       case 'gba-kit/saveState': {
         const name = (a as A<'gba-kit/saveState'>).name?.trim() || `frame-${session.frame}`;
         const text = session.saveState(name);
