@@ -21,7 +21,7 @@ import type { SearchOptions } from './memory-search.js';
 import type { BackgroundInfo, SpriteInfo, TilemapSnapshot } from './ppu.js';
 import type { InputRecording } from './recorder.js';
 import type { EventEntry, TraceEntry } from './rings.js';
-import type { HistoryInfo, Position, SessionState } from './session.js';
+import type { HistoryInfo, Position, SessionState, StopReason } from './session.js';
 
 /** Body of the `gba-kit/state` event and response; the machine's place in time. */
 export interface StateBody {
@@ -37,6 +37,10 @@ export interface StateBody {
   history: HistoryInfo;
   recording: boolean;
   tracing: boolean;
+  /** why the machine last stopped, while it is stopped: an entry stop is not a breakpoint */
+  reason?: StopReason;
+  /** what that stop said, when it said anything */
+  description?: string;
 }
 
 export type PpuArguments =

@@ -265,6 +265,8 @@ export class GbaDebugSession extends DebugSession {
   #audioWanted = false;
   /** whether the client asked to be told when what it holds has gone stale */
   #clientTakesInvalidated = false;
+  /** the stop the machine is sitting on, so `gba-kit/state` can say what it was */
+  #lastStop: StopInfo | null = null;
   /** while set, session events queue here so a response can go out first */
   #deferred: DebugProtocol.Event[] | null = null;
   readonly #breakpoints: BreakpointSet = { source: new Map(), functions: [], instructions: [], data: [], events: [] };
@@ -439,6 +441,7 @@ export class GbaDebugSession extends DebugSession {
       stopped: (info) => this.#sendStopped(info),
       continued: () => {
         this.#handles.reset();
+        this.#lastStop = null;
         this.#emit(new Event('continued', { threadId: THREAD_ID, allThreadsContinued: true }));
         this.#emit(new Event('gba-kit/state', this.#stateBody()));
       },
@@ -470,6 +473,7 @@ export class GbaDebugSession extends DebugSession {
 
   #sendStopped(info: StopInfo): void {
     this.#handles.reset();
+    this.#lastStop = info;
     const body: DebugProtocol.StoppedEvent['body'] = {
       reason: dapReason(info),
       threadId: THREAD_ID,
@@ -518,6 +522,8 @@ export class GbaDebugSession extends DebugSession {
       history: s.historyInfo(),
       recording: s.recording,
       tracing: s.tracing,
+      reason: s.state === 'stopped' ? this.#lastStop?.reason : undefined,
+      description: s.state === 'stopped' ? this.#lastStop?.description : undefined,
     };
   }
 

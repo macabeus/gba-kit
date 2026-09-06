@@ -73,6 +73,11 @@ class Panels {
     live?.setAudio(this.wantsAudio);
   }
 
+  /** Whether a panel is up. */
+  has(root: Root): boolean {
+    return this.#panels.has(root);
+  }
+
   /**
    * Make sure a panel exists, leaving one that already does exactly where it is: a
    * session starting should put the screen up, not pull a tab the user is reading out
@@ -173,6 +178,8 @@ class Panels {
 
 export function activate(context: vscode.ExtensionContext): void {
   const panels = new Panels(context);
+  /** sessions whose entry stop the screen already ran past, so it happens once each */
+  const ranForScreen = new Set<string>();
   const inline = new Map<string, GbaDebugSession>();
   /** stream attachments in flight, by session id; one whose session ended meanwhile is dropped, not made live */
   const pending = new Map<string, Promise<Live>>();
@@ -240,6 +247,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.debug.onDidTerminateDebugSession((session) => {
       pending.delete(session.id);
+      ranForScreen.delete(session.id);
       inline.delete(session.id);
       if (panels.live?.session.id === session.id) {
         panels.setLive(null);
@@ -254,12 +262,17 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       if (e.event === 'gba-kit/state') {
         panels.state(e.body);
+        runForTheScreen(e.session, e.body as { state?: string; reason?: string });
       } else if (e.event === 'gba-kit/labels') {
         panels.labels();
       }
     }),
 
-    vscode.commands.registerCommand('gba-kit.showScreen', () => panels.show('screen')),
+    vscode.commands.registerCommand('gba-kit.showScreen', () => {
+      panels.show('screen');
+      // the entry stop may have been announced before there was a screen to watch it
+      void runForTheScreenNow();
+    }),
     vscode.commands.registerCommand('gba-kit.showTools', () => panels.show('tools')),
     vscode.commands.registerCommand('gba-kit.stepFrame', () => request('gba-kit/stepFrame')),
     vscode.commands.registerCommand('gba-kit.stepScanline', () => request('gba-kit/stepScanline')),
@@ -331,6 +344,37 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     { dispose: () => panels.dispose() },
   );
+
+  /**
+   * A screen exists to be watched, so the machine runs once one is up. Only the entry
+   * stop is resumed, and only once per session: opening the screen while stopped at a
+   * breakpoint must leave the machine exactly where the user stopped it. This does mean
+   * a session with `stopOnEntry` runs on once its screen appears — set `stopOnEntry` to
+   * false to skip the stop entirely, or close the screen to sit at it.
+   */
+  function runForTheScreen(session: vscode.DebugSession, body: { state?: string; reason?: string }): void {
+    if (body.state !== 'stopped' || body.reason !== 'entry' || ranForScreen.has(session.id) || !panels.has('screen')) {
+      return;
+    }
+    ranForScreen.add(session.id);
+    void bridgeFor(session)
+      .control('continue')
+      .catch((err: Error) => output.appendLine(`gba-kit: could not start the machine: ${err.message}`));
+  }
+
+  /** Ask the active session where it is, and run it if it is sitting at its entry stop. */
+  async function runForTheScreenNow(): Promise<void> {
+    const session = vscode.debug.activeDebugSession;
+    if (!session || session.type !== DEBUG_TYPE) {
+      return;
+    }
+    try {
+      const body = (await session.customRequest('gba-kit/state')) as { state?: string; reason?: string };
+      runForTheScreen(session, body);
+    } catch {
+      // the session went away between the click and the question
+    }
+  }
 
   async function request(command: string, args?: Record<string, unknown>): Promise<unknown> {
     const session = vscode.debug.activeDebugSession;

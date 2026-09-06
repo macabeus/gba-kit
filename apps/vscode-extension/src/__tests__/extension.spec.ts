@@ -56,6 +56,7 @@ class FakePanel {
 const stub = vi.hoisted(() => ({
   start: [] as Array<(e: unknown) => void>,
   terminate: [] as Array<(e: unknown) => void>,
+  custom: [] as Array<(e: unknown) => void>,
   commands: new Map<string, (...args: unknown[]) => unknown>(),
   panels: [] as unknown[],
   /** the view id of each panel created, in order */
@@ -101,7 +102,7 @@ vi.mock('vscode', () => {
       registerDebugAdapterDescriptorFactory: () => disposable,
       onDidStartDebugSession: event(stub.start),
       onDidTerminateDebugSession: event(stub.terminate),
-      onDidReceiveDebugSessionCustomEvent: event([]),
+      onDidReceiveDebugSessionCustomEvent: event(stub.custom),
       activeDebugSession: undefined,
     },
     DebugAdapterExecutable: class {},
@@ -231,5 +232,38 @@ describe('extension', () => {
     if (process.platform !== 'win32') {
       expect(boundPipes()).toEqual([]);
     }
+  });
+  it('runs the machine for the screen at the entry stop, once, and never from a breakpoint', async () => {
+    const started = fakeSession('entry-run');
+    stub.start.forEach((l) => l(started));
+    await until(() => started.calls.some((c) => c.command === 'gba-kit/stream'));
+    const resumes = (): number => started.calls.filter((c) => c.command === 'continue').length;
+    expect(resumes()).toBe(0);
+
+    // the screen is up (an earlier session opened it), so the entry stop runs on
+    stub.custom.forEach((l) =>
+      l({ session: started, event: 'gba-kit/state', body: { state: 'stopped', reason: 'entry' } }),
+    );
+    await until(() => resumes() === 1);
+
+    // only once, however often the state is repeated
+    stub.custom.forEach((l) =>
+      l({ session: started, event: 'gba-kit/state', body: { state: 'stopped', reason: 'entry' } }),
+    );
+    await wait(20);
+    expect(resumes()).toBe(1);
+
+    // and never from a stop the user asked for
+    const atBreakpoint = fakeSession('bp');
+    stub.start.forEach((l) => l(atBreakpoint));
+    await until(() => atBreakpoint.calls.some((c) => c.command === 'gba-kit/stream'));
+    stub.custom.forEach((l) =>
+      l({ session: atBreakpoint, event: 'gba-kit/state', body: { state: 'stopped', reason: 'breakpoint' } }),
+    );
+    await wait(20);
+    expect(atBreakpoint.calls.filter((c) => c.command === 'continue')).toEqual([]);
+    stub.terminate.forEach((l) => l(atBreakpoint));
+    stub.terminate.forEach((l) => l(started));
+    await wait(20);
   });
 });
