@@ -144,7 +144,8 @@ export const DEFAULT_FRAME_EVENT_INTERVAL_MS = 33;
 /** `#hiddenInline` sentinel: hide the inlined layers that begin at the stop address */
 const AUTO_HIDDEN = -1;
 /** finished recordings a session keeps; the oldest is dropped past this, so a long session is bounded */
-const MAX_RECORDINGS = 20;
+/** how many finished recordings a session lists; the oldest goes when a new one arrives */
+export const MAX_RECORDINGS = 20;
 const MAX_STEP_FRAMES = 300;
 const MAX_STEP_MS = 1500;
 
@@ -1479,17 +1480,38 @@ export class Session {
       frames,
     };
     this.#lastRecording = recording;
-    this.#recordings.push({
-      id: this.#nextTakeId++,
+    this.addRecording({
       recording,
       script: recordingToScript(recording),
       thumbnail: this.#recordingThumbnail ?? thumbnailRgba(this.machine.framebufferRgba()),
+      createdAt: new Date().toISOString(),
     });
+    this.#recordingThumbnail = null;
+    return recording;
+  }
+
+  /**
+   * Keep a take this session did not make: one read back from a file. Returns it with
+   * the id it was given. The oldest goes once there are more than
+   * {@link MAX_RECORDINGS}, so a project with a long history lists its newest.
+   */
+  addRecording(take: Omit<RecordedTake, 'id'>): RecordedTake {
+    const kept: RecordedTake = { id: this.#nextTakeId++, ...take };
+    this.#recordings.push(kept);
     if (this.#recordings.length > MAX_RECORDINGS) {
       this.#recordings.shift();
     }
-    this.#recordingThumbnail = null;
-    return recording;
+    return kept;
+  }
+
+  /** Forget a take. False when this session has no take with that id. */
+  removeRecording(id: number): boolean {
+    const at = this.#recordings.findIndex((t) => t.id === id);
+    if (at < 0) {
+      return false;
+    }
+    this.#recordings.splice(at, 1);
+    return true;
   }
 
   /** Every way a recording begins or ends goes through here, so listeners hear of each flip exactly once. */

@@ -14,13 +14,17 @@ import {
   EVENT_BREAKPOINT_KINDS,
   type EventBreakpointKind,
   type InputRecording,
+  MAX_RECORDINGS,
   REGISTER_NAMES,
+  type RecordedTake,
   type SaveStateFile,
   type Scope,
   type SearchOptions,
   Session,
   type StopInfo,
   type VarNode,
+  decodeTake,
+  encodeTake,
   hex8,
   regionOf,
   renameSaveState,
@@ -444,6 +448,7 @@ export class GbaDebugSession extends DebugSession {
         );
       }
     }
+    await this.#loadRecordings(session);
     return session;
   }
 
@@ -1332,12 +1337,31 @@ export class GbaDebugSession extends DebugSession {
         // the session's `recording` event becomes the `gba-kit/state` that follows the response
         this.#inspect(response, () => s.startRecording());
         return SENT;
-      case 'gba-kit/recordStop':
+      case 'gba-kit/recordStop': {
+        // the take is answered from the session; the file it is also written to is
+        // for the next session, so the response does not wait on the disk
+        let take: RecordedTake | undefined;
         this.#inspect(response, () => {
           const recording = s.stopRecording();
+          take = s.recordings.at(-1);
           response.body = { recording, script: s.recordingAsScript(recording) };
         });
+        if (take) {
+          await this.#writeRecording(s, take);
+        }
         return SENT;
+      }
+      case 'gba-kit/deleteRecording': {
+        const a = args as Args<'gba-kit/deleteRecording'>;
+        const id = needInteger(a.id, 'id', 1, Number.MAX_SAFE_INTEGER);
+        const take = s.recordings.find((t) => t.id === id);
+        if (!take) {
+          return { deleted: false };
+        }
+        s.removeRecording(id);
+        await this.#removeFile(s, this.#recordingPath(s, take)).catch(() => {});
+        return { deleted: true };
+      }
       case 'gba-kit/lastRecording': {
         const last = s.lastRecording;
         return { last: last ? { recording: last, script: s.recordingAsScript(last) } : null };
@@ -1348,6 +1372,7 @@ export class GbaDebugSession extends DebugSession {
             id: t.id,
             recording: t.recording,
             script: t.script,
+            createdAt: t.createdAt,
             thumbnail: Buffer.from(t.thumbnail.rgba).toString('base64'),
             width: t.thumbnail.width,
             height: t.thumbnail.height,
@@ -1490,6 +1515,68 @@ export class GbaDebugSession extends DebugSession {
       throw new Error('this host has no file system');
     }
     return session.host.files;
+  }
+
+  #recordingsDir(session: Session): string {
+    const files = this.#files(session);
+    return files.join(session.options.projectDir ?? session.options.cwd, '.gba-kit', 'recordings');
+  }
+
+  /**
+   * A take's file, named for when it was taken and where it starts: two takes of the
+   * same frame are still two files, and the name says which is which.
+   */
+  #recordingPath(session: Session, take: RecordedTake): string {
+    // to the millisecond: two takes of the same frame, seconds apart, are two files
+    const stamp = safeName(take.createdAt) || 'undated';
+    return this.#files(session).join(this.#recordingsDir(session), `${stamp}-frame${take.recording.startFrame}.json`);
+  }
+
+  async #writeRecording(session: Session, take: RecordedTake): Promise<void> {
+    const file = this.#recordingPath(session, take);
+    try {
+      await this.#files(session).writeText(file, encodeTake(take));
+    } catch (err) {
+      // the recording is in the session either way: say why it will not be there next time
+      this.#log(`gba-kit: cannot write ${file}: ${(err as Error).message}\n`, 'stderr');
+    }
+  }
+
+  /**
+   * Give the session the recordings this project already has, oldest first, so a take
+   * made in an earlier session is listed and replayed in this one. A file that is not
+   * one of ours, or belongs to another ROM, is passed over. Names begin with the time
+   * the take was made, so reading them newest first stops at the number a session
+   * lists, however many the project has kept; the rest stay where they are.
+   */
+  async #loadRecordings(session: Session): Promise<void> {
+    const files = this.#files(session);
+    const dir = this.#recordingsDir(session);
+    const newestFirst = (await files.list(dir)).filter((e) => e.endsWith('.json')).sort((a, b) => b.localeCompare(a));
+    const takes: Array<Omit<RecordedTake, 'id'>> = [];
+    for (const entry of newestFirst) {
+      if (takes.length === MAX_RECORDINGS) {
+        break;
+      }
+      const text = await files.readText(files.join(dir, entry)).catch(() => null);
+      if (text === null) {
+        continue;
+      }
+      try {
+        const take = decodeTake(text);
+        if (take.recording.romHash === session.romHash) {
+          takes.push(take);
+        }
+      } catch {
+        // not a recording of ours; leave it where it is
+      }
+    }
+    for (const take of takes.reverse()) {
+      session.addRecording(take);
+    }
+    if (takes.length > 0) {
+      this.#log(`gba-kit: ${takes.length} recording${takes.length === 1 ? '' : 's'} read from ${dir}\n`);
+    }
   }
 
   #statesDir(session: Session): string {

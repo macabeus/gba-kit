@@ -198,11 +198,16 @@ export function createSessionTransport(session: Session, options: SessionTranspo
             id: t.id,
             recording: t.recording,
             script: t.script,
+            createdAt: t.createdAt,
             thumbnail: bytesToBase64(t.thumbnail.rgba),
             width: t.thumbnail.width,
             height: t.thumbnail.height,
           })),
         } as never;
+      case 'gba-kit/deleteRecording': {
+        // the page keeps its recordings in the session, so forgetting one is all there is to it
+        return { deleted: session.removeRecording((a as A<'gba-kit/deleteRecording'>).id) } as never;
+      }
       case 'gba-kit/replay': {
         const replay = a as A<'gba-kit/replay'>;
         return {

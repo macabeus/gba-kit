@@ -2,8 +2,9 @@
  * Input recordings: the buttons held on every frame of a range, bound to the ROM
  * and to the frame the recording started on. Replayed by the session by pushing
  * the masks through the machine; exported as gba-kit's scripting dialect for
- * humans.
+ * humans, and kept as files under a project's `.gba-kit/recordings/`.
  */
+import { base64ToBytes, bytesToBase64 } from './snapshot-codec.js';
 
 export interface InputRecording {
   format: 'gba-kit-input';
@@ -26,6 +27,50 @@ export interface RecordedTake {
   script: string;
   /** the screen where the recording begins, halved in each axis */
   thumbnail: { width: number; height: number; rgba: Uint8Array };
+  /** when the recording was stopped, or when the file holding it was written */
+  createdAt: string;
+}
+
+/**
+ * A take as a file: the input, the screen it began on, and when it was taken. The
+ * script is not stored, being what `recordingToScript` makes of the input.
+ */
+export interface RecordingFile {
+  format: 'gba-kit-recording';
+  version: 1;
+  createdAt: string;
+  thumbnail: { width: number; height: number; rgba: string };
+  recording: InputRecording;
+}
+
+export function encodeTake(take: Omit<RecordedTake, 'id'>): string {
+  const file: RecordingFile = {
+    format: 'gba-kit-recording',
+    version: 1,
+    createdAt: take.createdAt,
+    thumbnail: {
+      width: take.thumbnail.width,
+      height: take.thumbnail.height,
+      rgba: bytesToBase64(take.thumbnail.rgba),
+    },
+    recording: take.recording,
+  };
+  return JSON.stringify(file);
+}
+
+/** Throws when the text is not one of these files, so a reader can skip it and go on. */
+export function decodeTake(text: string): Omit<RecordedTake, 'id'> {
+  const file = JSON.parse(text) as RecordingFile;
+  const shot = file.thumbnail;
+  if (file.format !== 'gba-kit-recording' || !shot || typeof shot.rgba !== 'string') {
+    throw new Error('not a gba-kit recording');
+  }
+  return {
+    recording: parseRecording(JSON.stringify(file.recording)),
+    script: recordingToScript(file.recording),
+    thumbnail: { width: shot.width, height: shot.height, rgba: base64ToBytes(shot.rgba) },
+    createdAt: typeof file.createdAt === 'string' ? file.createdAt : '',
+  };
 }
 
 /** how many buttons the GBA has: bits 0–9 of a mask, in `BUTTON_NAMES` order */

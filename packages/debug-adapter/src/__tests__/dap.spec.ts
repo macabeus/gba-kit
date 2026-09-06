@@ -36,6 +36,22 @@ function base64Bytes(text: string): number {
   return Buffer.from(text, 'base64').length;
 }
 
+/**
+ * What a directory holds once it holds `want` entries. A recording is written after
+ * the response that stopped it: this session reads its own recordings from memory,
+ * and the file is for the next one.
+ */
+async function filesIn(dir: string, want: number): Promise<string[]> {
+  for (let i = 0; i < 200; i++) {
+    const listed = await readdir(dir).catch(() => [] as string[]);
+    if (listed.length === want) {
+      return listed;
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return readdir(dir);
+}
+
 const clients: DapClient[] = [];
 const tempDirs: string[] = [];
 
@@ -1260,6 +1276,85 @@ describe('emulator requests', () => {
     expect(loaded.reason).toBe('restart');
     expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(3);
     expect(await num(client, 'g_keys')).toBe(keysAfter);
+  });
+
+  it('keeps recordings under the project, lists them in the next session, and deletes one', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(projectDir);
+    const dir = join(projectDir, '.gba-kit', 'recordings');
+    const first = await launch({ projectDir });
+    await first.body('gba-kit/recordStart');
+    await first.body('gba-kit/input', { button: 0, down: true });
+    await stopped(first, 'gba-kit/stepFrame');
+    await stopped(first, 'gba-kit/stepFrame');
+    await first.body('gba-kit/recordStop');
+    expect((await filesIn(dir, 1)).length).toBe(1);
+
+    // a session opened on the same project lists what the last one recorded
+    const next = await launch({ projectDir });
+    const { takes } = await next.body<GbaKitRequests['gba-kit/recordings']['body']>('gba-kit/recordings');
+    expect(takes.length).toBe(1);
+    const take = takes[0]!;
+    expect(take.recording.frames).toEqual([1, 1]);
+    expect(take.script).toContain("press('a', { hold: 2 })");
+    expect(take.createdAt).not.toBe('');
+    expect(base64Bytes(take.thumbnail)).toBe(take.width * take.height * 4);
+    // and it replays there, having come back whole
+    const replay = await stopped(next, 'gba-kit/replay', { recording: take.recording });
+    expect(replay.description).toMatch(/replayed 2 frames/);
+
+    expect(await next.body('gba-kit/deleteRecording', { id: take.id })).toEqual({ deleted: true });
+    expect(await filesIn(dir, 0)).toEqual([]);
+    expect((await next.body<GbaKitRequests['gba-kit/recordings']['body']>('gba-kit/recordings')).takes).toEqual([]);
+    expect(await next.body('gba-kit/deleteRecording', { id: take.id })).toEqual({ deleted: false });
+  });
+
+  it('lists the newest recordings a project kept, and leaves the older files alone', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(projectDir);
+    const dir = join(projectDir, '.gba-kit', 'recordings');
+    const first = await launch({ projectDir });
+    await first.body('gba-kit/recordStart');
+    await stopped(first, 'gba-kit/stepFrame');
+    await first.body('gba-kit/recordStop');
+    const [name] = await filesIn(dir, 1);
+
+    // 24 more of the same ROM, a day apart, named the way the adapter names them
+    const written = JSON.parse(await readFile(join(dir, name!), 'utf8')) as Record<string, unknown>;
+    for (let i = 0; i < 24; i++) {
+      const at = `2026-01-${String(i + 1).padStart(2, '0')}T00:00:00.000Z`;
+      const file = { ...written, createdAt: at, recording: { ...(written.recording as object), startFrame: i } };
+      await writeFile(join(dir, `${at.replace(/[^\w.-]+/g, '_')}-frame${i}.json`), JSON.stringify(file));
+    }
+
+    const next = await launch({ projectDir });
+    const { takes } = await next.body<GbaKitRequests['gba-kit/recordings']['body']>('gba-kit/recordings');
+    // the twenty newest, oldest of them first: the 19 latest days, then the one just recorded
+    expect(takes.length).toBe(20);
+    expect(takes[0]!.recording.startFrame).toBe(5);
+    expect(takes.at(-1)!.createdAt).toBe(written.createdAt);
+    expect((await readdir(dir)).length).toBe(25);
+  });
+
+  it('passes over a recordings file that is not one, or belongs to another ROM', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(projectDir);
+    const dir = join(projectDir, '.gba-kit', 'recordings');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'notes.txt'), 'not json');
+    await writeFile(join(dir, 'junk.json'), '{"format":"something else"}');
+    await writeFile(
+      join(dir, 'other-rom.json'),
+      JSON.stringify({
+        format: 'gba-kit-recording',
+        version: 1,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        thumbnail: { width: 1, height: 1, rgba: 'AAAAAA==' },
+        recording: { format: 'gba-kit-input', version: 1, romHash: 'another', startFrame: 0, frames: [0] },
+      }),
+    );
+    const client = await launch({ projectDir });
+    expect((await client.body<GbaKitRequests['gba-kit/recordings']['body']>('gba-kit/recordings')).takes).toEqual([]);
   });
 
   it('streams frames to a pipe the client owns', async () => {

@@ -10,7 +10,8 @@ import type { Transport } from '../transport.js';
  * screen it begins on, the script it amounts to, and the two ways to press it again.
  * A replay plays back at the speed it was recorded, so it is watched on the screen
  * rather than jumped through. The rows come from the session, so a recording stopped
- * anywhere (this panel, the Screen panel's button, an editor command) appears here.
+ * anywhere (this panel, the Screen panel's button, an editor command) appears here,
+ * and so does one made in an earlier session, which the project keeps on disk.
  */
 export function RecordingPanel({ transport }: { transport: Transport }) {
   const state = useDebugState(transport);
@@ -46,6 +47,12 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
   const toggle = (): Promise<void> =>
     act(() => transport.request(recording ? 'gba-kit/recordStop' : 'gba-kit/recordStart'));
 
+  const remove = (take: TakeBody): Promise<void> =>
+    act(async () => {
+      await transport.request('gba-kit/deleteRecording', { id: take.id });
+      listed.refresh();
+    });
+
   const replay = (take: TakeBody, from: 'start' | 'here'): Promise<void> =>
     act(async () => {
       const { replayed } = await transport.request('gba-kit/replay', { recording: take.recording, from });
@@ -68,7 +75,7 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
               ? `recording since frame ${state?.history.recordingStart ?? '…'}`
               : takes.length === 0
                 ? 'Press Record, play, press Stop.'
-                : `${takes.length} recording${takes.length === 1 ? '' : 's'} this session`}
+                : `${takes.length} recording${takes.length === 1 ? '' : 's'} for this ROM`}
         </span>
       </div>
       {error && (
@@ -77,13 +84,15 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
         </span>
       )}
       {takes.length === 0 ? (
-        <Empty>Recordings of this session are listed here, with the screen each begins on.</Empty>
+        <Empty>Recordings of this ROM are listed here, with the screen each begins on.</Empty>
       ) : (
         <div className="gk-fill" style={{ overflow: 'auto' }}>
           <RecordingsView
             takes={takes}
             disabled={!stopped || busy}
+            busy={busy}
             onReplay={(take, from) => void replay(take, from)}
+            onRemove={(take) => void remove(take)}
             onOpenScript={
               transport.openText
                 ? (take) => transport.openText?.(take.script, 'javascript', `recording-${take.recording.startFrame}.js`)
@@ -100,14 +109,19 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
 export function RecordingsView({
   takes,
   disabled,
+  busy,
   onReplay,
   onOpenScript,
+  onRemove,
 }: {
   takes: TakeBody[];
+  /** replaying needs a stopped machine; deleting does not */
   disabled?: boolean;
+  busy?: boolean;
   onReplay(take: TakeBody, from: 'start' | 'here'): void;
   /** absent when the host has nowhere to open a script */
   onOpenScript?: (take: TakeBody) => void;
+  onRemove?: (take: TakeBody) => void;
 }) {
   return (
     <table className="gk-table">
@@ -132,6 +146,7 @@ export function RecordingsView({
               <div className="gk-muted gk-small">
                 frame {take.recording.startFrame} · {take.recording.frames.length} frames
               </div>
+              {take.createdAt && <div className="gk-muted gk-small">{new Date(take.createdAt).toLocaleString()}</div>}
             </td>
             <td style={{ position: 'relative', width: '100%' }}>
               <pre className="gk-pre gk-script">{take.script}</pre>
@@ -166,6 +181,19 @@ export function RecordingsView({
                   <Icon name="play" />
                   From here
                 </Button>
+                {onRemove && (
+                  <span className="gk-row" style={{ justifyContent: 'flex-end' }}>
+                    <Button
+                      kind="icon danger"
+                      onClick={() => onRemove(take)}
+                      disabled={busy}
+                      title="Delete"
+                      label={`Delete the recording from frame ${take.recording.startFrame}`}
+                    >
+                      <Icon name="trash" />
+                    </Button>
+                  </span>
+                )}
               </div>
             </td>
           </tr>

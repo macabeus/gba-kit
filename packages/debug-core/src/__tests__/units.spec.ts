@@ -12,7 +12,7 @@ import { ManualHost } from '../host.js';
 import { ioRegisterAt } from '../io.js';
 import { LabelStore } from '../labels.js';
 import { LOG, TILES, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
-import { recordingToScript, toSegments } from '../recorder.js';
+import { decodeTake, encodeTake, recordingToScript, toSegments } from '../recorder.js';
 import { Ring } from '../rings.js';
 import { base64ToBytes, bytesToBase64, encodeSaveState } from '../snapshot-codec.js';
 import { SourceMapper } from '../source-map.js';
@@ -286,6 +286,31 @@ describe('recordings', () => {
       frames: [0b11],
     });
     expect(combo).toContain("['a+b', 1]");
+  });
+
+  it('writes a take to a file and reads it back, script and all', () => {
+    const take = {
+      recording: {
+        format: 'gba-kit-input' as const,
+        version: 1 as const,
+        romHash: 'abc',
+        startFrame: 12,
+        frames: [0, 1, 1],
+      },
+      script: 'stale, and not stored',
+      thumbnail: { width: 2, height: 1, rgba: new Uint8Array([1, 2, 3, 255, 4, 5, 6, 255]) },
+      createdAt: '2026-09-06T12:00:00.000Z',
+    };
+    const back = decodeTake(encodeTake(take));
+    expect(back.recording).toEqual(take.recording);
+    expect(back.thumbnail).toEqual(take.thumbnail);
+    expect(back.createdAt).toBe(take.createdAt);
+    // the script is what the input makes of it, not what was stored beside it
+    expect(back.script).toContain("await press('a', { hold: 2 });");
+
+    for (const bad of ['{}', '{"format":"gba-kit-recording"}', 'not json']) {
+      expect(() => decodeTake(bad)).toThrow();
+    }
   });
 });
 

@@ -139,6 +139,7 @@ describe('recording panel', () => {
         thumbnail: 'AAAAAA==',
         width: 120,
         height: 80,
+        createdAt: '2026-09-06T12:00:00.000Z',
       },
     ];
     const opened: number[] = [];
@@ -157,5 +158,12 @@ describe('recording panel', () => {
     expect(html).not.toContain('Open as script');
     // a host with nowhere to open a script simply does not offer it
     expect(renderToString(<RecordingsView takes={takes} onReplay={() => {}} />)).not.toContain('gk-float');
+    // a recording outlives the session that made it, so the row says when it was made
+    expect(html).toContain(new Date('2026-09-06T12:00:00.000Z').toLocaleString());
+    // and deleting one is offered only where the host can do it
+    expect(html).not.toContain('codicon-trash');
+    expect(renderToString(<RecordingsView takes={takes} onReplay={() => {}} onRemove={() => {}} />)).toContain(
+      'codicon-trash',
+    );
   });
 });

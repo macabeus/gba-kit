@@ -84,6 +84,8 @@ export interface RecordingBody {
 
 /** A finished recording as a view lists it: the log, its script, and the screen it begins on. */
 export interface TakeBody extends RecordingBody {
+  /** when the recording was stopped, or when the file holding it was written */
+  createdAt: string;
   /** unique within a session, and stable while it is listed */
   id: number;
   /** the screen where the recording begins: base64 RGBA, `width` × `height` */
@@ -142,6 +144,8 @@ export interface GbaKitRequests {
   'gba-kit/lastRecording': { args?: Record<string, never>; body: { last: RecordingBody | null } };
   /** The finished recordings of this session, oldest first, at most the newest 20, each with the screen it begins on. */
   'gba-kit/recordings': { args?: Record<string, never>; body: { takes: TakeBody[] } };
+  /** Forget a recording, and delete the file keeping it. False when this session has no such take. */
+  'gba-kit/deleteRecording': { args: { id: number }; body: { deleted: boolean } };
   /**
    * Press a recording's buttons again: `start` (the default) puts the machine back
    * where the recording was made and reproduces it, `here` presses them from wherever

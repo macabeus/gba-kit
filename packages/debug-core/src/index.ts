@@ -12,6 +12,7 @@
 export {
   Session,
   DEFAULT_FRAME_EVENT_INTERVAL_MS,
+  MAX_RECORDINGS,
   type HistoryInfo,
   type Position,
   type SessionEvents,
@@ -42,11 +43,15 @@ export { LabelStore, type Label, type LabelsFile } from './labels.js';
 export {
   BUTTON_COUNT,
   buttonsToNames,
+  decodeTake,
+  encodeTake,
   namesToButtons,
   parseRecording,
   recordingToScript,
   toSegments,
   type InputRecording,
+  type RecordedTake,
+  type RecordingFile,
 } from './recorder.js';
 export {
   decodeSaveState,

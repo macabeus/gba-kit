@@ -32,7 +32,7 @@ DWARF reader and the debug adapter are the same packages any other editor uses.
 
 `sourceMap` rewrites DWARF path prefixes when the sources were compiled
 elsewhere (`{"/build-container/src": "${workspaceFolder}/src"}`), `projectDir`
-says where `.gba-kit/` (labels, save states) lives, and `allowElfMismatch`
+says where `.gba-kit/` (labels, save states, recordings) lives, and `allowElfMismatch`
 lets a session start when the ELF is not this ROM's build (the launch refuses
 by default, naming the first mismatching section, because breakpoints from a
 stale ELF land in the wrong places).
@@ -63,7 +63,8 @@ stale ELF land in the wrong places).
   screen it was saved on, to load, rename or delete.
 - **GBA: Show Tools**: I/O registers decoded, palette, tiles, tilemaps, sprites,
   the instruction trace, the hardware event log, memory search, labels (with
-  `.sym` import and export), save states, recordings.
+  `.sym` import and export), save states, recordings. Save states and recordings
+  are kept in the project and listed again the next time it is opened.
 
 The panels use the editor's own icons (the codicon font, which ships with the
 extension) and its theme colors, so they read as part of the editor rather than as
