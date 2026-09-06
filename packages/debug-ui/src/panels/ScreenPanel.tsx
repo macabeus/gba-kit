@@ -7,7 +7,7 @@ import { AUDIO_SAMPLE_RATE } from '@gba-kit/debug-core/protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { AudioPlayer } from '../audio.js';
-import { Button, attempt } from '../components.js';
+import { Button, Icon, attempt } from '../components.js';
 import { useDebugState } from '../hooks.js';
 import { KEYBOARD_HINT, buttonForKey, gamepadMask } from '../keys.js';
 import type { Transport } from '../transport.js';
@@ -177,11 +177,13 @@ export function ScreenPanel({
         <div className="gk-row">
           {running ? (
             <Button onClick={() => attempt(setError, transport.control('pause'))} kind="primary">
-              ⏸ Pause
+              <Icon name="debug-pause" />
+              Pause
             </Button>
           ) : (
             <Button onClick={() => attempt(setError, transport.control('continue'))} kind="primary" disabled={!stopped}>
-              ▶ Run
+              <Icon name="debug-continue" />
+              Run
             </Button>
           )}
           <Button
@@ -189,30 +191,34 @@ export function ScreenPanel({
             disabled={!stopped}
             title="Run to the end of this frame"
           >
-            ⏭ Frame
+            <Icon name="debug-step-over" />
+            Frame
           </Button>
           <Button
             onClick={() => attempt(setError, transport.request('gba-kit/rewind', { frames: rewindFrames }))}
             disabled={state?.state !== 'stopped' || state.history.earliestFrame === null}
             title={`Rewind ${rewindFrames} frames`}
           >
-            ⏪ Rewind
+            <Icon name="debug-step-back" />
+            Rewind
           </Button>
           <Button
             onClick={() => attempt(setError, toggleRecording())}
-            kind={recording ? 'danger' : undefined}
+            active={recording}
             title="Record the buttons you press as a script"
           >
-            {recording ? '■ Stop recording' : '● Record'}
+            <Icon name={recording ? 'debug-stop' : 'record'} />
+            {recording ? 'Stop recording' : 'Record'}
           </Button>
           {audio && (
             <Button
               onClick={() => setSoundOn((v) => !v)}
+              kind="icon"
               active={soundOn}
               title="Sound"
               label={soundOn ? 'Mute sound' : 'Unmute sound'}
             >
-              {soundOn ? '🔊' : '🔇'}
+              <Icon name={soundOn ? 'unmute' : 'mute'} />
             </Button>
           )}
         </div>

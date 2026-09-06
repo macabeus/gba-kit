@@ -12,7 +12,8 @@ describe('package manifest', () => {
       dependencies: Record<string, string>;
       devDependencies: Record<string, string>;
     };
-    expect(Object.keys(pkg.dependencies)).toEqual(['@gba-kit/debug-core']);
+    // the icon font is the only other one, and it is a stylesheet, not code
+    expect(Object.keys(pkg.dependencies).sort()).toEqual(['@gba-kit/debug-core', '@vscode/codicons']);
     expect(pkg.devDependencies).not.toHaveProperty('@gba-kit/debug-adapter');
   });
 });

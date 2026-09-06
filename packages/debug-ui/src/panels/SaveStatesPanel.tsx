@@ -6,7 +6,7 @@
 import type { SavedStateInfo } from '@gba-kit/debug-core/protocol';
 import { useState } from 'react';
 
-import { Button, Empty, Screenshot } from '../components.js';
+import { Button, Empty, Icon, Screenshot } from '../components.js';
 import { useDebugState, useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
@@ -31,9 +31,12 @@ export function SaveStatesPanel({ transport }: { transport: Transport }) {
           onKeyDown={(e) => e.key === 'Enter' && save()}
         />
         <Button onClick={save} kind="primary" disabled={!stopped || saves.busy}>
+          <Icon name="add" />
           Save state
         </Button>
-        <Button onClick={saves.refresh}>Refresh</Button>
+        <Button kind="icon" onClick={saves.refresh} title="Refresh" label="Refresh the list">
+          <Icon name="refresh" />
+        </Button>
       </div>
       {saves.error && (
         <span className="gk-bad gk-small" style={{ padding: '0 10px' }}>
@@ -91,6 +94,7 @@ function SaveStateRow({
             rgba={state.thumbnail}
             width={state.width}
             height={state.height}
+            scale={1}
             label={`the screen at frame ${state.frame}`}
           />
         ) : (
@@ -122,13 +126,26 @@ function SaveStateRow({
       <td>
         <div className="gk-row">
           <Button onClick={() => void saves.load(state)} disabled={disabled}>
+            <Icon name="debug-restart" />
             Load
           </Button>
-          <Button onClick={() => setRenaming(state.name)} disabled={saves.busy}>
-            Rename
+          <Button
+            kind="icon"
+            onClick={() => setRenaming(state.name)}
+            disabled={saves.busy}
+            title="Rename"
+            label={`Rename '${state.name}'`}
+          >
+            <Icon name="edit" />
           </Button>
-          <Button onClick={() => void saves.remove(state)} kind="danger" disabled={saves.busy}>
-            Delete
+          <Button
+            kind="icon danger"
+            onClick={() => void saves.remove(state)}
+            disabled={saves.busy}
+            title="Delete"
+            label={`Delete '${state.name}'`}
+          >
+            <Icon name="trash" />
           </Button>
         </div>
       </td>

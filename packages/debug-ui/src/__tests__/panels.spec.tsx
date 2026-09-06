@@ -70,11 +70,21 @@ describe('screen panel controls', () => {
     expect(renderToString(<ScreenPanel transport={transport} audio={false} />)).not.toContain('Unmute sound');
   });
 
+  it("draws its actions with the editor's own icons, never emoji", () => {
+    current.state = stoppedAt(0);
+    const html = renderToString(<ScreenPanel transport={transport} />);
+    // a codicon is a font glyph named as VS Code names it, hidden from screen readers
+    expect(html).toContain('class="codicon codicon-debug-continue" aria-hidden="true"');
+    expect(html).toContain('codicon-record');
+    expect(html).toContain('codicon-mute');
+    expect(html).not.toMatch(/\p{Extended_Pictographic}/u);
+  });
+
   it('carries the save state drawer, which a host can turn off', () => {
     current.state = stoppedAt(0);
     const html = renderToString(<ScreenPanel transport={transport} />);
     expect(html).toContain('gk-drawer-bar');
-    expect(html).toContain('+ Save state');
+    expect(html).toContain('Save state');
     expect(renderToString(<ScreenPanel transport={transport} saveStates={false} />)).not.toContain('gk-drawer');
   });
 });

@@ -28,6 +28,35 @@ export function Panel({
   );
 }
 
+/**
+ * The icons are VS Code's own, named as the editor names them, so a panel shown in
+ * an editor uses the same glyph for the same idea as the rest of the editor does.
+ * The set is closed: an icon this package has no name for is one to add here.
+ */
+export type IconName =
+  | 'add'
+  | 'chevron-down'
+  | 'chevron-right'
+  | 'debug-continue'
+  | 'debug-pause'
+  | 'debug-restart'
+  | 'debug-step-back'
+  | 'debug-step-over'
+  | 'debug-stop'
+  | 'edit'
+  | 'go-to-file'
+  | 'mute'
+  | 'play'
+  | 'record'
+  | 'refresh'
+  | 'trash'
+  | 'unmute';
+
+/** An icon, hidden from screen readers: whatever carries it says what it does in words. */
+export function Icon({ name }: { name: IconName }) {
+  return <span className={`codicon codicon-${name}`} aria-hidden="true" />;
+}
+
 export function Button({
   children,
   onClick,
@@ -40,7 +69,12 @@ export function Button({
   children: ReactNode;
   onClick: () => void;
   disabled?: boolean;
-  kind?: 'primary' | 'danger';
+  /**
+   * `primary` for the one action a view is for. `icon` is the editor's own toolbar
+   * button: the glyph alone, no border until it is hovered, and `danger` colours
+   * that hover as a warning rather than shouting before it is reached.
+   */
+  kind?: 'primary' | 'icon' | 'icon danger';
   /** a toggle's state: shown, and announced as `aria-pressed` */
   active?: boolean;
   title?: string;
@@ -50,7 +84,8 @@ export function Button({
   const classes = [
     'gk-button',
     kind === 'primary' && 'gk-primary',
-    kind === 'danger' && 'gk-danger',
+    kind?.startsWith('icon') && 'gk-icon-button',
+    kind === 'icon danger' && 'gk-danger',
     active && 'gk-active',
   ]
     .filter(Boolean)
@@ -200,15 +235,16 @@ export function attempt(setError: (message: string | null) => void, action: Prom
 }
 
 /**
- * A screen painted from base64 RGBA, at `scale` device pixels per GBA pixel. The
- * screens a recording and a save state carry are already reduced, so `width` and
- * `height` come with them rather than being assumed.
+ * A screen painted from base64 RGBA. The screens a recording and a save state carry
+ * are already reduced, so `width` and `height` come with them rather than being
+ * assumed. `scale` fixes how large it is drawn, in screen pixels per stored pixel;
+ * without one it takes the width it is given and keeps its shape.
  */
 export function Screenshot({
   rgba,
   width,
   height,
-  scale = 1,
+  scale,
   label,
 }: {
   rgba: string;
@@ -224,7 +260,7 @@ export function Screenshot({
     <canvas
       ref={canvasRef}
       className="gk-pixels"
-      style={{ width: width * scale, height: height * scale }}
+      style={scale === undefined ? undefined : { width: width * scale, height: height * scale }}
       aria-label={label}
     />
   );

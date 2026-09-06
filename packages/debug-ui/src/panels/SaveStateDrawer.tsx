@@ -6,7 +6,7 @@
 import type { SavedStateInfo } from '@gba-kit/debug-core/protocol';
 import { useState } from 'react';
 
-import { Button, Screenshot } from '../components.js';
+import { Button, Icon, Screenshot } from '../components.js';
 import { useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
@@ -33,11 +33,12 @@ export function SaveStateDrawer({ transport, stopped }: { transport: Transport; 
           }}
           aria-expanded={open}
         >
+          <Icon name={open ? 'chevron-down' : 'chevron-right'} />
           <span>Save states ({saves.states.length})</span>
-          <span className={open ? 'gk-caret gk-caret-open' : 'gk-caret'}>▾</span>
         </button>
         <Button onClick={newSave} disabled={!stopped || saves.busy} title="Save the machine as it is now">
-          + Save state
+          <Icon name="add" />
+          Save state
         </Button>
       </div>
       {saves.error && <span className="gk-bad gk-small">{saves.error}</span>}
@@ -107,6 +108,7 @@ function SaveStateCard({
         title={`Load '${state.name}' (frame ${state.frame})`}
       >
         {state.thumbnail && state.width && state.height ? (
+          // no scale: the card is the width, and the screen fits itself to it
           <Screenshot
             rgba={state.thumbnail}
             width={state.width}
@@ -138,11 +140,23 @@ function SaveStateCard({
         />
       )}
       <div className="gk-row gk-card-actions">
-        <Button onClick={() => setRenaming(state.name)} disabled={busy} title="Rename">
-          ✎
+        <Button
+          kind="icon"
+          onClick={() => setRenaming(state.name)}
+          disabled={busy}
+          title="Rename"
+          label={`Rename '${state.name}'`}
+        >
+          <Icon name="edit" />
         </Button>
-        <Button onClick={() => onRemove(state)} kind="danger" disabled={busy} title="Delete">
-          🗑
+        <Button
+          kind="icon danger"
+          onClick={() => onRemove(state)}
+          disabled={busy}
+          title="Delete"
+          label={`Delete '${state.name}'`}
+        >
+          <Icon name="trash" />
         </Button>
       </div>
     </div>

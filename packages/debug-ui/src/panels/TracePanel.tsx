@@ -1,7 +1,7 @@
 import type { TraceEntry } from '@gba-kit/debug-core';
 import { useState } from 'react';
 
-import { Button, Empty, Hex, MAX_ROWS, Select, newest } from '../components.js';
+import { Button, Empty, Hex, Icon, MAX_ROWS, Select, newest } from '../components.js';
 import { useAtStop, useDebugState } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
@@ -23,7 +23,8 @@ export function TracePanel({ transport }: { transport: Transport }) {
           active={enabled}
           title="Record every executed instruction (slows the machine)"
         >
-          {enabled ? '■ Stop tracing' : '● Trace'}
+          <Icon name={enabled ? 'debug-stop' : 'record'} />
+          {enabled ? 'Stop tracing' : 'Trace'}
         </Button>
         <Select
           value={count}

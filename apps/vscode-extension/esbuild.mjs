@@ -3,6 +3,7 @@
 //   dist/adapter.js    the debug adapter as a standalone Node process (CommonJS)
 //   dist/webview.js    the panels for the webviews (browser, React + @gba-kit/debug-ui)
 //   dist/webview.css   the panels' stylesheet, emitted with that bundle
+//   dist/codicon.ttf   VS Code's icon font, which that stylesheet loads
 //   dist/test/*.js     the Extension Development Host tests
 import * as esbuild from 'esbuild';
 
@@ -40,7 +41,10 @@ const contexts = await Promise.all([
     entryPoints: { webview: 'src/webview/main.tsx' },
     outdir: 'dist',
     define: { 'process.env.NODE_ENV': watch ? '"development"' : '"production"' },
-    loader: { '.css': 'css' },
+    // the codicon font ships beside the stylesheet, which points at it by name;
+    // that name is fixed rather than hashed so the package's allowlist can name it
+    loader: { '.css': 'css', '.ttf': 'file' },
+    assetNames: '[name]',
   }),
 ]);
 

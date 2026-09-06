@@ -1,4 +1,10 @@
 /*
+ * The icons are VS Code's own (the codicon font), so a panel in an editor reads as
+ * part of it rather than as a page inside it, and the webapp gets the same set.
+ */
+@import '@vscode/codicons/dist/codicon.css';
+
+/*
  * gba-kit debug panels. Everything is driven by these variables, so a host paints
  * the panels in its own theme: the webapp keeps the defaults (its slate palette),
  * a VS Code webview maps them to --vscode-* colors.
@@ -126,6 +132,9 @@
 
 /* ─── controls ───────────────────────────────────────────────────── */
 .gk-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font: inherit;
   font-size: 11px;
   color: var(--gk-fg);
@@ -149,9 +158,30 @@
   border-color: var(--gk-accent);
   color: var(--gk-accent);
 }
-.gk-button.gk-danger {
-  color: var(--gk-rec);
-  border-color: var(--gk-rec);
+/*
+ * The editor's toolbar button: the glyph alone, its frame drawn only under the
+ * pointer. A destructive one is not coloured until then either, so a row of them
+ * does not read as a row of warnings.
+ */
+.gk-button.gk-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  color: var(--gk-dim);
+  background: none;
+  border-color: transparent;
+}
+.gk-button.gk-icon-button:hover:not(:disabled) {
+  color: var(--gk-fg);
+  background: var(--gk-accent-bg);
+  border-color: transparent;
+}
+.gk-button.gk-icon-button.gk-danger:hover:not(:disabled) {
+  color: var(--gk-bad);
+}
+.gk-button .codicon {
+  font-size: 14px;
 }
 .gk-button.gk-active {
   border-color: var(--gk-accent);
@@ -359,15 +389,14 @@
   padding-right: 28px;
   background: transparent;
 }
-.gk-button.gk-float {
+/* an action that belongs to what it sits on, out of the way until wanted */
+.gk-float {
   position: absolute;
   top: 4px;
   right: 4px;
-  padding: 1px 6px;
-  line-height: 1.2;
-  opacity: 0.55;
+  opacity: 0.6;
 }
-.gk-button.gk-float:hover {
+.gk-float:hover {
   opacity: 1;
 }
 .gk-table td .gk-pixels {
@@ -387,7 +416,7 @@
 .gk-drawer-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   flex: 1;
   padding: 2px 0;
   color: var(--gk-dim);
@@ -401,12 +430,6 @@
 .gk-drawer-bar:hover {
   color: var(--gk-fg);
 }
-.gk-caret {
-  transition: transform 0.15s;
-}
-.gk-caret-open {
-  transform: rotate(180deg);
-}
 .gk-cards {
   display: flex;
   gap: 8px;
@@ -418,23 +441,30 @@
   flex-direction: column;
   gap: 3px;
   flex: 0 0 auto;
-  width: 120px;
+  box-sizing: border-box;
+  width: 132px;
   padding: 4px;
   background: var(--gk-panel);
   border: 1px solid var(--gk-border);
   border-radius: var(--gk-radius);
 }
+/* the screen takes the card's width and keeps its shape, whatever size it was stored at */
 .gk-card-screen {
   display: block;
+  width: 100%;
   min-height: 40px;
   padding: 0;
-  background: #000;
+  background: none;
   border: 0;
   border-radius: 2px;
   cursor: pointer;
 }
-.gk-card-screen:hover:not(:disabled) {
-  outline: 1px solid var(--gk-accent);
+.gk-card-screen .gk-pixels {
+  width: 100%;
+  height: auto;
+}
+.gk-card-screen:hover:not(:disabled) .gk-pixels {
+  border-color: var(--gk-accent);
 }
 .gk-card-screen:disabled {
   cursor: default;

@@ -65,6 +65,10 @@ stale ELF land in the wrong places).
   the instruction trace, the hardware event log, memory search, labels (with
   `.sym` import and export), save states, recordings.
 
+The panels use the editor's own icons (the codicon font, which ships with the
+extension) and its theme colors, so they read as part of the editor rather than as
+a page inside it.
+
 ## How it runs
 
 The debug adapter runs as its own Node process (`node` on the PATH; set

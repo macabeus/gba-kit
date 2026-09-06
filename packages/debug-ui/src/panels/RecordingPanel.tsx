@@ -1,7 +1,7 @@
 import type { TakeBody } from '@gba-kit/debug-core/protocol';
 import { useState } from 'react';
 
-import { Button, Empty, Screenshot } from '../components.js';
+import { Button, Empty, Icon, Screenshot } from '../components.js';
 import { useDebugState, useFetched } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
@@ -57,8 +57,9 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
   return (
     <div className="gk-col" style={{ height: '100%' }}>
       <div className="gk-row" style={{ padding: '6px 10px 0' }}>
-        <Button onClick={() => void toggle()} kind={recording ? 'danger' : 'primary'} disabled={busy}>
-          {recording ? '■ Stop recording' : '● Record inputs'}
+        <Button onClick={() => void toggle()} kind="primary" active={recording} disabled={busy}>
+          <Icon name={recording ? 'debug-stop' : 'record'} />
+          {recording ? 'Stop recording' : 'Record inputs'}
         </Button>
         <span className="gk-muted gk-small">
           {replaying
@@ -125,7 +126,7 @@ export function RecordingsView({
                 rgba={take.thumbnail}
                 width={take.width}
                 height={take.height}
-                scale={2}
+                scale={1}
                 label={`the screen at frame ${take.recording.startFrame}`}
               />
               <div className="gk-muted gk-small">
@@ -135,14 +136,16 @@ export function RecordingsView({
             <td style={{ position: 'relative', width: '100%' }}>
               <pre className="gk-pre gk-script">{take.script}</pre>
               {onOpenScript && (
-                <button
-                  type="button"
-                  className="gk-button gk-float"
-                  title="Open the script in an editor"
-                  onClick={() => onOpenScript(take)}
-                >
-                  ⧉
-                </button>
+                <span className="gk-float">
+                  <Button
+                    kind="icon"
+                    title="Open the script in an editor"
+                    label="Open the script in an editor"
+                    onClick={() => onOpenScript(take)}
+                  >
+                    <Icon name="go-to-file" />
+                  </Button>
+                </span>
               )}
             </td>
             <td>
@@ -152,14 +155,16 @@ export function RecordingsView({
                   disabled={disabled}
                   title={`Rewind to frame ${take.recording.startFrame} and play the same buttons back from there`}
                 >
-                  ↻ From where recorded
+                  <Icon name="debug-restart" />
+                  From where recorded
                 </Button>
                 <Button
                   onClick={() => onReplay(take, 'here')}
                   disabled={disabled}
                   title="Play the same buttons back from where the machine is now"
                 >
-                  ▸ From here
+                  <Icon name="play" />
+                  From here
                 </Button>
               </div>
             </td>

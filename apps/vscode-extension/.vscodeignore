@@ -3,6 +3,7 @@
 !dist/adapter.js
 !dist/webview.js
 !dist/webview.css
+!dist/codicon.ttf
 !README.md
 !LICENSE
 !package.json

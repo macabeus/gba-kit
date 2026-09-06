@@ -1,7 +1,7 @@
 import type { Label } from '@gba-kit/debug-core';
 import { useEffect, useState } from 'react';
 
-import { Button, Empty, Hex, parseNumber } from '../components.js';
+import { Button, Empty, Hex, Icon, parseNumber } from '../components.js';
 import { useFetched } from '../hooks.js';
 import type { Transport } from '../transport.js';
 
@@ -193,26 +193,19 @@ export function LabelsView({
             <td className="gk-right gk-muted">{l.size ?? ''}</td>
             <td>
               {onEdit && (
-                <button
-                  type="button"
-                  className="gk-button gk-small"
-                  onClick={() => onEdit(l)}
-                  title="Edit"
-                  aria-label={`Edit label ${l.label}`}
-                >
-                  ✎
-                </button>
+                <Button kind="icon" onClick={() => onEdit(l)} title="Edit" label={`Edit label ${l.label}`}>
+                  <Icon name="edit" />
+                </Button>
               )}
               {onRemove && (
-                <button
-                  type="button"
-                  className="gk-button gk-small"
+                <Button
+                  kind="icon danger"
                   onClick={() => onRemove(l.address)}
                   title="Remove"
-                  aria-label={`Remove label ${l.label}`}
+                  label={`Remove label ${l.label}`}
                 >
-                  ✕
-                </button>
+                  <Icon name="trash" />
+                </Button>
               )}
             </td>
           </tr>
