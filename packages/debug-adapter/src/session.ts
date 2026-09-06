@@ -522,6 +522,7 @@ export class GbaDebugSession extends DebugSession {
       epoch: s.epoch + this.#epochBase,
       history: s.historyInfo(),
       recording: s.recording,
+      replaying: s.replaying,
       tracing: s.tracing,
       reason: s.state === 'stopped' ? this.#lastStop?.reason : undefined,
       description: s.state === 'stopped' ? this.#lastStop?.description : undefined,

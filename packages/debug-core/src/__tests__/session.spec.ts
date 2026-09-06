@@ -35,6 +35,8 @@ interface Harness {
   output: string[];
   /** run until the next stop (or `maxFrames`), returning the stop */
   run(maxFrames?: number): StopInfo | null;
+  /** tick until a run already under way stops (or `maxFrames`), returning the stop */
+  finish(maxFrames?: number): StopInfo | null;
 }
 
 function fixture(variant: (typeof VARIANTS)[number]): { rom: Uint8Array; elf: Uint8Array } {
@@ -72,6 +74,17 @@ async function boot(variant: (typeof VARIANTS)[number], host: ManualHost = new M
     run(maxFrames = 600) {
       const before = stops.length;
       session.continue();
+      for (let i = 0; i < maxFrames && stops.length === before; i++) {
+        host.tick(FRAME_MS);
+      }
+      if (stops.length === before) {
+        session.pause();
+        host.tick(FRAME_MS);
+      }
+      return stops[stops.length - 1] ?? null;
+    },
+    finish(maxFrames = 600) {
+      const before = stops.length;
       for (let i = 0; i < maxFrames && stops.length === before; i++) {
         host.tick(FRAME_MS);
       }
@@ -849,6 +862,48 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(output.at(-1)).toMatch(/did not complete within 1\.5 s \(\d frames\)/);
   });
 
+  it('a replay plays back a frame at a time, over held input, and can be paused part-way', async () => {
+    const h = await boot(variant);
+    h.session.startRecording();
+    h.session.setButton(0, true); // A
+    h.run(2);
+    h.session.setButton(0, false);
+    h.run(2);
+    const recording = h.session.stopRecording();
+    const frames: number[] = [];
+    h.session.on({ frame: () => frames.push(h.session.frame) });
+
+    // a button the user is still holding does not reach the machine during the playback
+    h.session.setButton(1, true); // B
+    const start = h.session.frame;
+    expect(h.session.replayRecording(recording, 'here')).toBe(true);
+    expect(h.session.state).toBe('running');
+    expect(h.session.frame).toBe(start); // the playback is paced, not run in the call
+
+    h.host.tick(FRAME_MS);
+    expect(h.session.frame).toBe(start + 1);
+    expect(h.session.machine.buttons).toBe(recording.frames[0]);
+    h.host.tick(FRAME_MS);
+    expect(h.session.frame).toBe(start + 2);
+    expect(frames.length).toBeGreaterThan(0); // the screen is painted as it plays
+
+    h.session.pause();
+    expect(h.finish()).toMatchObject({ reason: 'pause' });
+    expect(h.session.frame).toBeLessThan(start + recording.frames.length);
+  });
+
+  it('a breakpoint hit during a replay stops it there', async () => {
+    const h = await boot(variant);
+    h.session.startRecording();
+    h.run(4);
+    const recording = h.session.stopRecording();
+    const [bp] = h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'tick();') }]);
+    expect(bp!.verified).toBe(true);
+    expect(h.session.replayRecording(recording, 'here')).toBe(true);
+    expect(h.finish()).toMatchObject({ reason: 'breakpoint' });
+    expect(h.session.state).toBe('stopped');
+  });
+
   it('a recording whose start frame is ahead of the machine is not replayed', async () => {
     const h = await boot(variant);
     h.session.startRecording();
@@ -1016,6 +1071,7 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     const end = h.session.machine.snapshot();
     h.session.restart();
     expect(h.session.replayRecording(recording)).toBe(true);
+    expect(h.finish()).toMatchObject({ description: `replayed ${recording.frames.length} frames` });
     expect(h.session.machine.snapshot()).toEqual(end);
   });
 
@@ -1068,12 +1124,14 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     const end = h.session.frame;
     h.run(3);
     expect(h.session.replayRecording(take.recording, 'start')).toBe(true);
+    h.finish();
     expect(h.session.frame).toBe(end);
     expect(h.session.machine.snapshot()).toEqual(after);
 
     // from here: the same buttons, pressed from wherever the machine is now
     const before = h.session.frame;
     expect(h.session.replayRecording(take.recording, 'here')).toBe(true);
+    h.finish();
     expect(h.session.frame).toBe(before + take.recording.frames.length);
 
     // a second recording is kept beside the first, newest last

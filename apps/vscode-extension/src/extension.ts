@@ -39,6 +39,7 @@ const DISPOSED_STATE: StateBody = {
   epoch: 0,
   history: { earliestFrame: null, keyframes: 0, bytes: 0, recording: false, recordingStart: null },
   recording: false,
+  replaying: false,
   tracing: false,
 };
 

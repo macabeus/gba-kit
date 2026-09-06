@@ -36,6 +36,8 @@ export interface StateBody {
   /** what rewind can reach, and the input recording in progress (`recordingStart`) */
   history: HistoryInfo;
   recording: boolean;
+  /** a recording is being played back: the machine runs on its buttons, not the user's */
+  replaying: boolean;
   tracing: boolean;
   /** why the machine last stopped, while it is stopped: an entry stop is not a breakpoint */
   reason?: StopReason;

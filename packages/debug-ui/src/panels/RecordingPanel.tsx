@@ -9,8 +9,9 @@ import type { Transport } from '../transport.js';
 /**
  * Record the buttons pressed, and keep every recording of the session as a row: the
  * screen it begins on, the script it amounts to, and the two ways to press it again.
- * The rows come from the session, so a recording stopped anywhere (this panel, the
- * Screen panel's button, an editor command) appears here.
+ * A replay plays back at the speed it was recorded, so it is watched on the screen
+ * rather than jumped through. The rows come from the session, so a recording stopped
+ * anywhere (this panel, the Screen panel's button, an editor command) appears here.
  */
 export function RecordingPanel({ transport }: { transport: Transport }) {
   const state = useDebugState(transport);
@@ -18,6 +19,7 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const recording = state?.recording ?? false;
+  const replaying = state?.replaying ?? false;
   const stopped = state?.state === 'stopped';
   const connected = state !== null;
 
@@ -75,11 +77,13 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
           {recording ? '■ Stop recording' : '● Record inputs'}
         </Button>
         <span className="gk-muted gk-small">
-          {recording
-            ? `recording since frame ${state?.history.recordingStart ?? '…'}`
-            : takes.length === 0
-              ? 'Press Record, play, press Stop.'
-              : `${takes.length} recording${takes.length === 1 ? '' : 's'} this session`}
+          {replaying
+            ? 'playing a recording back…'
+            : recording
+              ? `recording since frame ${state?.history.recordingStart ?? '…'}`
+              : takes.length === 0
+                ? 'Press Record, play, press Stop.'
+                : `${takes.length} recording${takes.length === 1 ? '' : 's'} this session`}
         </span>
       </div>
       {error && (
@@ -156,14 +160,14 @@ export function RecordingsView({
                 <Button
                   onClick={() => onReplay(take, 'start')}
                   disabled={disabled}
-                  title={`Rewind to frame ${take.recording.startFrame} and press the same buttons again`}
+                  title={`Rewind to frame ${take.recording.startFrame} and play the same buttons back from there`}
                 >
                   ↻ From where recorded
                 </Button>
                 <Button
                   onClick={() => onReplay(take, 'here')}
                   disabled={disabled}
-                  title="Press the same buttons from where the machine is now"
+                  title="Play the same buttons back from where the machine is now"
                 >
                   ▸ From here
                 </Button>

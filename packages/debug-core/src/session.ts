@@ -220,6 +220,8 @@ export class Session {
   #nextTakeId = 1;
   /** the screen the recording in progress began on, kept for its take */
   #recordingThumbnail: RecordedTake['thumbnail'] | null = null;
+  /** the recording being played back, a frame per tick; null when the machine runs on its own input */
+  #playback: { frames: number[]; index: number } | null = null;
 
   /**
    * Prefer {@link Session.create}: it hashes the ROM (to bind save states and
@@ -494,6 +496,24 @@ export class Session {
     return null;
   }
 
+  /**
+   * Press the playback's buttons for this frame, over any input the user is holding.
+   * False once the recording runs out, having stopped the session at its end.
+   */
+  #pressPlayback(): boolean {
+    const playback = this.#playback!;
+    if (playback.index >= playback.frames.length) {
+      const description = `replayed ${playback.frames.length} frames`;
+      this.#stop({ reason: 'step', address: this.machine.pc, description });
+      return false;
+    }
+    const mask = playback.frames[playback.index++]!;
+    this.#pendingButtons = null;
+    this.machine.setButtons(mask);
+    this.#frameButtons = mask;
+    return true;
+  }
+
   /** Latch queued input at a frame boundary, so replay can reproduce it. */
   #beginFrameIfNew(): void {
     if (this.#instrInFrame === 0 && this.#pendingButtons !== null) {
@@ -544,6 +564,9 @@ export class Session {
       this.#stop({ reason: 'pause', address: this.machine.pc });
       return;
     }
+    if (this.#playback && !this.#pressPlayback()) {
+      return;
+    }
     const stop = this.#runOneFrame();
     this.#emitFrame(false);
     if (stop) {
@@ -552,6 +575,7 @@ export class Session {
   };
 
   #stop(info: StopInfo): void {
+    this.#playback = null;
     if (this.#cancelLoop) {
       this.#cancelLoop();
       this.#cancelLoop = null;
@@ -1420,6 +1444,11 @@ export class Session {
     return this.#recordings;
   }
 
+  /** Whether a recording is being played back right now. */
+  get replaying(): boolean {
+    return this.#playback !== null;
+  }
+
   get recording(): boolean {
     return this.#recordingStart !== null;
   }
@@ -1477,8 +1506,10 @@ export class Session {
   }
 
   /**
-   * Replay a recording and stop at its end. False when `from` is `'start'` and the
-   * frame the recording was made at cannot be reached.
+   * Play a recording back at the speed it was made, pressing its buttons a frame at a
+   * time, and stop at its end. Returns whether the playback started: false when `from`
+   * is `'start'` and the frame the recording was made at cannot be reached. A
+   * breakpoint, a stall or a pause during the playback ends it where it hit.
    */
   replayRecording(recording: InputRecording, from: 'start' | 'here' = 'start'): boolean {
     this.#requireStopped('replay');
@@ -1497,18 +1528,11 @@ export class Session {
     }
     this.history.truncateAfter(this.machine.frame);
     this.#armResume();
+    this.#pauseRequested = false;
+    this.#playback = { frames: [...recording.frames], index: 0 };
     this.#setState('running');
     this.#emit('continued');
-    for (const mask of recording.frames) {
-      this.machine.setButtons(mask);
-      this.#frameButtons = mask;
-      const stop = this.#runOneFrame();
-      if (stop) {
-        this.#stop(stop);
-        return true;
-      }
-    }
-    this.#stop({ reason: 'step', address: this.machine.pc, description: `replayed ${recording.frames.length} frames` });
+    this.#cancelLoop = this.host.interval(this.#tick, FRAME_MS);
     return true;
   }
 

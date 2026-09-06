@@ -56,6 +56,7 @@ export function createSessionTransport(session: Session, options: SessionTranspo
     epoch: session.epoch,
     history: session.historyInfo(),
     recording: session.recording,
+    replaying: session.replaying,
     tracing: session.tracing,
   });
 

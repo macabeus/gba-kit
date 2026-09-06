@@ -88,7 +88,7 @@ describe('session transport', () => {
   });
 
   it('pushes a recording start and stop to state listeners, keeps the last recording, and replays it', async () => {
-    const { session } = await boot();
+    const { session, host } = await boot();
     const transport = createSessionTransport(session);
     const seen: Array<{ recording: boolean; start: number | null }> = [];
     transport.onState((s) => seen.push({ recording: s.recording, start: s.history.recordingStart }));
@@ -110,6 +110,11 @@ describe('session transport', () => {
     await transport.request('gba-kit/stepFrame');
     expect(await frameOf(transport)).toBe(4);
     expect(await transport.request('gba-kit/replay', { recording: stopped.recording })).toEqual({ replayed: true });
+    // the playback is paced by the host: it rewinds at once, then presses a frame per tick
+    expect(await frameOf(transport)).toBe(1);
+    for (let i = 0; i < 4 && session.state === 'running'; i++) {
+      host.tick(20);
+    }
     expect(await frameOf(transport)).toBe(3);
   });
 
