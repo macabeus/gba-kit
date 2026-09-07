@@ -118,12 +118,13 @@ vi.mock('vscode', () => {
 });
 
 /** A process-mode session (no inline adapter registered for it) that records its requests. */
-function fakeSession(id: string, gate?: Promise<void>) {
+function fakeSession(id: string, gate?: Promise<void>, configuration: Record<string, unknown> = {}) {
   const calls: Array<{ command: string; args: unknown }> = [];
   return {
     id,
     type: 'gba-kit',
     name: id,
+    configuration,
     calls,
     customRequest: async (command: string, args?: unknown): Promise<unknown> => {
       calls.push({ command, args });
@@ -275,6 +276,19 @@ describe('extension', () => {
     expect(atBreakpoint.calls.filter((c) => c.command === 'continue')).toEqual([]);
     stub.terminate.forEach((l) => l(atBreakpoint));
     stub.terminate.forEach((l) => l(started));
+    await wait(20);
+  });
+
+  it('leaves the entry stop alone when the launch configuration asked to stop there', async () => {
+    const asked = fakeSession('stop-on-entry', undefined, { stopOnEntry: true });
+    stub.start.forEach((l) => l(asked));
+    await until(() => asked.calls.some((c) => c.command === 'gba-kit/stream'));
+    stub.custom.forEach((l) =>
+      l({ session: asked, event: 'gba-kit/state', body: { state: 'stopped', reason: 'entry' } }),
+    );
+    await wait(20);
+    expect(asked.calls.filter((c) => c.command === 'continue')).toEqual([]);
+    stub.terminate.forEach((l) => l(asked));
     await wait(20);
   });
 

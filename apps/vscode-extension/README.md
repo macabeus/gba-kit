@@ -6,7 +6,7 @@
 [![Visual Studio Marketplace Downloads](https://flat.badgen.net/vs-marketplace/d/macabeus.gba-kit-vscode?icon=visualstudio)](https://marketplace.visualstudio.com/items?itemName=macabeus.gba-kit-vscode)
 
 <center>
-  <img width="1637" height="1096" alt="image" src="https://github.com/user-attachments/assets/7b68f492-5d0b-401b-8f76-2330e77ddd0f" />
+  <img width="1637" height="1096" alt="image" src="https://github.com/user-attachments/assets/c30ca7d6-9f40-4533-805d-2e195f488abb" />
 </center>
 
 ## Features
@@ -32,7 +32,9 @@
      "rom": "${workspaceFolder}/build/game.gba",
      "elf": "${workspaceFolder}/build/game.elf",
      "cwd": "${workspaceFolder}",
-     "stopOnEntry": true, // stop before the first instruction; `false` runs the game right away
+
+     // Sit at the first instruction instead of letting the Screen panel start the game
+     // "stopOnEntry": true,
 
      // Rewrite the paths inside the ELF, when the build ran somewhere else (Docker, CI)
      // "sourceMap": { "/build-container/src": "${workspaceFolder}/src" },

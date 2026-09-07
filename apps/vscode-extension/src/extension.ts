@@ -355,6 +355,12 @@ export function activate(context: vscode.ExtensionContext): void {
     if (body.state !== 'stopped' || body.reason !== 'entry' || ranForScreen.has(session.id) || !panels.has('screen')) {
       return;
     }
+    // A launch configuration that says `stopOnEntry` is asking to sit at the entry
+    // point; the screen does not overrule it. Left unsaid, the entry stop is only
+    // where a session begins, and a screen showing a frozen first frame helps nobody.
+    if (session.configuration.stopOnEntry === true) {
+      return;
+    }
     if (!vscode.workspace.getConfiguration('gba-kit').get<boolean>('runOnScreen', true)) {
       return;
     }
