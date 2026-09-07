@@ -5,9 +5,9 @@
 [![GitHub Stars](https://flat.badgen.net/github/stars/macabeus/gba-kit?icon=github)](https://github.com/macabeus/gba-kit)
 [![Visual Studio Marketplace Downloads](https://flat.badgen.net/vs-marketplace/d/macabeus.gba-kit-vscode?icon=visualstudio)](https://marketplace.visualstudio.com/items?itemName=macabeus.gba-kit-vscode)
 
-<center>
-  <img width="1637" height="1096" alt="image" src="https://github.com/user-attachments/assets/c30ca7d6-9f40-4533-805d-2e195f488abb" />
-</center>
+<p align="center">
+  <img width="1637" alt="The debugger stopped at a breakpoint, with the game's screen, the call stack and the variables beside the code" src="media/screenshot.png" />
+</p>
 
 ## Features
 

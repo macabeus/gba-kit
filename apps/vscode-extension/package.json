@@ -314,7 +314,7 @@
     "lint": "eslint src/",
     "test": "vitest run",
     "test:vscode": "node esbuild.mjs && node dist/test/run.js",
-    "package": "node esbuild.mjs && vsce package --no-dependencies"
+    "package": "node esbuild.mjs && vsce package --no-dependencies --baseImagesUrl https://github.com/macabeus/gba-kit/raw/HEAD/apps/vscode-extension"
   },
   "dependencies": {
     "@gba-kit/debug-adapter": "workspace:*",
