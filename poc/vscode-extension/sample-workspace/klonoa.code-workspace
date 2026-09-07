@@ -1,0 +1,21 @@
+{
+  "folders": [
+    { "name": "klonoa-eod", "path": "/Users/macabeus/ApenasMeu/decompiler/klonoa-empire-of-dreams" },
+    { "name": "gba-kit-scripts", "path": "./scripts" },
+  ],
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "type": "gba-kit",
+        "request": "launch",
+        "name": "Klonoa EoD (decomp, matching build)",
+        "rom": "${workspaceFolder:klonoa-eod}/klonoa-eod.gba",
+        "elf": "${workspaceFolder:klonoa-eod}/klonoa-eod.elf",
+        "cwd": "${workspaceFolder:klonoa-eod}",
+        "stopOnEntry": true,
+        "outputDir": "/tmp/gba-kit-poc-out",
+      },
+    ],
+  },
+}

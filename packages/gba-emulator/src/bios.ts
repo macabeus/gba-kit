@@ -33,14 +33,12 @@ interface BiosCpu {
  */
 
 /**
- * Callback to set IntrWait flags on the interrupt controller.
- * Set by the GBA coordinator to wire HLE IntrWait to the interrupt system.
+ * What the HLE BIOS needs from the machine it runs in. Passed per call, so two
+ * `Gba` instances in one process never share state through this module.
  */
-let intrWaitCallback: ((flags: number) => void) | null = null;
-
-/** Register the IntrWait callback (called by GBA during setup) */
-export function setIntrWaitCallback(cb: (flags: number) => void): void {
-  intrWaitCallback = cb;
+export interface BiosEnv {
+  /** IntrWait: tell the interrupt controller which flags end the halt. */
+  onIntrWait?(flags: number): void;
 }
 
 /**
@@ -55,8 +53,9 @@ export function setIntrWaitCallback(cb: (flags: number) => void): void {
  *
  * @param cpu - The CPU instance
  * @param swiNumber - The SWI function number (0x00-0xFF)
+ * @param env - Hooks back into the machine this call runs in
  */
-export function handleSwi(cpu: BiosCpu, swiNumber: number): void {
+export function handleSwi(cpu: BiosCpu, swiNumber: number, env: BiosEnv = {}): void {
   switch (swiNumber) {
     case 0x06:
       swiDiv(cpu);
@@ -107,10 +106,10 @@ export function handleSwi(cpu: BiosCpu, swiNumber: number): void {
       swiHalt(cpu);
       break;
     case 0x04: // IntrWait
-      swiIntrWait(cpu);
+      swiIntrWait(cpu, env);
       break;
     case 0x05: // VBlankIntrWait
-      swiVBlankIntrWait(cpu);
+      swiVBlankIntrWait(cpu, env);
       break;
     case 0x19: // MidiKey2Freq
       swiMidiKey2Freq(cpu);
@@ -854,7 +853,7 @@ function swiHalt(cpu: BiosCpu): void {
  * The GBA coordinator's halt logic will fast-forward to the next event,
  * and IRQ handling will wake the CPU.
  */
-function swiIntrWait(cpu: BiosCpu): void {
+function swiIntrWait(cpu: BiosCpu, env: BiosEnv): void {
   const discardOld = cpu.registers[0]!;
   const waitFlags = cpu.registers[1]! & 0x3fff;
 
@@ -873,9 +872,7 @@ function swiIntrWait(cpu: BiosCpu): void {
   }
 
   // Set IntrWait flags so halt only breaks for the desired interrupt
-  if (intrWaitCallback) {
-    intrWaitCallback(waitFlags);
-  }
+  env.onIntrWait?.(waitFlags);
 
   // Put CPU into halt state
   cpu.memory.write8(0x04000301, 0);
@@ -888,11 +885,11 @@ function swiIntrWait(cpu: BiosCpu): void {
  *
  * Equivalent to IntrWait(1, 0x0001) — discard old flags, wait for VBlank.
  */
-function swiVBlankIntrWait(cpu: BiosCpu): void {
+function swiVBlankIntrWait(cpu: BiosCpu, env: BiosEnv): void {
   // Set up for VBlank wait
   cpu.registers[0] = 1; // Discard old flags
   cpu.registers[1] = 0x0001; // VBlank flag (bit 0 of IE/IF)
-  swiIntrWait(cpu);
+  swiIntrWait(cpu, env);
 }
 
 // ─── SWI 0x19: MidiKey2Freq ─────────────────────────────────────

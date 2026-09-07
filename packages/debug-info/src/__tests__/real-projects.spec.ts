@@ -457,14 +457,17 @@ describe('DebugInfo on devkitarm-min-only shapes', () => {
     ]);
   });
 
-  it('keeps absolute ldscript globals but excludes section-relative linker markers', () => {
+  it('keeps ldscript globals whether absolute or placed inside a section', () => {
     // `gAbsGlobal` is STT_NOTYPE with SHN_ABS — an ldscript-placed data global we want.
     expect(di.symbolToAddress('gAbsGlobal')).toBe(0x03001234);
-    // `_end` / `__bss_start` are also STT_NOTYPE/STB_GLOBAL and present in the symtab,
-    // but section-relative (not SHN_ABS): boundary markers, not data globals. The
-    // SHN_ABS filter must exclude them, so symbolToAddress returns null.
-    expect(di.symbolToAddress('_end')).toBeNull();
-    expect(di.symbolToAddress('__bss_start')).toBeNull();
+    // `_end` / `__bss_start` are STT_NOTYPE/STB_GLOBAL placed inside a loadable section.
+    // A decomp places its data globals the same way (`gFoo = .;` in the ldscript), and
+    // nothing in the ELF tells the two apart, so both resolve: the linker did define
+    // them, and a debugger asked for `_end` should answer. They carry no size, so any
+    // containment inferred from them is reported inexact.
+    expect(di.symbolToAddress('_end')).not.toBeNull();
+    expect(di.symbolToAddress('__bss_start')).not.toBeNull();
+    expect(di.symbols.globalSymbol('_end')?.address).toBe(di.symbolToAddress('_end'));
   });
 });
 
@@ -510,6 +513,14 @@ describe.each(BE_PROJECTS)('DebugInfo vs binutils oracle on $label', (project) =
     expect(src?.func).toBe(want.func);
     expect(basename(src!.file)).toBe(basename(want.file));
     expect(src?.line).toBe(want.line);
+  });
+
+  it.each(FUNCS)("scopes.functionAt(%s entry) matches nm — DWARF's own DW_AT_low_pc", (fn) => {
+    // pcToFunction answers from the ELF symbol table; this answers from the DIE tree, so
+    // it is the assertion that pins DW_FORM_addr being read MSB-first. A byte-swapped
+    // low_pc puts every subprogram at an address no PC of the program ever reaches.
+    const entry = di.scopes.functionAt(oracle.symbols[fn]!);
+    expect(entry && di.scopes.name(entry)).toBe(fn);
   });
 
   it('returns null for a PC outside any function/sequence', () => {

@@ -9,21 +9,22 @@ import {
   saveState,
 } from '@gba-kit/gba-browser';
 import clsx from 'clsx';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { SaveSlotCard } from './SaveSlotCard';
 
 interface SaveStateDrawerProps {
   emulator: EmulatorBridge;
   romData: ArrayBuffer | null;
+  /** a state was loaded into the machine (the Debug page resyncs its session) */
+  onStateLoaded?: () => void;
 }
 
-export function SaveStateDrawer({ emulator, romData }: SaveStateDrawerProps) {
+export function SaveStateDrawer({ emulator, romData, onStateLoaded }: SaveStateDrawerProps) {
   const [expanded, setExpanded] = useState(false);
   const [saves, setSaves] = useState<SaveStateMeta[]>([]);
   const [romHash, setRomHash] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const saveCountRef = useRef(0);
 
   // Compute ROM hash when ROM changes
   useEffect(() => {
@@ -54,9 +55,9 @@ export function SaveStateDrawer({ emulator, romData }: SaveStateDrawerProps) {
     }
     setSaving(true);
     try {
-      saveCountRef.current++;
       const { snapshot, thumbnail } = await emulator.saveState();
-      await saveState(romHash, snapshot, thumbnail, `Save #${saveCountRef.current}`);
+      // named for the frame it holds, the way the debugger names one: it is what you look for later
+      await saveState(romHash, snapshot, thumbnail, `frame-${emulator.gba.frameCount}`);
       await refreshList();
       setExpanded(true);
     } finally {
@@ -69,9 +70,10 @@ export function SaveStateDrawer({ emulator, romData }: SaveStateDrawerProps) {
       const record = await loadState(id);
       if (record) {
         emulator.loadState(record.snapshot);
+        onStateLoaded?.();
       }
     },
-    [emulator],
+    [emulator, onStateLoaded],
   );
 
   const handleDelete = useCallback(
@@ -136,7 +138,7 @@ export function SaveStateDrawer({ emulator, romData }: SaveStateDrawerProps) {
         className="w-full bg-zinc-900 border-t border-zinc-700 px-4 py-1.5 flex items-center justify-between text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
         onClick={() => setExpanded(!expanded)}
       >
-        <span>Save States ({saves.length})</span>
+        <span>Save states ({saves.length})</span>
         <span className={clsx('transition-transform', expanded && 'rotate-180')}>&#9650;</span>
       </button>
 

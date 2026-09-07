@@ -45,6 +45,10 @@ export class EmulatorBridge {
   #callbacks: EmulatorCallbacks | null = null;
   #breakpoints: Map<number, Breakpoint> = new Map();
   #hitBreakpoint = false;
+  /** Whether the CPU's debug-hook slot currently holds this bridge's breakpoint hooks.
+   *  The slot is shared with any other driver of the same `Gba` (a debug session), so
+   *  the bridge only ever clears what it installed. */
+  #hooksInstalled = false;
 
   /** Persistent framebuffer image, always up-to-date with the last rendered frame.
    *  Decoupled from any DOM canvas so mode switches never lose the current frame. */
@@ -86,6 +90,15 @@ export class EmulatorBridge {
   /** Detach the current canvas (call when a view unmounts) */
   detachCanvas(): void {
     this.#ctx = null;
+  }
+
+  /**
+   * Re-read the PPU framebuffer into the persistent image and the attached canvas.
+   * Call after something else moved the machine: a debug session sharing this `Gba`
+   * renders its frames through its own screen, not through this bridge.
+   */
+  refreshFrame(): void {
+    this.#renderFrame();
   }
 
   /** Load a ROM from an ArrayBuffer */
@@ -368,6 +381,10 @@ export class EmulatorBridge {
     // Serialize CPU into the snapshot
     snapshot.cpu = this.#gba.armCpu.serialize();
 
+    // The thumbnail must show the screen the snapshot holds, whoever moved the
+    // machine last — a debug session's frames never pass through this bridge.
+    this.#renderFrame();
+
     // Generate thumbnail (60x40)
     const thumbCanvas = document.createElement('canvas');
     thumbCanvas.width = 60;
@@ -395,10 +412,11 @@ export class EmulatorBridge {
   loadState(snapshot: GbaSnapshot): void {
     cancelAnimationFrame(this.#animFrameId);
 
-    // Restore GBA subsystems
+    // Restore GBA subsystems (CPU included)
     this.#gba.deserialize(snapshot);
-    // Restore CPU
-    this.#gba.armCpu.deserialize(snapshot.cpu);
+    // The snapshot restores the buttons held when it was taken, but the player is
+    // not holding them now.
+    this.#gba.input.setButtons(0);
 
     // Re-render frame from restored framebuffer
     this.#renderFrame();
@@ -465,8 +483,10 @@ export class EmulatorBridge {
         },
       };
       this.#gba.armCpu.setDebugHooks(hooks);
-    } else {
+      this.#hooksInstalled = true;
+    } else if (this.#hooksInstalled) {
       this.#gba.armCpu.setDebugHooks(undefined);
+      this.#hooksInstalled = false;
     }
   }
 }

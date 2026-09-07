@@ -186,9 +186,6 @@ export class ArmCpu {
   /** Whether the CPU has halted (function returned to sentinel) */
   #halted = false;
 
-  /** Halt flag for SWI 0x02 (Halt) */
-  #haltedBySWI = false;
-
   /** Map of stub addresses to symbol names */
   #stubs = new Map<number, string>();
 
@@ -430,6 +427,14 @@ export class ArmCpu {
 
   // ─── Public API ──────────────────────────────────────────────────
 
+  /**
+   * Whether `step()` refuses to run because the CPU stopped itself at the sentinel return
+   * address, as opposed to a debug hook having refused one instruction.
+   */
+  get halted(): boolean {
+    return this.#halted;
+  }
+
   /** Attach or detach debug hooks */
   setDebugHooks(hooks: DebugHooks | undefined): void {
     this.#hooks = hooks;
@@ -500,7 +505,6 @@ export class ArmCpu {
       usrBankedR8to12: new Uint32Array(this.#usrBankedR8to12),
       spsr: new Uint32Array(this.#spsr),
       halted: this.#halted,
-      haltedBySWI: this.#haltedBySWI,
     };
   }
 
@@ -514,7 +518,6 @@ export class ArmCpu {
     this.#usrBankedR8to12.set(snap.usrBankedR8to12);
     this.#spsr.set(snap.spsr);
     this.#halted = snap.halted;
-    this.#haltedBySWI = snap.haltedBySWI;
   }
 
   /** Reset CPU state for a new execution */
@@ -528,7 +531,6 @@ export class ArmCpu {
     this.#bankedLR.fill(0);
     this.#externalCalls = [];
     this.#halted = false;
-    this.#haltedBySWI = false;
   }
 
   /** Check if IRQs are disabled (CPSR I bit set) */
@@ -599,10 +601,10 @@ export class ArmCpu {
 
   /**
    * Execute one instruction (ARM or Thumb based on T bit).
-   * Returns false if halted.
+   * Returns false when nothing ran: the CPU is halted, or a debug hook refused the instruction.
    */
   step(): boolean {
-    if (this.#halted || this.#haltedBySWI) {
+    if (this.#halted) {
       return false;
     }
 

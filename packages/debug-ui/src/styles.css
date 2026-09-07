@@ -1,0 +1,492 @@
+/*
+ * The icons are VS Code's own (the codicon font), so a panel in an editor reads as
+ * part of it rather than as a page inside it, and the webapp gets the same set.
+ */
+@import '@vscode/codicons/dist/codicon.css';
+
+/*
+ * gba-kit debug panels. Everything is driven by these variables, so a host paints
+ * the panels in its own theme: the webapp keeps the defaults (its slate palette),
+ * a VS Code webview maps them to --vscode-* colors.
+ */
+.gk-root {
+  --gk-bg: #0f172a;
+  --gk-panel: rgba(30, 41, 59, 0.55);
+  --gk-panel-solid: #1e293b;
+  --gk-border: #334155;
+  --gk-fg: #e2e8f0;
+  --gk-muted: #64748b;
+  --gk-dim: #94a3b8;
+  --gk-accent: #38bdf8;
+  --gk-accent-bg: rgba(56, 189, 248, 0.15);
+  --gk-good: #4ade80;
+  --gk-warn: #fbbf24;
+  --gk-bad: #f87171;
+  --gk-rec: #f43f5e;
+  --gk-font: ui-sans-serif, system-ui, sans-serif;
+  --gk-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --gk-radius: 6px;
+  --gk-input-bg: #0b1220;
+
+  color: var(--gk-fg);
+  font-family: var(--gk-font);
+  font-size: 12px;
+  line-height: 1.4;
+  box-sizing: border-box;
+}
+.gk-root *,
+.gk-root *::before,
+.gk-root *::after {
+  box-sizing: inherit;
+}
+
+/* ─── layout ─────────────────────────────────────────────────────── */
+.gk-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--gk-panel);
+  border: 1px solid var(--gk-border);
+  border-radius: var(--gk-radius);
+  overflow: hidden;
+}
+.gk-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--gk-border);
+}
+.gk-panel-title {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--gk-muted);
+  white-space: nowrap;
+}
+.gk-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.gk-panel-body.gk-pad {
+  padding: 8px 10px;
+}
+.gk-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* a panel that pads its own edge, the controls at the top of one, and a line of text under them */
+.gk-pad {
+  padding: 8px;
+}
+/* the controls at the top of a panel, and a line of text that lines up under them */
+.gk-controls {
+  padding: 6px 10px 0;
+}
+.gk-note {
+  padding: 0 10px;
+}
+.gk-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.gk-fill {
+  flex: 1;
+  min-width: 0;
+}
+.gk-mono {
+  font-family: var(--gk-mono);
+  font-variant-numeric: tabular-nums;
+}
+.gk-muted {
+  color: var(--gk-muted);
+}
+.gk-dim {
+  color: var(--gk-dim);
+}
+.gk-good {
+  color: var(--gk-good);
+}
+.gk-warn {
+  color: var(--gk-warn);
+}
+.gk-bad {
+  color: var(--gk-bad);
+}
+.gk-accent {
+  color: var(--gk-accent);
+}
+.gk-empty {
+  padding: 16px 10px;
+  color: var(--gk-muted);
+  text-align: center;
+}
+.gk-small {
+  font-size: 10px;
+}
+.gk-nowrap {
+  white-space: nowrap;
+}
+.gk-pre {
+  white-space: pre;
+  font-family: var(--gk-mono);
+  font-size: 11px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+}
+
+/* ─── controls ───────────────────────────────────────────────────── */
+.gk-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--gk-fg);
+  background: var(--gk-panel-solid);
+  border: 1px solid var(--gk-border);
+  border-radius: var(--gk-radius);
+  padding: 3px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.gk-button:hover:not(:disabled) {
+  border-color: var(--gk-accent);
+  color: var(--gk-accent);
+}
+.gk-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.gk-button.gk-primary {
+  background: var(--gk-accent-bg);
+  border-color: var(--gk-accent);
+  color: var(--gk-accent);
+}
+/*
+ * The editor's toolbar button: the glyph alone, its frame drawn only under the
+ * pointer. A destructive one is not coloured until then either, so a row of them
+ * does not read as a row of warnings.
+ */
+.gk-button.gk-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  color: var(--gk-dim);
+  background: none;
+  border-color: transparent;
+}
+.gk-button.gk-icon-button:hover:not(:disabled) {
+  color: var(--gk-fg);
+  background: var(--gk-accent-bg);
+  border-color: transparent;
+}
+.gk-button.gk-icon-button.gk-danger:hover:not(:disabled) {
+  color: var(--gk-bad);
+}
+.gk-button .codicon {
+  font-size: 14px;
+}
+.gk-button.gk-active {
+  border-color: var(--gk-accent);
+  color: var(--gk-accent);
+}
+.gk-input,
+.gk-select,
+.gk-textarea {
+  font: inherit;
+  font-family: var(--gk-mono);
+  font-size: 11px;
+  color: var(--gk-fg);
+  background: var(--gk-input-bg);
+  border: 1px solid var(--gk-border);
+  border-radius: var(--gk-radius);
+  padding: 3px 6px;
+  min-width: 0;
+}
+.gk-input:focus,
+.gk-select:focus,
+.gk-textarea:focus {
+  outline: none;
+  border-color: var(--gk-accent);
+}
+.gk-textarea {
+  width: 100%;
+  resize: vertical;
+}
+.gk-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+/* ─── tabs ───────────────────────────────────────────────────────── */
+.gk-tabs {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+  padding: 4px 6px 0;
+  border-bottom: 1px solid var(--gk-border);
+}
+.gk-tab {
+  font: inherit;
+  font-size: 11px;
+  color: var(--gk-muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.gk-tab:hover {
+  color: var(--gk-dim);
+}
+.gk-tab.gk-active {
+  color: var(--gk-accent);
+  border-bottom-color: var(--gk-accent);
+}
+.gk-tabbed {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.gk-tabbed > .gk-tab-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ─── tables ─────────────────────────────────────────────────────── */
+.gk-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--gk-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.gk-table th {
+  position: sticky;
+  top: 0;
+  background: var(--gk-panel-solid);
+  color: var(--gk-muted);
+  font-weight: normal;
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--gk-border);
+  white-space: nowrap;
+}
+.gk-table td {
+  padding: 2px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--gk-border) 50%, transparent);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.gk-table tr:hover td {
+  background: var(--gk-accent-bg);
+}
+.gk-table tr.gk-selected td {
+  background: var(--gk-accent-bg);
+}
+.gk-table td.gk-right,
+.gk-table th.gk-right {
+  text-align: right;
+}
+
+/* ─── screen ─────────────────────────────────────────────────────── */
+.gk-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.gk-screen-canvas {
+  display: block;
+  image-rendering: pixelated;
+  background: #000;
+  outline: 2px solid transparent;
+  border-radius: 2px;
+  max-width: 100%;
+}
+.gk-screen-canvas:focus {
+  outline-color: var(--gk-accent);
+}
+.gk-status {
+  font-family: var(--gk-mono);
+  font-size: 11px;
+  color: var(--gk-dim);
+}
+.gk-status .gk-state-running {
+  color: var(--gk-good);
+}
+.gk-status .gk-state-stopped {
+  color: var(--gk-warn);
+}
+.gk-hint {
+  font-size: 10px;
+  color: var(--gk-muted);
+}
+
+/* ─── ppu views ──────────────────────────────────────────────────── */
+.gk-pixels {
+  display: block;
+  image-rendering: pixelated;
+  background: repeating-conic-gradient(#1e293b 0 25%, #0f172a 0 50%) 0 0 / 16px 16px;
+  border: 1px solid var(--gk-border);
+}
+.gk-swatches {
+  display: grid;
+  grid-template-columns: repeat(16, 1fr);
+  gap: 1px;
+  width: 100%;
+  max-width: 320px;
+}
+.gk-swatch {
+  aspect-ratio: 1;
+  border: 1px solid transparent;
+  cursor: default;
+  /* a swatch is a button, so the keyboard reaches it; nothing of a button's look should show */
+  padding: 0;
+  appearance: none;
+  border-radius: 0;
+}
+.gk-swatch.gk-selected {
+  border-color: var(--gk-fg);
+}
+.gk-swatch:focus-visible {
+  outline: 2px solid var(--gk-accent);
+  outline-offset: 1px;
+}
+.gk-io-reg {
+  padding: 6px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--gk-border) 50%, transparent);
+}
+.gk-io-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 1px 12px;
+  font-size: 11px;
+}
+.gk-io-field {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.gk-label-form {
+  display: grid;
+  grid-template-columns: 110px 1fr 1fr auto;
+  gap: 6px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--gk-border);
+}
+.gk-sprite-preview {
+  image-rendering: pixelated;
+  background: repeating-conic-gradient(#1e293b 0 25%, #0f172a 0 50%) 0 0 / 8px 8px;
+  vertical-align: middle;
+}
+
+/* a recording's script, with the button that opens it floating in its corner */
+.gk-script {
+  max-height: 8.5em;
+  margin: 0;
+  padding-right: 28px;
+  background: transparent;
+}
+/* an action that belongs to what it sits on, out of the way until wanted */
+.gk-float {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  opacity: 0.6;
+}
+.gk-float:hover {
+  opacity: 1;
+}
+.gk-table td .gk-pixels {
+  display: block;
+  margin-bottom: 2px;
+}
+
+/* ─── save state drawer ──────────────────────────────────────────── */
+.gk-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-self: stretch;
+  border-top: 1px solid var(--gk-border);
+  padding-top: 6px;
+}
+.gk-drawer-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  padding: 2px 0;
+  color: var(--gk-dim);
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+.gk-drawer-bar:hover {
+  color: var(--gk-fg);
+}
+.gk-cards {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.gk-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: 132px;
+  padding: 4px;
+  background: var(--gk-panel);
+  border: 1px solid var(--gk-border);
+  border-radius: var(--gk-radius);
+}
+/* the screen takes the card's width and keeps its shape, whatever size it was stored at */
+.gk-card-screen {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.gk-card-screen .gk-pixels {
+  width: 100%;
+  height: auto;
+}
+.gk-card-screen:hover:not(:disabled) .gk-pixels {
+  border-color: var(--gk-accent);
+}
+.gk-card-screen:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.gk-card-name {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gk-card-actions {
+  justify-content: flex-end;
+}

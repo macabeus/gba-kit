@@ -30,24 +30,28 @@
 - **TypeScript-native** — Emulator built entirely in TypeScript, designed for the JS/TS ecosystem
 - **Modular npm packages** — Use just the ARM CPU core, the GBA emulator, or the Node.js, browser, and React runtimes
 - **First-class scripting API** — Run headless emulation from Node.js scripts for automated testing, TAS, ROM research, and tooling
-- **Built-in debugger** — Run the disassemblier, set breakpoints, open the memory viewer, inspect registers, and more
+- **Built-in debugger** — Run the disassembler, set breakpoints, open the memory viewer, inspect registers, and more
 
 ## Packages
 
-| Package                                          | Description                                                                                 |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------- |
-| [`@gba-kit/arm-emulator`](packages/arm-emulator) | ARM7TDMI CPU emulator (Thumb + ARM instruction sets)                                        |
-| [`@gba-kit/gba-emulator`](packages/gba-emulator) | Full GBA hardware emulation (PPU, APU, DMA, timers, interrupts, system bus)                 |
-| [`@gba-kit/gba-node`](packages/gba-node)         | Headless Node.js runtime for scripted GBA emulation                                         |
-| [`@gba-kit/gba-browser`](packages/gba-browser)   | Browser runtime for GBA emulation (Canvas rendering, keyboard input, IndexedDB save states) |
-| [`@gba-kit/gba-react`](packages/gba-react)       | React hooks for GBA emulation (`useEmulator`, `useEmulatorCanvas`, `useEmulatorKeyboard`)   |
-| [`@gba-kit/debug-info`](packages/debug-info)     | Parse ELF symbols + DWARF line tables (PC→source) for source-level debugging                |
+| Package                                            | Description                                                                                 |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [`@gba-kit/arm-emulator`](packages/arm-emulator)   | ARM7TDMI CPU emulator (Thumb + ARM instruction sets)                                        |
+| [`@gba-kit/gba-emulator`](packages/gba-emulator)   | Full GBA hardware emulation (PPU, APU, DMA, timers, interrupts, system bus)                 |
+| [`@gba-kit/gba-node`](packages/gba-node)           | Headless Node.js runtime for scripted GBA emulation                                         |
+| [`@gba-kit/gba-browser`](packages/gba-browser)     | Browser runtime for GBA emulation (Canvas rendering, keyboard input, IndexedDB save states) |
+| [`@gba-kit/gba-react`](packages/gba-react)         | React hooks for GBA emulation (`useEmulator`, `useEmulatorCanvas`, `useEmulatorKeyboard`)   |
+| [`@gba-kit/debug-info`](packages/debug-info)       | Parse ELF symbols + DWARF line tables (PC→source) for source-level debugging                |
+| [`@gba-kit/debug-core`](packages/debug-core)       | IDE-agnostic debugging session: breakpoints, gdb-style stepping, DWARF values, exact rewind |
+| [`@gba-kit/debug-adapter`](packages/debug-adapter) | Debug Adapter Protocol server: debug a ROM from VS Code, Neovim, Emacs, Zed or JetBrains    |
+| [`@gba-kit/debug-ui`](packages/debug-ui)           | React panels for the screen, PPU, I/O, trace, events, labels; hosted by editors and the web |
 
 ## Apps
 
-| App                              | Description                                                                              |
-| -------------------------------- | ---------------------------------------------------------------------------------------- |
-| [`@gba-kit/webapp`](apps/webapp) | Browser-based GBA debugger with disassembly, breakpoints, memory viewer, and save states |
+| App                                       | Description                                                                              |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------- |
+| [`@gba-kit/webapp`](apps/webapp)          | Browser-based GBA debugger with disassembly, breakpoints, memory viewer, and save states |
+| [`gba-kit-vscode`](apps/vscode-extension) | VS Code extension: debug a GBA ROM in C with the screen, PPU and I/O views beside it     |
 
 ## Scripting
 
@@ -117,8 +121,12 @@ gba-kit/
     gba-browser/      # Browser runtime (Canvas, keyboard, IndexedDB)
     gba-react/        # React hooks (wraps gba-browser)
     debug-info/       # ELF/DWARF parser (PC→source)
+    debug-core/       # IDE-agnostic debug session (breakpoints, stepping, rewind)
+    debug-adapter/    # Debug Adapter Protocol server
+    debug-ui/         # React debugger panels (screen, PPU, I/O, trace, labels)
   apps/
     webapp/           # Browser debugger UI + dev server
+    vscode-extension/ # VS Code debugger extension
 ```
 
 ### Using with npm link

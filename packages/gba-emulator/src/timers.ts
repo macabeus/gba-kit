@@ -200,12 +200,20 @@ export class TimerController {
     }
   }
 
-  /** Reschedule overflow events for enabled non-cascade timers. */
-  reconstructEvents(): void {
+  /**
+   * After a snapshot restore: give every pending overflow event its callback back
+   * at the cycle the snapshot recorded. Rescheduling from `counter` instead would
+   * move the event by up to one prescaler period per restore, and the restored
+   * machine would no longer replay the original.
+   */
+  reattachEvents(): void {
     for (let i = 0; i < 4; i++) {
       const ch = this.#channels[i]!;
-      if (ch.enabled && !ch.cascade) {
-        this.#scheduleOverflow(i);
+      const id = TIMER_EVENT_IDS[i]!;
+      if (this.#scheduler.isScheduled(id)) {
+        this.#scheduler.reattach(id, () => this.#onOverflow(i));
+      } else if (ch.enabled && !ch.cascade) {
+        this.#scheduleOverflow(i); // an older snapshot, with no overflow event of its own
       }
     }
   }

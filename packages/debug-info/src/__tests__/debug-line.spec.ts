@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { type LineRow, parseDebugLine } from '../debug-line.js';
+import { type LineRow, LineTable, parseDebugLine } from '../debug-line.js';
 import { ElfFile } from '../elf.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -53,6 +53,37 @@ function unmodellableUnit(version: number, body = 24): Uint8Array {
   view.setUint32(0, 2 + body, true); // unit_length covers everything after itself
   view.setUint16(4, version, true);
   unit.fill(0xaa, 6); // header we never read
+  return unit;
+}
+
+/**
+ * A DWARF 5 unit whose header is walkable all the way to the directory table, which
+ * then describes its entries with a form no reader can size — the one shape that
+ * reaches `readV5Tables`' null return.
+ */
+function unreadableEntryFormatUnit(): Uint8Array {
+  const header = [
+    1, // minimum_instruction_length
+    1, // maximum_operations_per_instruction
+    1, // default_is_stmt
+    0xfb, // line_base (-5)
+    14, // line_range
+    1, // opcode_base: no standard_opcode_lengths follow
+    // directory_entry_format: one (DW_LNCT_path, <a form with no encoding>) pair
+    1,
+    1,
+    0x7f,
+    1, // directories_count
+    0, // where that directory's bytes would start
+  ];
+  const unit = new Uint8Array(12 + header.length);
+  const view = new DataView(unit.buffer);
+  view.setUint32(0, 8 + header.length, true); // unit_length
+  view.setUint16(4, 5, true); // version
+  unit[6] = 4; // address_size
+  unit[7] = 0; // segment_selector_size
+  view.setUint32(8, header.length, true); // header_length: the program starts past the tables
+  unit.set(header, 12);
   return unit;
 }
 
@@ -96,10 +127,19 @@ describe('a unit_length that undercounts its own line program (agbcc / GCC 2.95)
 });
 
 describe('units we cannot decode are skipped by their own unit_length', () => {
-  it('keeps the rest of the section when a DWARF 5 unit comes first', () => {
-    // DWARF 5 rewrote the header (address_size/segment_selector_size, and typed
-    // directory/file entry formats), so its bytes are not a v2–v4 header.
+  it('keeps the rest of the section when a unit of a later version comes first', () => {
+    expect(rowsOf(concat(unmodellableUnit(6), section))).toEqual(pristine);
+  });
+
+  it('keeps the rest of the section when a header_length points past the unit', () => {
+    // Version 5 with garbage after it: the header length lands outside the unit, so it is skipped whole.
     expect(rowsOf(concat(unmodellableUnit(5), section))).toEqual(pristine);
+  });
+
+  it('keeps the rest of the section when a DWARF 5 unit’s tables cannot be read', () => {
+    // A well-formed v5 header whose directory table is described by a form this reader
+    // cannot size: the file table is unknowable, so the unit is skipped by its length.
+    expect(rowsOf(concat(unreadableEntryFormatUnit(), section))).toEqual(pristine);
   });
 
   it('keeps the rest of the section when a 64-bit DWARF unit comes first', () => {
@@ -109,6 +149,47 @@ describe('units we cannot decode are skipped by their own unit_length', () => {
   it('steps over zero-word padding between units', () => {
     const pad = new Uint8Array(8); // two zero unit_lengths
     expect(rowsOf(concat(pad, section))).toEqual(pristine);
+  });
+});
+
+describe('a DWARF 5 line program', () => {
+  // The assembler of a modern toolchain emits a version 5 unit for a `.s` file even
+  // when the C units next to it are version 3: the debug-core fixture links both.
+  const fixture = join(here, '..', '..', '..', 'debug-core', 'test-fixtures', 'build', 'thumb-O2.elf');
+  const mixed = ElfFile.parse(new Uint8Array(readFileSync(fixture)));
+  const line = mixed.sectionData('.debug_line')!;
+  const strings = { lineStr: mixed.sectionData('.debug_line_str'), str: mixed.sectionData('.debug_str') };
+
+  it('reads the entry-format tables, with names from .debug_line_str', () => {
+    const table = parseDebugLine(line, true, strings);
+    expect(table.files).toEqual(expect.arrayContaining(['source/start.s', 'source/main.c', 'source/util.c']));
+    expect(table.sourceToPcs('source/start.s', 10)).toEqual([0x08000000]);
+    expect(table.sourceToPcs('source/start.s', 14)).toEqual([0x080000c4, 0x08000100]);
+    expect(table.pcToSource(0x080000c4)).toMatchObject({ file: 'source/start.s', line: 14 });
+    expect(table.rowAt(0x080000c4)).toMatchObject({ line: 14, isStmt: true });
+  });
+
+  it('lists the lines of a file that have code, as sourceToPcs answers them', () => {
+    const table = parseDebugLine(line, true, strings);
+    const lines = table.linesWithCode('source/main.c');
+    expect(lines.length).toBeGreaterThan(10);
+    expect(lines).toEqual([...lines].sort((a, b) => a - b));
+    const byQuery = [];
+    for (let l = 1; l <= 200; l++) {
+      if (table.sourceToPcs('source/main.c', l).length > 0) {
+        byQuery.push(l);
+      }
+    }
+    expect(lines).toEqual(byQuery);
+    expect(table.linesWithCode('./source/main.c')).toEqual(lines); // matched normalized, as sourceToPcs is
+    expect(table.linesWithCode('source/nowhere.c')).toEqual([]);
+  });
+
+  it('still decodes the rows without the string sections, with placeholder names', () => {
+    const rows = parseDebugLine(line).rows.filter((r) => r.address === 0x080000c4 && !r.endSequence);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.line).toBe(14);
+    expect(rows[0]!.file).toMatch(/^<str \d+>/);
   });
 });
 
@@ -157,5 +238,35 @@ describe('a section that cannot be walked degrades instead of throwing', () => {
 
   it('handles an empty section', () => {
     expect(rowsOf(new Uint8Array(0))).toEqual([]);
+  });
+});
+
+describe('one address per run of rows for a line', () => {
+  // Hand-built rows: what a producer emits for a line the optimizer split, where the
+  // first row of a piece is mid-expression (is_stmt=0) and the stop is the next one.
+  const row = (address: number, line: number, isStmt: boolean): LineRow => ({
+    address,
+    fileIndex: 1,
+    file: 'main.c',
+    line,
+    endSequence: false,
+    isStmt,
+  });
+  const table = new LineTable([
+    row(0x100, 42, false),
+    row(0x104, 42, true),
+    row(0x108, 50, true),
+    row(0x10c, 42, true),
+    row(0x110, 60, false),
+    { ...row(0x114, 60, true), endSequence: true },
+  ]);
+
+  it('records the run’s first statement row, not its first row', () => {
+    expect(table.sourceToPcs('main.c', 42)).toEqual([0x104, 0x10c]);
+  });
+
+  it('gives a line whose every row is a non-statement no code at all', () => {
+    expect(table.sourceToPcs('main.c', 60)).toEqual([]);
+    expect(table.linesWithCode('main.c')).toEqual([42, 50]);
   });
 });

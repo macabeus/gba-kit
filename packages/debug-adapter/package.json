@@ -1,0 +1,61 @@
+{
+  "name": "@gba-kit/debug-adapter",
+  "version": "0.6.0",
+  "description": "Debug Adapter Protocol server for GBA programs on top of gba-kit: VS Code, Neovim, Emacs, Zed and JetBrains debug a ROM with source, DWARF values, data breakpoints and exact rewind",
+  "author": "macabeus",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "debug-adapter": "dist/cli.js",
+    "gba-kit-debug-adapter": "dist/cli.js",
+    "gba-kit-screen": "dist/screen.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/macabeus/gba-kit",
+    "directory": "packages/debug-adapter"
+  },
+  "homepage": "https://github.com/macabeus/gba-kit",
+  "bugs": "https://github.com/macabeus/gba-kit/issues",
+  "keywords": [
+    "gba",
+    "gameboy-advance",
+    "debugger",
+    "debug-adapter-protocol",
+    "dap",
+    "emulator",
+    "typescript"
+  ],
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@gba-kit/debug-core": "workspace:*",
+    "@vscode/debugadapter": "^1.68.0",
+    "@vscode/debugprotocol": "^1.68.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.1"
+  }
+}

@@ -40,6 +40,20 @@ export interface WatchpointWrite {
   dmaOrigin: WriteOrigin | null;
 }
 
+/** A read reported to a data watchpoint. */
+export interface WatchpointRead {
+  /** The watched byte that was read (within the access, clamped to the watch range). */
+  address: number;
+  /** Value the load returned, masked to `size` bytes — the whole access, not just the watched bytes. */
+  value: number;
+  /** Access size in bytes (1, 2 or 4). */
+  size: number;
+  /** Active DMA channel (0-3) if a DMA performed the read, else -1 (a CPU/BIOS load). */
+  dmaChannel: number;
+  /** The DMA's start instruction when `dmaChannel >= 0`, else null. */
+  dmaOrigin: WriteOrigin | null;
+}
+
 export class GbaSystemBus implements MemoryBus {
   /** BIOS ROM (16 KB) — set via loadBios() */
   #bios = new Uint8Array(0x4000);
@@ -93,6 +107,9 @@ export class GbaSystemBus implements MemoryBus {
   /** Callback when BG2/BG3 reference point registers are written (for PPU ref point reload) */
   onBgRefPointWrite?: (bgIndex: 2 | 3, isX: boolean) => void;
 
+  /** Observer for every write into the I/O register file (an event log's MMIO rows). */
+  onMmioWrite: ((address: number, value: number, size: 1 | 2 | 4) => void) | null = null;
+
   /** Data watchpoints: fire when a write commits to [start, end). Empty until set. */
   readonly #watchpoints: Array<{
     start: number;
@@ -100,7 +117,14 @@ export class GbaSystemBus implements MemoryBus {
     onWrite: (info: WatchpointWrite) => void;
   }> = [];
 
-  /** DMA channel (0-3) currently transferring, or -1 for CPU writes; attributes hits. */
+  /** Read watchpoints: fire when a load returns from [start, end). Empty until set. */
+  readonly #readWatchpoints: Array<{
+    start: number;
+    end: number;
+    onRead: (info: WatchpointRead) => void;
+  }> = [];
+
+  /** DMA channel (0-3) currently transferring, or -1 for CPU accesses; attributes hits. */
   #dmaChannel = -1;
   #dmaOrigin: WriteOrigin | null = null;
 
@@ -131,14 +155,54 @@ export class GbaSystemBus implements MemoryBus {
     };
   }
 
-  /** Remove every registered watchpoint. */
+  /** Remove every registered write watchpoint. */
   clearWriteWatchpoints(): void {
     this.#watchpoints.length = 0;
   }
 
-  /** Whether any data watchpoint is registered (hot-path gate). */
+  /**
+   * Register a read watchpoint over [address, address+length); returns a disposer.
+   * Fires after the load, with the value it returned. Every load through the bus
+   * counts, the CPU's instruction fetch included; a debugger's `peek` does not.
+   */
+  addReadWatchpoint(address: number, length: number, onRead: (info: WatchpointRead) => void): () => void {
+    const len = length >= 1 ? length : 1;
+    const wp = { start: address >>> 0, end: (address + len) >>> 0, onRead };
+    this.#readWatchpoints.push(wp);
+    return () => {
+      const i = this.#readWatchpoints.indexOf(wp);
+      if (i >= 0) {
+        this.#readWatchpoints.splice(i, 1);
+      }
+    };
+  }
+
+  /** Remove every registered read watchpoint. */
+  clearReadWatchpoints(): void {
+    this.#readWatchpoints.length = 0;
+  }
+
+  /** Whether any write watchpoint is registered (hot-path gate). */
   hasWatchpoints(): boolean {
     return this.#watchpoints.length > 0;
+  }
+
+  /** Whether any read watchpoint is registered (hot-path gate). */
+  hasReadWatchpoints(): boolean {
+    return this.#readWatchpoints.length > 0;
+  }
+
+  /** Notify read watchpoints overlapping a load of `size` bytes at `base` that returned `value`. */
+  #notifyRead(base: number, value: number, size: number): void {
+    const lo = base >>> 0;
+    const hi = (lo + size) >>> 0;
+    const list = this.#readWatchpoints.length === 1 ? this.#readWatchpoints : this.#readWatchpoints.slice();
+    for (const wp of list) {
+      if (lo < wp.end && hi > wp.start) {
+        const address = (lo > wp.start ? lo : wp.start) >>> 0;
+        wp.onRead({ address, value, size, dmaChannel: this.#dmaChannel, dmaOrigin: this.#dmaOrigin });
+      }
+    }
   }
 
   /**
@@ -235,6 +299,111 @@ export class GbaSystemBus implements MemoryBus {
   // ─── Memory Map Classification ────────────────────────────────────
 
   /**
+   * Debugger read: `length` bytes starting at `address`, taken from the backing
+   * arrays without any of the bus's side effects (an EEPROM read through the bus
+   * clocks its serial protocol; this never does). `readable` counts the leading
+   * bytes that map to something; the rest of `data` is zero and must not be shown
+   * as memory contents. Mirrors resolve to their canonical bytes. MMIO is decoded
+   * the way a CPU read would see it, which for the registers modelled here is
+   * side-effect free.
+   */
+  peek(address: number, length: number): { data: Uint8Array; readable: number } {
+    const data = new Uint8Array(length);
+    let readable = 0;
+    for (let i = 0; i < length; i++) {
+      const value = this.#peekByte((address + i) >>> 0);
+      if (value === null) {
+        break;
+      }
+      data[i] = value;
+      readable++;
+    }
+    return { data, readable };
+  }
+
+  #peekByte(addr: number): number | null {
+    const offset = addr & 0x00ffffff;
+    switch ((addr >>> 24) & 0xff) {
+      case 0x00:
+        return offset < 0x4000 ? this.#bios[offset]! : null;
+      case 0x02:
+        return this.ewram[addr & 0x3ffff]!;
+      case 0x03:
+        return this.iwram[addr & 0x7fff]!;
+      case 0x04:
+        return offset < 0x400 ? this.#mmioRead8(addr) : null;
+      case 0x05:
+        return this.palette[addr & 0x3ff]!;
+      case 0x06:
+        return this.vram[this.#mirrorVram(addr)]!;
+      case 0x07:
+        return this.oam[addr & 0x3ff]!;
+      case 0x08:
+      case 0x09:
+      case 0x0a:
+      case 0x0b:
+      case 0x0c: {
+        const romOffset = addr & 0x01ffffff;
+        return romOffset < this.#rom.length ? this.#rom[romOffset]! : null;
+      }
+      case 0x0e:
+      case 0x0f:
+        return this.#hasSram ? this.sram[addr & 0xffff]! : null;
+      default:
+        return null; // EEPROM (a protocol, not bytes), and everything unmapped
+    }
+  }
+
+  /**
+   * Debugger write: store `bytes` at `address` in the backing arrays, bypassing the
+   * hardware's write rules (a byte write to OAM is dropped by the bus, to VRAM it is
+   * duplicated; a hex editor means the byte it typed) and without notifying data
+   * watchpoints. MMIO goes through the bus so the register's side effects apply.
+   * BIOS, ROM and EEPROM are refused. Returns how many leading bytes were written.
+   */
+  poke(address: number, bytes: Uint8Array): number {
+    let written = 0;
+    for (let i = 0; i < bytes.length; i++) {
+      const addr = (address + i) >>> 0;
+      const value = bytes[i]!;
+      switch ((addr >>> 24) & 0xff) {
+        case 0x02:
+          this.ewram[addr & 0x3ffff] = value;
+          break;
+        case 0x03:
+          this.iwram[addr & 0x7fff] = value;
+          break;
+        case 0x04:
+          if ((addr & 0x00ffffff) >= 0x400) {
+            return written;
+          }
+          this.#mmioWrite8(addr, value);
+          break;
+        case 0x05:
+          this.palette[addr & 0x3ff] = value;
+          break;
+        case 0x06:
+          this.vram[this.#mirrorVram(addr)] = value;
+          break;
+        case 0x07:
+          this.oam[addr & 0x3ff] = value;
+          break;
+        case 0x0e:
+        case 0x0f:
+          if (!this.#hasSram) {
+            return written;
+          }
+          this.sram[addr & 0xffff] = value;
+          break;
+        default:
+          return written;
+      }
+      written++;
+    }
+    return written;
+  }
+
+  /**
    * The region this bus decodes `address` to, or `null` when it decodes nothing.
    *
    * The `read*` methods below are the HARDWARE interface: they answer every address,
@@ -301,6 +470,14 @@ export class GbaSystemBus implements MemoryBus {
   // ─── MemoryBus Implementation ─────────────────────────────────────
 
   read8(address: number): number {
+    const value = this.#read8(address);
+    if (this.#readWatchpoints.length > 0) {
+      this.#notifyRead(this.#canonicalAddress(address), value & 0xff, 1);
+    }
+    return value;
+  }
+
+  #read8(address: number): number {
     const region = (address >>> 24) & 0xff;
     switch (region) {
       case 0x00:
@@ -335,6 +512,14 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   read16(address: number): number {
+    const value = this.#read16(address);
+    if (this.#readWatchpoints.length > 0) {
+      this.#notifyRead(this.#canonicalAddress(address & ~1), value & 0xffff, 2);
+    }
+    return value;
+  }
+
+  #read16(address: number): number {
     const addr = address & ~1; // Force halfword alignment
     const region = (addr >>> 24) & 0xff;
     switch (region) {
@@ -376,6 +561,16 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   read32(address: number): number {
+    const value = this.#read32(address);
+    if (this.#readWatchpoints.length > 0) {
+      // `#read32` assembles with `<< 24`, so its result is signed; watchpoints
+      // report the loaded word unsigned, as the write side does.
+      this.#notifyRead(this.#canonicalAddress(address & ~3), value >>> 0, 4);
+    }
+    return value;
+  }
+
+  #read32(address: number): number {
     const addr = address & ~3; // Force word alignment
     const region = (addr >>> 24) & 0xff;
     switch (region) {
@@ -427,6 +622,7 @@ export class GbaSystemBus implements MemoryBus {
         this.iwram[address & 0x7fff] = value;
         break;
       case 0x04:
+        this.onMmioWrite?.(address >>> 0, value & 0xff, 1);
         this.#mmioWrite8(address, value);
         break;
       case 0x05:
@@ -469,7 +665,7 @@ export class GbaSystemBus implements MemoryBus {
         break;
     }
     if (committed && this.#watchpoints.length > 0) {
-      this.#notifyWrite(this.#canonicalWriteAddress(address), value & 0xff, 1);
+      this.#notifyWrite(this.#canonicalAddress(address), value & 0xff, 1);
     }
   }
 
@@ -485,6 +681,7 @@ export class GbaSystemBus implements MemoryBus {
         this.#write16To(this.iwram, addr & 0x7fff, value);
         break;
       case 0x04:
+        this.onMmioWrite?.(addr >>> 0, value & 0xffff, 2);
         this.#mmioWrite16(addr, value);
         break;
       case 0x05:
@@ -516,7 +713,7 @@ export class GbaSystemBus implements MemoryBus {
         break;
     }
     if (committed && this.#watchpoints.length > 0) {
-      this.#notifyWrite(this.#canonicalWriteAddress(addr), value & 0xffff, 2);
+      this.#notifyWrite(this.#canonicalAddress(addr), value & 0xffff, 2);
     }
   }
 
@@ -532,6 +729,7 @@ export class GbaSystemBus implements MemoryBus {
         this.#write32To(this.iwram, addr & 0x7fff, value);
         break;
       case 0x04:
+        this.onMmioWrite?.(addr >>> 0, value >>> 0, 4);
         this.#mmioWrite32(addr, value);
         break;
       case 0x05:
@@ -563,7 +761,7 @@ export class GbaSystemBus implements MemoryBus {
         break;
     }
     if (committed && this.#watchpoints.length > 0) {
-      this.#notifyWrite(this.#canonicalWriteAddress(addr), value >>> 0, 4);
+      this.#notifyWrite(this.#canonicalAddress(addr), value >>> 0, 4);
     }
   }
 
@@ -579,10 +777,11 @@ export class GbaSystemBus implements MemoryBus {
   #readBios32(address: number): number {
     const offset = address & 0x3fff;
     this.#lastBiosRead =
-      this.#bios[offset]! |
-      (this.#bios[offset + 1]! << 8) |
-      (this.#bios[offset + 2]! << 16) |
-      (this.#bios[offset + 3]! << 24);
+      (this.#bios[offset]! |
+        (this.#bios[offset + 1]! << 8) |
+        (this.#bios[offset + 2]! << 16) |
+        (this.#bios[offset + 3]! << 24)) >>>
+      0;
     return this.#lastBiosRead;
   }
 
@@ -605,10 +804,11 @@ export class GbaSystemBus implements MemoryBus {
     const offset = address & 0x01fffffc;
     if (offset + 3 < this.#rom.length) {
       return (
-        this.#rom[offset]! |
-        (this.#rom[offset + 1]! << 8) |
-        (this.#rom[offset + 2]! << 16) |
-        (this.#rom[offset + 3]! << 24)
+        (this.#rom[offset]! |
+          (this.#rom[offset + 1]! << 8) |
+          (this.#rom[offset + 2]! << 16) |
+          (this.#rom[offset + 3]! << 24)) >>>
+        0
       );
     }
     return 0;
@@ -617,10 +817,10 @@ export class GbaSystemBus implements MemoryBus {
   // ─── VRAM Mirroring ───────────────────────────────────────────────
 
   /**
-   * Canonical (un-mirrored) address of the byte a write stores to, so writes via a
-   * region mirror match watchpoints registered on the canonical address.
+   * Canonical (un-mirrored) address of the byte an access touches, so a read or write
+   * through a region mirror matches watchpoints registered on the canonical address.
    */
-  #canonicalWriteAddress(address: number): number {
+  #canonicalAddress(address: number): number {
     switch ((address >>> 24) & 0xff) {
       case 0x02:
         return (0x02000000 | (address & 0x3ffff)) >>> 0;
@@ -951,7 +1151,9 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   #read32From(arr: Uint8Array, offset: number): number {
-    return arr[offset]! | (arr[offset + 1]! << 8) | (arr[offset + 2]! << 16) | (arr[offset + 3]! << 24);
+    // `>>> 0`: a word with bit 31 set would otherwise be a negative number, and a
+    // caller comparing it against an opcode or a search value would never match.
+    return (arr[offset]! | (arr[offset + 1]! << 8) | (arr[offset + 2]! << 16) | (arr[offset + 3]! << 24)) >>> 0;
   }
 
   #write16To(arr: Uint8Array, offset: number, value: number): void {

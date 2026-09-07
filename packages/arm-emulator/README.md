@@ -53,11 +53,11 @@ Types: `CpsrFlags`, `DebugAction`, `DebugHooks`, `ExecutionResult`, `ExternalCal
 
 ### Subpath exports
 
-| Subpath                              | Description                                                          |
-| ------------------------------------ | -------------------------------------------------------------------- |
-| `@gba-kit/arm-emulator/arm-cpu`      | `ArmCpu` class — full ARM7TDMI with mode switching, banked registers |
-| `@gba-kit/arm-emulator/disassembler` | `disassembleArm()`, `disassembleThumb()` functions                   |
-| `@gba-kit/arm-emulator/cpu-snapshot` | `CpuSnapshot` interface for serializable CPU state                   |
+| Subpath                              | Description                                                                                                                                                                       |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@gba-kit/arm-emulator/arm-cpu`      | `ArmCpu` class — full ARM7TDMI with mode switching, banked registers                                                                                                              |
+| `@gba-kit/arm-emulator/disassembler` | `disassembleArm()` / `disassembleThumb()`, and `disassembleArmAt()` / `disassembleThumbAt()` — one decoded instruction with its target, Thumb `bl` pairs joined, symbols optional |
+| `@gba-kit/arm-emulator/cpu-snapshot` | `CpuSnapshot` interface for serializable CPU state                                                                                                                                |
 
 ## Testing
 

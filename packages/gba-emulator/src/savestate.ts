@@ -12,6 +12,8 @@ export interface GbaSnapshot {
   version: 1;
   cpu: CpuSnapshot;
   currentScanline: number;
+  /** Hardware frames completed since reset. Older snapshots omit it and restore as 0. */
+  frameCount?: number;
   inIrqHandler: boolean;
   scheduler: SchedulerSnapshot;
   interrupts: InterruptSnapshot;

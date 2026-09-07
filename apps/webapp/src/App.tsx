@@ -8,6 +8,8 @@ import { DebugView } from './pages/debug/DebugView';
 import { LoadView } from './pages/load/LoadView';
 import { PlayView } from './pages/play/PlayView';
 import { InputRecorder } from './scripting';
+import { fetchElfFromServer } from './session/elf-loader';
+import { useDebugSession } from './session/use-session';
 
 type AppMode = 'play' | 'debug';
 
@@ -20,6 +22,7 @@ export function App() {
   const [mode, setMode] = useState<AppMode>('play');
   const [romLoaded, setRomLoaded] = useState(false);
   const [romData, setRomData] = useState<ArrayBuffer | null>(null);
+  const [elfData, setElfData] = useState<Uint8Array | null>(null);
   const [romAutoLoading, setRomAutoLoading] = useState(false);
   const [, forceRender] = useState(0);
 
@@ -28,8 +31,10 @@ export function App() {
       forceRender((n) => n + 1);
       recorderRef.current?.onFrame();
     },
-    onBreakpoint: () => setMode('debug'),
   });
+
+  // The Debug page runs a debug-core session over the same machine, while it is shown
+  const debug = useDebugSession(emulator, romData, elfData, mode === 'debug');
 
   // Lazily create the recorder
   const recorderRef = useRef<InputRecorder | null>(null);
@@ -58,9 +63,21 @@ export function App() {
       emulator.loadRom(data);
       setRomLoaded(true);
       setRomData(data);
+      // An ELF describes one ROM: the sidecar is fetched again, a picked one must be picked again
+      setElfData(null);
     },
     [emulator],
   );
+
+  // Auto-load the sidecar ELF the dev server serves, when configured
+  useEffect(() => {
+    if (!window.__GBAKIT_CONFIG__?.hasElf || elfData) {
+      return;
+    }
+    fetchElfFromServer()
+      .then(setElfData)
+      .catch((err) => console.error('Auto ELF load failed:', err));
+  }, [elfData]);
 
   // Auto-load ROM from server if configured
   useEffect(() => {
@@ -100,8 +117,6 @@ export function App() {
 
   const handleRun = useCallback(() => emulator.run(), [emulator]);
   const handlePause = useCallback(() => emulator.pause(), [emulator]);
-  const handleStep = useCallback(() => emulator.stepInstruction(), [emulator]);
-  const handleStepOver = useCallback(() => emulator.stepOver(), [emulator]);
 
   const handleStartRecording = useCallback(() => {
     recorder.start();
@@ -136,14 +151,7 @@ export function App() {
     );
   } else {
     content = (
-      <DebugView
-        emulator={emulator}
-        emuState={emuState}
-        onRun={handleRun}
-        onPause={handlePause}
-        onStep={handleStep}
-        onStepOver={handleStepOver}
-      />
+      <DebugView session={debug.session} revision={debug.revision} error={debug.error} onElfLoad={setElfData} />
     );
   }
 
@@ -158,7 +166,7 @@ export function App() {
 
       {content}
 
-      {romLoaded && <SaveStateDrawer emulator={emulator} romData={romData} />}
+      {romLoaded && <SaveStateDrawer emulator={emulator} romData={romData} onStateLoaded={debug.onStateLoaded} />}
     </div>
   );
 }

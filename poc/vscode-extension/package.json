@@ -1,0 +1,228 @@
+{
+  "name": "gba-kit-vscode-poc",
+  "displayName": "gba-kit debugger (proof of concept)",
+  "description": "Throw-away proof of concept: debug a GBA ROM inside VS Code on top of gba-kit",
+  "publisher": "macabeus",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onDebug"
+  ],
+  "contributes": {
+    "debuggers": [
+      {
+        "type": "gba-kit",
+        "label": "gba-kit (GBA emulator)",
+        "languages": [
+          "c",
+          "cpp",
+          "arm",
+          "asm"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "rom"
+            ],
+            "properties": {
+              "rom": {
+                "type": "string",
+                "description": "Path to the .gba ROM"
+              },
+              "elf": {
+                "type": "string",
+                "description": "Path to the sidecar ELF built with -g (symbols + DWARF)"
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Project root; relative DWARF paths resolve against it",
+                "default": "${workspaceFolder}"
+              },
+              "sourceMap": {
+                "type": "object",
+                "description": "Rewrite DWARF path prefixes to local paths, e.g. {\"/balatro-gba\": \"${workspaceFolder}\"}",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Stop at 0x08000000 before running",
+                "default": true
+              },
+              "outputDir": {
+                "type": "string",
+                "description": "Where scripts write screenshots and save states",
+                "default": "${workspaceFolder}/.gba-kit"
+              },
+              "rewind": {
+                "type": "object",
+                "description": "Rewind ring: a keyframe every `keyframeInterval` frames, keeping `maxKeyframes` of them",
+                "properties": {
+                  "keyframeInterval": {
+                    "type": "number",
+                    "default": 10
+                  },
+                  "maxKeyframes": {
+                    "type": "number",
+                    "default": 180
+                  }
+                }
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "gba-kit",
+            "request": "launch",
+            "name": "Debug GBA ROM",
+            "rom": "${workspaceFolder}/build/game.gba",
+            "elf": "${workspaceFolder}/build/game.elf",
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": true
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "gba-kit: Launch ROM",
+            "description": "Run a GBA ROM under the gba-kit debugger",
+            "body": {
+              "type": "gba-kit",
+              "request": "launch",
+              "name": "Debug GBA ROM",
+              "rom": "^\"\\${workspaceFolder}/build/game.gba\"",
+              "elf": "^\"\\${workspaceFolder}/build/game.elf\"",
+              "cwd": "^\"\\${workspaceFolder}\"",
+              "stopOnEntry": true
+            }
+          }
+        ]
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "c"
+      },
+      {
+        "language": "cpp"
+      },
+      {
+        "language": "arm"
+      },
+      {
+        "language": "asm"
+      }
+    ],
+    "commands": [
+      {
+        "command": "gba-kit.showScreen",
+        "title": "GBA: Show Screen",
+        "icon": "$(device-mobile)"
+      },
+      {
+        "command": "gba-kit.runScript",
+        "title": "GBA: Run Script From Active Editor",
+        "icon": "$(play)"
+      },
+      {
+        "command": "gba-kit.toggleRecording",
+        "title": "GBA: Start/Stop Recording Inputs As Script",
+        "icon": "$(record)"
+      },
+      {
+        "command": "gba-kit.stepFrame",
+        "title": "GBA: Step One Frame",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "gba-kit.rewind",
+        "title": "GBA: Rewind One Second",
+        "icon": "$(debug-reverse-continue)"
+      }
+    ],
+    "menus": {
+      "debug/toolBar": [
+        {
+          "command": "gba-kit.showScreen",
+          "when": "debugType == gba-kit",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gba-kit.stepFrame",
+          "when": "debugType == gba-kit",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gba-kit.rewind",
+          "when": "debugType == gba-kit",
+          "group": "navigation@3"
+        },
+        {
+          "command": "gba-kit.toggleRecording",
+          "when": "debugType == gba-kit",
+          "group": "navigation@4"
+        }
+      ],
+      "editor/title/run": [
+        {
+          "command": "gba-kit.runScript",
+          "when": "debugType == gba-kit && resourceExtname == .js",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "gba-kit.showScreen",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.runScript",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.toggleRecording",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.stepFrame",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.rewind",
+          "when": "debugType == gba-kit"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check-types": "tsc --noEmit",
+    "test": "node test/headless.mjs",
+    "package": "vsce package --no-dependencies --allow-missing-repository --skip-license -o gba-kit-vscode-poc.vsix"
+  },
+  "dependencies": {
+    "@gba-kit/arm-emulator": "link:../../packages/arm-emulator",
+    "@gba-kit/debug-info": "link:../../packages/debug-info",
+    "@gba-kit/gba-emulator": "link:../../packages/gba-emulator",
+    "@gba-kit/gba-node": "link:../../packages/gba-node",
+    "@vscode/debugadapter": "^1.68.0",
+    "@vscode/debugprotocol": "^1.68.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  }
+}

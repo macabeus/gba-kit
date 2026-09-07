@@ -8,10 +8,10 @@
  * enough to read any field straight out of memory.
  *
  * Handles the DIE forest in `.debug_info` (resolved against `.debug_abbrev` and
- * `.debug_str`) for DWARF 2–5, in either byte order — a big-endian payload is read
- * MSB-first, and bitfields there are allocated from the opposite end of the storage
- * unit (see {@link bitfieldAbsBitOffset}). 64-bit DWARF is not supported (the ELFs
- * are 32-bit).
+ * `.debug_str`) for DWARF 2–5. Constants, strings, references and addresses all follow
+ * the payload's byte order. Bitfields on a big-endian target are allocated from the
+ * opposite end of the storage unit (see {@link bitfieldAbsBitOffset}).
+ * 64-bit DWARF is not supported (the ELFs are 32-bit).
  */
 import { ElfFile } from './elf.js';
 import { Cursor, cstrAt } from './reader.js';
@@ -298,14 +298,30 @@ export type MemberLocation = Omit<
   'name' | 'signed' | 'pointer' | 'volatile' | 'const' | 'elemSize' | 'elemSigned' | 'length'
 >;
 
-/** A parsed DIE: its tag plus the attributes we kept, and its child DIEs. */
-interface Die {
+/**
+ * A parsed DIE: its tag plus the attributes we kept, and its child DIEs. Exported
+ * for the scope/location readers that need the raw tree — lexical blocks, inlined
+ * subroutines, variable locations — which the type index flattens.
+ */
+export interface DwarfEntry {
   tag: number;
   /** Absolute offset of this DIE within `.debug_info` (its reference target). */
   offset: number;
   attrs: Map<number, AttrValue>;
-  children: Die[];
+  children: DwarfEntry[];
+  /**
+   * The form each attribute was encoded with, keyed like `attrs`. A consumer needs
+   * it where the value's meaning depends on the form: `DW_AT_high_pc` is an address
+   * or an offset from `low_pc`; `DW_AT_location` is an expression block or a
+   * location-list offset/index.
+   */
+  forms: Map<number, number>;
+  /** The DWARF version of the compilation unit this DIE belongs to. */
+  version: number;
+  /** Offset of the compilation unit header, so unit-relative bases can be found. */
+  unitOffset: number;
 }
+type Die = DwarfEntry;
 
 /**
  * An attribute value, normalized across forms:
@@ -314,7 +330,7 @@ interface Die {
  *  - `Uint8Array` for block / exprloc (e.g. a member-location expression),
  *  - `boolean` for flags.
  */
-type AttrValue = number | string | Uint8Array | boolean;
+export type AttrValue = number | string | Uint8Array | boolean;
 
 /** The DWARF string sections an attribute form may resolve a name against. */
 interface DebugStrings {
@@ -513,12 +529,6 @@ export class TypeIndex {
   }
 
   /**
-   * Classify a global/static variable's declaration shape (scalar | pointer | array | struct),
-   * resolved through typedefs/cv-qualifiers. `null` when the variable has no DWARF DIE — which
-   * also makes this the "is this name declared in the project headers?" probe. An unsized
-   * extern array (`extern u16 tbl[]`) classifies as `array` with `length: null`.
-   */
-  /**
    * The DECLARED signature of a compiled function: what it returns and the type of each
    * parameter, as the compiler recorded them.
    *
@@ -573,6 +583,12 @@ export class TypeIndex {
     };
   }
 
+  /**
+   * Classify a global/static variable's declaration shape (scalar | pointer | array | struct),
+   * resolved through typedefs/cv-qualifiers. `null` when the variable has no DWARF DIE — which
+   * also makes this the "is this name declared in the project headers?" probe. An unsized
+   * extern array (`extern u16 tbl[]`) classifies as `array` with `length: null`.
+   */
   variableShape(varName: string): VariableShape | null {
     const variable = this.#variableByName.get(varName);
     if (!variable) {
@@ -918,14 +934,24 @@ export class TypeIndex {
     }
   }
 
-  /** A member's declaration facts: base-type signedness, pointer-ness, its cv-qualifiers, and —
-   *  for an array member — its element stride/signedness/count, all resolved through
-   *  typedef/cv-qualifier chains (see the {@link StructMember} field docs). */
+  /** A member's declaration facts: base-type signedness, pointer-ness (with the pointee's facts),
+   *  its cv-qualifiers, and — for an array member — its element stride/signedness/count and its
+   *  per-dimension rank, all resolved through typedef/cv-qualifier chains (see the
+   *  {@link StructMember} field docs). */
   #memberFacts(
     member: Die,
   ): Pick<
     StructMember,
-    'signed' | 'pointer' | 'pointeeSize' | 'pointeeSigned' | 'volatile' | 'const' | 'elemSize' | 'elemSigned' | 'length'
+    | 'signed'
+    | 'pointer'
+    | 'pointeeSize'
+    | 'pointeeSigned'
+    | 'volatile'
+    | 'const'
+    | 'elemSize'
+    | 'elemSigned'
+    | 'length'
+    | 'dims'
   > {
     const cv = { volatile: false, const: false };
     const die = this.#stripTypedefs(member.attrs.get(DW_AT_type), cv);
@@ -1367,6 +1393,7 @@ function parseDie(
   }
 
   const attrs = new Map<number, AttrValue>();
+  const forms = new Map<number, number>();
   for (const spec of abbrev.specs) {
     const value = readForm(c, spec.form, ctx, spec.implicitConst, strings);
     // Capture the str_offsets base from the CU DIE before any DW_FORM_strx is read.
@@ -1374,9 +1401,18 @@ function parseDie(
       ctx.strOffsetsBase = value;
     }
     attrs.set(spec.attr, value);
+    forms.set(spec.attr, spec.form);
   }
 
-  const die: Die = { tag: abbrev.tag, offset, attrs, children: [] };
+  const die: Die = {
+    tag: abbrev.tag,
+    offset,
+    attrs,
+    forms,
+    version: ctx.version,
+    unitOffset: ctx.cuStart,
+    children: [],
+  };
 
   if (abbrev.hasChildren) {
     for (;;) {
@@ -1389,7 +1425,7 @@ function parseDie(
       } catch {
         // An unsupported form or OOB read leaves the cursor desynced, so we can't
         // safely parse on. Mark the CU aborted (every enclosing loop bails too) but
-        // keep the DIEs already parsed — one bad DIE no longer drops the whole unit.
+        // keep the DIEs already parsed, so a bad DIE costs the rest of the unit, not all of it.
         ctx.aborted = true;
         break;
       }
@@ -1417,9 +1453,8 @@ function readForm(
     case DW_FORM_data1:
       return c.u8();
     case DW_FORM_flag:
-      // DWARF 2/3's boolean form (a byte). Returning the raw number made every `=== true`
-      // test in this file inert on those dialects — only DWARF 4+'s flag_present produced
-      // a boolean. A flag is a fact, not a number.
+      // DWARF 2/3's boolean form (a byte), decoded to a boolean so this file's `=== true`
+      // tests hold on those dialects as they do for DWARF 4+'s flag_present.
       return c.u8() !== 0;
     case DW_FORM_data2:
       return c.u16();
@@ -1496,23 +1531,25 @@ function readForm(
     case DW_FORM_indirect:
       return readForm(c, c.uleb(), ctx, implicitConst, strings);
     default:
-      // Unknown form: we can't size it. Surface as empty so the caller bails the unit.
+      // Unknown form: we can't size it, so parsing on would read from a desynced cursor —
+      // throwing hands the unit to parseDie's catch, which keeps the DIEs already read.
       throw new Error(`Unsupported DWARF form 0x${form.toString(16)}`);
   }
 }
 
 /**
- * Read `n` little-endian bytes, returning the low 32 bits. Bytes at index ≥ 4 are
- * consumed (to advance the cursor) but don't contribute — JS bitwise ops are 32-bit,
- * so OR-ing them in would wrap the shift mod 32 and corrupt the low word. Meaningful
- * values therefore require n ≤ 4; for n = 8 (data8/ref8) the high word is dropped.
+ * Read `n` bytes in the payload's byte order, returning the low 32 bits. Bytes outside
+ * the low word are consumed (to advance the cursor) but don't contribute — JS bitwise ops
+ * are 32-bit, so OR-ing them in would wrap the shift mod 32 and corrupt the low word.
+ * Meaningful values therefore require n ≤ 4; for n = 8 (data8/ref8) the high word is dropped.
  */
 function readBytes(c: Cursor, n: number): number {
   let value = 0;
   for (let i = 0; i < n; i++) {
     const byte = c.u8();
-    if (i < 4) {
-      value |= byte << (8 * i);
+    const place = c.littleEndian ? i : n - 1 - i;
+    if (place < 4) {
+      value |= byte << (8 * place);
     }
   }
   return value >>> 0;
@@ -1532,4 +1569,25 @@ function resolveStrx(index: number, ctx: UnitContext, strings: DebugStrings): st
   }
   const c = new Cursor(strings.strOffsets, 0, strings.littleEndian);
   return cstrAt(strings.str, c.u32At(at));
+}
+
+/**
+ * The DIE trees of every compilation unit, one root per unit, with attribute forms
+ * and unit versions kept. This is the raw material for scope-level questions the
+ * type index does not answer — which function and inlined calls contain a PC, which
+ * variables are visible there and where they live. The same best-effort parser as
+ * {@link TypeIndex}: a malformed unit is skipped, a malformed DIE ends its unit.
+ */
+export function readDwarfEntries(elf: ElfFile): DwarfEntry[] {
+  const info = elf.sectionData('.debug_info');
+  const abbrev = elf.sectionData('.debug_abbrev');
+  if (!info || !abbrev) {
+    return [];
+  }
+  return parseDebugInfo(info, abbrev, {
+    littleEndian: elf.littleEndian,
+    str: elf.sectionData('.debug_str') ?? new Uint8Array(0),
+    lineStr: elf.sectionData('.debug_line_str') ?? new Uint8Array(0),
+    strOffsets: elf.sectionData('.debug_str_offsets') ?? new Uint8Array(0),
+  });
 }

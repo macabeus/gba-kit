@@ -1,127 +1,162 @@
-import type { EmulatorBridge, EmulatorState } from '@gba-kit/gba-browser';
+/**
+ * The Debug page: a `@gba-kit/debug-core` session over the Play page's machine,
+ * the views VS Code would render natively (disassembly, source, registers,
+ * breakpoints, memory) built here, and the emulator views (screen, PPU, I/O,
+ * trace, events, search, labels, recording) from `@gba-kit/debug-ui`.
+ */
+import type { Session } from '@gba-kit/debug-core';
+import { DebugPanels, ScreenPanel, createSessionTransport } from '@gba-kit/debug-ui';
 import clsx from 'clsx';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { BreakpointPanel } from './BreakpointPanel';
 import { DisassemblyView } from './DisassemblyView';
-import { IoRegisterView } from './IoRegisterView';
 import { MemoryViewer } from './MemoryViewer';
 import { RegisterView } from './RegisterView';
-import { ScreenView } from './ScreenView';
 import { SourceView } from './SourceView';
+import { instructionAddresses, toggleInstructionBreakpoint } from './instruction-breakpoints';
+import { programStatus } from './program-status';
 
 interface DebugViewProps {
-  emulator: EmulatorBridge;
-  emuState: EmulatorState;
-  onRun: () => void;
-  onPause: () => void;
-  onStep: () => void;
-  onStepOver: () => void;
+  session: Session | null;
+  /** bumps on every stop, resume and label edit */
+  revision: number;
+  error: string | null;
+  onElfLoad: (elf: Uint8Array) => void;
 }
 
 type CenterPanel = 'disassembly' | 'source';
-type BottomRightPanel = 'breakpoints' | 'io-registers';
 
-export function DebugView({ emulator, emuState, onRun, onPause, onStep, onStepOver }: DebugViewProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+/** Open text in a new tab: the webapp's stand-in for an editor. */
+function openText(content: string, language: string): void {
+  const url = URL.createObjectURL(
+    new Blob([content], { type: language === 'json' ? 'application/json' : 'text/plain' }),
+  );
+  window.open(url, '_blank');
+}
+
+export function DebugView({ session, revision, error, onElfLoad }: DebugViewProps) {
   const [centerPanel, setCenterPanel] = useState<CenterPanel>('disassembly');
-  const [bottomRightPanel, setBottomRightPanel] = useState<BottomRightPanel>('breakpoints');
-  const [breakpointVersion, setBreakpointVersion] = useState(0);
-  const bumpBreakpoints = useCallback(() => setBreakpointVersion((v) => v + 1), []);
+  const transport = useMemo(() => (session ? createSessionTransport(session, { openText }) : null), [session]);
 
-  useEffect(() => {
-    if (canvasRef.current) {
-      emulator.attachCanvas(canvasRef.current);
-    }
-    return () => {
-      emulator.detachCanvas();
-    };
-  }, [emulator]);
+  // Instruction breakpoints live in the session, which outlives this view: the list
+  // is read from it, never kept here, so a remount shows what was set before.
+  // `breakpointEdits` counts the toggles made here and is the list's cache key.
+  const [breakpointEdits, setBreakpointEdits] = useState(0);
+  const breakpoints = useMemo(() => (session ? instructionAddresses(session) : []), [session, breakpointEdits]);
+  const toggleBreakpoint = useCallback(
+    (address: number) => {
+      if (session) {
+        toggleInstructionBreakpoint(session, address);
+        setBreakpointEdits((n) => n + 1);
+      }
+    },
+    [session],
+  );
 
-  // Game input forwarding — allows playing the game while in debug mode
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => emulator.handleKeyDown(e);
-    const handleKeyUp = (e: KeyboardEvent) => emulator.handleKeyUp(e);
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-    };
-  }, [emulator]);
+  const stopped = session?.state === 'stopped';
+  const running = session?.state === 'running';
 
   // Debugger keyboard shortcuts (Ctrl+key to avoid browser conflicts)
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Only handle Ctrl+<key> combos for debugger actions
+    if (!session) {
+      return;
+    }
+    const handleKeyDown = (e: KeyboardEvent): void => {
       if (!e.ctrlKey && !e.metaKey) {
         return;
       }
       switch (e.key) {
         case 'r':
           e.preventDefault();
-          emuState === 'running' ? onPause() : onRun();
+          session.state === 'running' ? session.pause() : session.state === 'stopped' && session.continue();
           break;
         case "'":
           e.preventDefault();
-          if (emuState !== 'running') {
-            onStep();
+          if (session.state === 'stopped') {
+            session.stepInstruction();
           }
           break;
         case ';':
           e.preventDefault();
-          if (emuState !== 'running') {
-            onStepOver();
+          if (session.state === 'stopped') {
+            session.stepOver();
           }
           break;
-        case 'b': {
+        case 'b':
           e.preventDefault();
-          const pc = emulator.cpu.registers[15]!;
-          const bps = emulator.getBreakpoints();
-          if (bps.some((bp) => bp.address === pc)) {
-            emulator.removeBreakpoint(pc);
-          } else {
-            emulator.addBreakpoint(pc);
-          }
-          bumpBreakpoints();
+          toggleBreakpoint(session.pc & ~1);
           break;
-        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [emulator, emuState, onRun, onPause, onStep, onStepOver, bumpBreakpoints]);
+  }, [session, toggleBreakpoint]);
 
-  const pc = emulator.cpu.registers[15]!;
+  if (error) {
+    return <div className="text-red-400 text-sm px-2 py-4">Could not start the debugger: {error}</div>;
+  }
+  if (!session || !transport) {
+    return <div className="text-slate-500 text-sm px-2 py-4">Starting the debugger…</div>;
+  }
+
+  const pc = session.pc;
+  const position = session.position;
+  const status = programStatus(session.program);
 
   return (
-    <div className="flex flex-col gap-3 h-[calc(100vh-140px)]">
+    <div className="flex flex-col gap-3 h-[calc(100vh-140px)] gk-root">
       {/* Toolbar */}
-      <div className="flex items-center gap-2 px-2">
-        {emuState === 'running' ? (
-          <ToolbarButton onClick={onPause} label="Pause" shortcut="Ctrl+R" color="amber" />
+      <div className="flex items-center gap-2 px-2 flex-wrap">
+        {running ? (
+          <ToolbarButton onClick={() => session.pause()} label="Pause" shortcut="Ctrl+R" color="amber" />
         ) : (
-          <ToolbarButton onClick={onRun} label="Run" shortcut="Ctrl+R" color="green" />
+          <ToolbarButton
+            onClick={() => session.continue()}
+            label="Run"
+            shortcut="Ctrl+R"
+            color="green"
+            disabled={!stopped}
+          />
         )}
-        <ToolbarButton onClick={onStep} label="Step" shortcut="Ctrl+'" color="blue" disabled={emuState === 'running'} />
         <ToolbarButton
-          onClick={onStepOver}
+          onClick={() => session.stepInstruction()}
+          label="Step"
+          shortcut="Ctrl+'"
+          color="blue"
+          disabled={!stopped}
+        />
+        <ToolbarButton
+          onClick={() => session.stepOver()}
           label="Step Over"
           shortcut="Ctrl+;"
           color="blue"
-          disabled={emuState === 'running'}
+          disabled={!stopped}
         />
-        <div className="ml-4 text-slate-500 text-xs mono">PC: 0x{pc.toString(16).padStart(8, '0')}</div>
+        <ToolbarButton onClick={() => session.stepInto()} label="Step Into" color="blue" disabled={!stopped} />
+        <ToolbarButton onClick={() => session.stepOut()} label="Step Out" color="blue" disabled={!stopped} />
+        <ToolbarButton onClick={() => session.stepBack()} label="Step Back" color="blue" disabled={!stopped} />
+        <ToolbarButton onClick={() => session.stepFrame()} label="Frame" color="blue" disabled={!stopped} />
+        <ToolbarButton onClick={() => session.rewindFrames(60)} label="Rewind 1s" color="blue" disabled={!stopped} />
+        <div className="ml-4 text-slate-500 text-xs mono">
+          PC: 0x{pc.toString(16).padStart(8, '0')} · frame {position.frame} · line {position.scanline}
+          {status && (
+            <span className={clsx(status.detail && 'text-amber-400')} title={status.detail}>
+              {' · '}
+              {status.text}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Main panels */}
-      <div className="flex-1 grid grid-cols-[240px_1fr_280px] grid-rows-[1fr_1fr] gap-3 min-h-0">
+      <div className="flex-1 grid grid-cols-[260px_1fr_360px] grid-rows-[auto_1fr] gap-3 min-h-0">
         {/* Top-left: Screen */}
-        <div className="row-span-1">
-          <ScreenView canvasRef={canvasRef} />
+        <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-2">
+          <ScreenPanel transport={transport} scale={1} controls={false} />
         </div>
 
-        {/* Top-center: Disassembly / Source */}
+        {/* Center: Disassembly / Source */}
         <div className="row-span-2 min-h-0 flex flex-col">
           <div className="flex gap-1 mb-1">
             <PanelTab
@@ -134,59 +169,50 @@ export function DebugView({ emulator, emuState, onRun, onPause, onStep, onStepOv
           <div className="flex-1 min-h-0">
             {centerPanel === 'disassembly' ? (
               <DisassemblyView
-                emulator={emulator}
-                pc={pc}
-                breakpointVersion={breakpointVersion}
-                onBreakpointChange={bumpBreakpoints}
+                session={session}
+                revision={revision}
+                breakpoints={breakpoints}
+                onToggleBreakpoint={toggleBreakpoint}
               />
             ) : (
-              <SourceView emulator={emulator} pc={pc} />
+              <SourceView session={session} revision={revision} onElfLoad={onElfLoad} />
             )}
           </div>
         </div>
 
-        {/* Top-right: Registers */}
-        <div className="row-span-1 min-h-0">
-          <RegisterView emulator={emulator} />
+        {/* Top-right: Breakpoints */}
+        <div className="min-h-0 max-h-40">
+          <BreakpointPanel breakpoints={breakpoints} onToggle={toggleBreakpoint} />
         </div>
 
-        {/* Bottom-left: I/O Registers */}
-        <div className="row-span-1 min-h-0">
-          <IoRegisterView emulator={emulator} />
+        {/* Bottom-left: Registers */}
+        <div className="min-h-0">
+          <RegisterView session={session} revision={revision} />
         </div>
 
-        {/* Bottom-right: Breakpoints or I/O detail */}
-        <div className="row-span-1 min-h-0 flex flex-col">
-          {/* Panel tabs */}
-          <div className="flex gap-1 mb-1">
-            <PanelTab
-              label="Breakpoints"
-              active={bottomRightPanel === 'breakpoints'}
-              onClick={() => setBottomRightPanel('breakpoints')}
-            />
-            <PanelTab
-              label="I/O Detail"
-              active={bottomRightPanel === 'io-registers'}
-              onClick={() => setBottomRightPanel('io-registers')}
-            />
-          </div>
-          <div className="flex-1 min-h-0">
-            {bottomRightPanel === 'breakpoints' ? (
-              <BreakpointPanel
-                emulator={emulator}
-                breakpointVersion={breakpointVersion}
-                onBreakpointChange={bumpBreakpoints}
-              />
-            ) : (
-              <IoRegisterView emulator={emulator} />
-            )}
-          </div>
+        {/* Bottom-right: the emulator views */}
+        <div className="min-h-0 bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
+          <DebugPanels
+            transport={transport}
+            panels={[
+              'io',
+              'palette',
+              'tiles',
+              'tilemap',
+              'sprites',
+              'trace',
+              'events',
+              'search',
+              'labels',
+              'recording',
+            ]}
+          />
         </div>
       </div>
 
       {/* Bottom: Memory viewer */}
       <div className="h-48 min-h-0">
-        <MemoryViewer emulator={emulator} />
+        <MemoryViewer session={session} revision={revision} />
       </div>
     </div>
   );
@@ -201,7 +227,7 @@ function ToolbarButton({
 }: {
   onClick: () => void;
   label: string;
-  shortcut: string;
+  shortcut?: string;
   color: 'green' | 'amber' | 'blue';
   disabled?: boolean;
 }) {
@@ -222,7 +248,8 @@ function ToolbarButton({
         disabled && 'opacity-40 cursor-not-allowed',
       )}
     >
-      {label} <span className="text-slate-500 ml-1">{shortcut}</span>
+      {label}
+      {shortcut && <span className="text-slate-500 ml-1">{shortcut}</span>}
     </button>
   );
 }

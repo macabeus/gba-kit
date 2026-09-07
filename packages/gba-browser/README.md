@@ -45,6 +45,9 @@ emulator.addBreakpoint(0x08001234);
 const { snapshot, thumbnail } = await emulator.saveState();
 emulator.loadState(snapshot);
 
+// Repaint the canvas after something else drove emulator.gba
+emulator.refreshFrame();
+
 // Disassembly
 const instructions = emulator.disassembleAt(0x08000000, 20);
 

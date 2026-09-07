@@ -1,0 +1,22 @@
+{
+  "folders": [
+    { "name": "balatro-gba", "path": "/Users/macabeus/ApenasMeu/balatro-gba" },
+    { "name": "gba-kit-scripts", "path": "./scripts" },
+  ],
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "type": "gba-kit",
+        "request": "launch",
+        "name": "Balatro GBA (homebrew, DWARF)",
+        "rom": "${workspaceFolder:balatro-gba}/build/balatro-gba.gba",
+        "elf": "${workspaceFolder:balatro-gba}/build/balatro-gba.elf",
+        "cwd": "${workspaceFolder:balatro-gba}",
+        "sourceMap": { "/balatro-gba": "${workspaceFolder:balatro-gba}" },
+        "stopOnEntry": false,
+        "outputDir": "/tmp/gba-kit-poc-out",
+      },
+    ],
+  },
+}

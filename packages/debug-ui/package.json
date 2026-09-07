@@ -1,0 +1,64 @@
+{
+  "name": "@gba-kit/debug-ui",
+  "version": "0.6.0",
+  "description": "React panels for a GBA debugger — screen with gamepad and audio, palette, tiles, tilemaps, sprites, I/O registers, trace, events, memory search, labels, save states, input recordings — over a transport an editor or a web page provides",
+  "author": "macabeus",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./transport": {
+      "types": "./dist/transport.d.ts",
+      "import": "./dist/transport.js"
+    },
+    "./styles.css": "./src/styles.css"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/macabeus/gba-kit",
+    "directory": "packages/debug-ui"
+  },
+  "homepage": "https://github.com/macabeus/gba-kit",
+  "bugs": "https://github.com/macabeus/gba-kit/issues",
+  "keywords": [
+    "gba",
+    "gameboy-advance",
+    "debugger",
+    "react",
+    "emulator",
+    "typescript"
+  ],
+  "files": [
+    "dist",
+    "src/styles.css"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src/",
+    "check-deps": "depcruise src --config .dependency-cruiser.cjs"
+  },
+  "dependencies": {
+    "@gba-kit/debug-core": "workspace:*",
+    "@vscode/codicons": "0.0.46-24"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "dependency-cruiser": "^17.3.9",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.1"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0"
+  }
+}

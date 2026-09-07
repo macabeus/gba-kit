@@ -6,9 +6,12 @@
 
 // Main system
 export { Gba } from './gba.js';
+export type { HardwareEvent, RunOutcome, StopPredicate } from './gba.js';
+export type { DmaTransferInfo } from './dma.js';
+export type { BiosEnv } from './bios.js';
 
 // Subsystems
-export { GbaSystemBus } from './system-bus.js';
+export { GbaSystemBus, type WatchpointRead, type WatchpointWrite } from './system-bus.js';
 export { Scheduler } from './scheduler.js';
 export { InterruptController } from './interrupts.js';
 export { TimerController } from './timers.js';

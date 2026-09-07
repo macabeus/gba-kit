@@ -1,24 +1,20 @@
-import type { EmulatorBridge } from '@gba-kit/gba-browser';
+import type { Session } from '@gba-kit/debug-core';
 import { useMemo } from 'react';
 
 import { Panel } from '../../components/Panel';
 
 interface RegisterViewProps {
-  emulator: EmulatorBridge;
+  session: Session;
+  revision: number;
 }
 
-const REG_NAMES = ['R0', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'R11', 'R12', 'SP', 'LR', 'PC'];
-
-export function RegisterView({ emulator }: RegisterViewProps) {
-  const cpu = emulator.cpu;
-  const regs = cpu.registers;
-  const n = cpu.getN();
-  const z = cpu.getZ();
-  const c = cpu.getC();
-  const v = cpu.getV();
-  const isThumb = cpu.getT();
-
-  const flagStr = useMemo(() => [n ? 'N' : 'n', z ? 'Z' : 'z', c ? 'C' : 'c', v ? 'V' : 'v'].join(''), [n, z, c, v]);
+/** The registers as the session's inspector names them: `lr`/`pc` symbolized, `cpsr` decoded. */
+export function RegisterView({ session, revision }: RegisterViewProps) {
+  // `revision` is the cache key: the machine moved, or a label changed
+  const nodes = useMemo(
+    () => (session.state === 'stopped' ? (session.scopes(0).find((s) => s.kind === 'registers')?.nodes ?? []) : []),
+    [session, revision],
+  );
 
   return (
     <Panel
@@ -26,23 +22,16 @@ export function RegisterView({ emulator }: RegisterViewProps) {
       className="h-full"
       contentClassName="font-mono text-[13px] leading-[1.4] text-xs space-y-0.5 px-2 py-1"
     >
-      {REG_NAMES.map((name, i) => (
-        <div key={name} className="flex justify-between px-1 py-0.5 rounded hover:bg-slate-700/50">
-          <span className="text-slate-400 w-8">{name}</span>
-          <span className="text-slate-200">0x{(regs[i]! >>> 0).toString(16).padStart(8, '0')}</span>
-        </div>
-      ))}
-
-      <div className="border-t border-slate-700 mt-2 pt-2">
-        <div className="flex justify-between px-1 py-0.5">
-          <span className="text-slate-400">CPSR</span>
-          <span className="text-slate-200">{flagStr}</span>
-        </div>
-        <div className="flex justify-between px-1 py-0.5">
-          <span className="text-slate-400">Mode</span>
-          <span className="text-slate-200">{isThumb ? 'Thumb' : 'ARM'}</span>
-        </div>
-      </div>
+      {nodes.length === 0 ? (
+        <div className="text-slate-600 px-1 py-2">{session.state === 'running' ? 'running…' : 'no registers'}</div>
+      ) : (
+        nodes.map((node) => (
+          <div key={node.name} className="flex justify-between gap-2 px-1 py-0.5 rounded hover:bg-slate-700/50">
+            <span className="text-slate-400 w-10 shrink-0">{node.name}</span>
+            <span className="text-slate-200 truncate">{node.value}</span>
+          </div>
+        ))
+      )}
     </Panel>
   );
 }

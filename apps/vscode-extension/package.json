@@ -1,0 +1,337 @@
+{
+  "name": "gba-kit-vscode",
+  "displayName": "GBA Debugger",
+  "description": "Debug Game Boy Advance programs in VS Code: breakpoints in C, DWARF variables, data breakpoints, exact rewind, the screen with a gamepad, and the PPU and I/O views",
+  "version": "0.6.0",
+  "private": true,
+  "publisher": "macabeus",
+  "license": "MIT",
+  "icon": "media/logo.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/macabeus/gba-kit",
+    "directory": "apps/vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "keywords": [
+    "gba",
+    "gameboy-advance",
+    "debugger",
+    "emulator",
+    "dwarf"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onDebug"
+  ],
+  "contributes": {
+    "debuggers": [
+      {
+        "type": "gba-kit",
+        "label": "gba-kit (Game Boy Advance)",
+        "languages": [
+          "c",
+          "cpp",
+          "arm",
+          "asm"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "rom"
+            ],
+            "properties": {
+              "rom": {
+                "type": "string",
+                "description": "The .gba ROM to debug",
+                "default": "${workspaceFolder}/build/game.gba"
+              },
+              "elf": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The ELF the ROM was made from, built with -g (symbols and DWARF). Default: the ROM's sibling .elf; null for none",
+                "default": "${workspaceFolder}/build/game.elf"
+              },
+              "cwd": {
+                "type": "string",
+                "description": "The project root relative DWARF source paths resolve against",
+                "default": "${workspaceFolder}"
+              },
+              "projectDir": {
+                "type": "string",
+                "description": "Where .gba-kit/ lives: labels, save states and recordings (default: cwd)"
+              },
+              "sourceMap": {
+                "type": "object",
+                "description": "DWARF path prefix → local prefix, for sources compiled elsewhere, e.g. {\"/build-container/src\": \"${workspaceFolder}/src\"}",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Stop at the entry point before running",
+                "default": true
+              },
+              "allowElfMismatch": {
+                "type": "boolean",
+                "description": "Debug even when the ELF's loadable bytes differ from the ROM",
+                "default": false
+              },
+              "rewind": {
+                "type": "object",
+                "description": "History for rewind: a keyframe every keyframeInterval frames, a full snapshot every fullEvery keyframes, within maxBytes",
+                "properties": {
+                  "keyframeInterval": {
+                    "type": "number",
+                    "default": 10
+                  },
+                  "fullEvery": {
+                    "type": "number",
+                    "default": 12
+                  },
+                  "maxBytes": {
+                    "type": "number",
+                    "default": 100663296
+                  }
+                }
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "gba-kit",
+            "request": "launch",
+            "name": "Debug GBA ROM",
+            "rom": "${workspaceFolder}/build/game.gba",
+            "elf": "${workspaceFolder}/build/game.elf",
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": true
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "gba-kit: Debug ROM",
+            "description": "Run a GBA ROM under the gba-kit debugger",
+            "body": {
+              "type": "gba-kit",
+              "request": "launch",
+              "name": "Debug GBA ROM",
+              "rom": "^\"\\${workspaceFolder}/build/game.gba\"",
+              "elf": "^\"\\${workspaceFolder}/build/game.elf\"",
+              "cwd": "^\"\\${workspaceFolder}\"",
+              "stopOnEntry": true
+            }
+          }
+        ]
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "c"
+      },
+      {
+        "language": "cpp"
+      },
+      {
+        "language": "arm"
+      },
+      {
+        "language": "asm"
+      }
+    ],
+    "commands": [
+      {
+        "command": "gba-kit.showScreen",
+        "title": "GBA: Show Screen",
+        "icon": "$(device-mobile)"
+      },
+      {
+        "command": "gba-kit.showTools",
+        "title": "GBA: Show Tools (PPU, I/O, trace, events, labels…)",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "gba-kit.stepFrame",
+        "title": "GBA: Step One Frame",
+        "icon": "$(debug-step-over)"
+      },
+      {
+        "command": "gba-kit.stepScanline",
+        "title": "GBA: Step One Scanline"
+      },
+      {
+        "command": "gba-kit.rewind",
+        "title": "GBA: Rewind One Second",
+        "icon": "$(debug-reverse-continue)"
+      },
+      {
+        "command": "gba-kit.toggleRecording",
+        "title": "GBA: Start/Stop Recording Inputs",
+        "icon": "$(record)"
+      },
+      {
+        "command": "gba-kit.saveState",
+        "title": "GBA: Save State"
+      },
+      {
+        "command": "gba-kit.loadState",
+        "title": "GBA: Load State"
+      },
+      {
+        "command": "gba-kit.importLabels",
+        "title": "GBA: Import Labels From a Symbol File"
+      },
+      {
+        "command": "gba-kit.exportLabels",
+        "title": "GBA: Export Labels As a Symbol File"
+      }
+    ],
+    "menus": {
+      "debug/toolBar": [
+        {
+          "command": "gba-kit.showScreen",
+          "when": "debugType == gba-kit",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gba-kit.showTools",
+          "when": "debugType == gba-kit",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gba-kit.stepFrame",
+          "when": "debugType == gba-kit",
+          "group": "navigation@3"
+        },
+        {
+          "command": "gba-kit.rewind",
+          "when": "debugType == gba-kit",
+          "group": "navigation@4"
+        },
+        {
+          "command": "gba-kit.toggleRecording",
+          "when": "debugType == gba-kit",
+          "group": "navigation@5"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "gba-kit.showScreen",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.showTools",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.stepFrame",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.stepScanline",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.rewind",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.toggleRecording",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.saveState",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.loadState",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.importLabels",
+          "when": "debugType == gba-kit"
+        },
+        {
+          "command": "gba-kit.exportLabels",
+          "when": "debugType == gba-kit"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "gba-kit.stepFrame",
+        "key": "ctrl+alt+f",
+        "mac": "cmd+alt+f",
+        "when": "debugType == gba-kit && debugState == stopped"
+      },
+      {
+        "command": "gba-kit.rewind",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r",
+        "when": "debugType == gba-kit && debugState == stopped"
+      }
+    ],
+    "configuration": {
+      "title": "gba-kit",
+      "properties": {
+        "gba-kit.adapter": {
+          "type": "string",
+          "enum": [
+            "process",
+            "inline"
+          ],
+          "default": "process",
+          "description": "Run the debug adapter as a separate Node process (needs `node` on the PATH) or inside the extension host"
+        },
+        "gba-kit.runOnScreen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the machine when a session reaches its entry stop with the Screen panel up, instead of leaving it stopped"
+        },
+        "gba-kit.screenScale": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 6,
+          "description": "How many times the 240×160 screen is scaled in the Screen panel"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src/",
+    "test": "vitest run",
+    "test:vscode": "node esbuild.mjs && node dist/test/run.js",
+    "package": "node esbuild.mjs && vsce package --no-dependencies --baseImagesUrl https://github.com/macabeus/gba-kit/raw/HEAD/apps/vscode-extension"
+  },
+  "dependencies": {
+    "@gba-kit/debug-adapter": "workspace:*",
+    "@gba-kit/debug-ui": "workspace:*",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/vscode": "^1.90.0",
+    "@vscode/debugprotocol": "^1.68.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.27.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.1"
+  }
+}

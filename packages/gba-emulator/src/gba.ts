@@ -4,12 +4,18 @@
  * Wires up all subsystems and runs the main emulation loop.
  * The CPU runs until the next scheduled event, then the event fires
  * and may schedule further events.
+ *
+ * Execution is owned here, not by the CPU: timers, DMA, the PPU's scanline
+ * chain, IRQ delivery and HALT all advance together. A debugger stops the
+ * machine through `StopPredicate` — checked before each instruction and while
+ * the CPU is halted — so a stop never charges a cycle for an instruction that
+ * did not run, and the next `runFrame` finishes the same hardware frame.
  */
 import { ArmCpu } from '@gba-kit/arm-emulator/arm-cpu';
 
 import { Apu } from './apu/apu.js';
-import { handleSwi, setIntrWaitCallback } from './bios.js';
-import { DmaController } from './dma.js';
+import { type BiosEnv, handleSwi } from './bios.js';
+import { DmaController, type DmaTransferInfo } from './dma.js';
 import { InputController } from './input.js';
 import { InterruptController } from './interrupts.js';
 import { Ppu } from './ppu/ppu.js';
@@ -18,7 +24,6 @@ import { Scheduler } from './scheduler.js';
 import { GbaSystemBus } from './system-bus.js';
 import { TimerController } from './timers.js';
 import {
-  CYCLES_PER_FRAME,
   CYCLES_PER_SCANLINE,
   DmaStartTiming,
   EventId,
@@ -43,6 +48,35 @@ export interface PpuInterface {
   reset(): void;
 }
 
+/**
+ * Asked before every instruction, and while the CPU is halted before advancing to
+ * the next event. Return true to stop: the instruction at `armCpu.registers[15]`
+ * has NOT executed and no cycle has been charged.
+ */
+export type StopPredicate = () => boolean;
+
+/**
+ * How a run ended:
+ * - `done`: the requested extent (a frame, a scanline) completed;
+ * - `stopped`: the predicate or a CPU debug hook stopped it first;
+ * - `halted`: the CPU stopped itself at the sentinel return address and cannot continue;
+ * - `stalled`: the CPU is halted and no event is scheduled to wake it.
+ */
+export type RunOutcome = 'done' | 'stopped' | 'halted' | 'stalled';
+
+/**
+ * A hardware event, delivered as it happens and carrying no timestamp: a sink that needs one
+ * reads the machine's cycle, frame and scanline when it fires.
+ */
+export type HardwareEvent =
+  | { kind: 'irq-request'; flag: number }
+  | { kind: 'irq-enter'; pc: number }
+  | { kind: 'dma'; channel: number; info: DmaTransferInfo }
+  | { kind: 'mmio-write'; address: number; value: number; size: 1 | 2 | 4 }
+  | { kind: 'vblank' }
+  | { kind: 'hblank'; scanline: number }
+  | { kind: 'halt' };
+
 export class Gba {
   readonly scheduler: Scheduler;
   readonly interrupts: InterruptController;
@@ -55,9 +89,14 @@ export class Gba {
   readonly armCpu: ArmCpu;
 
   #currentScanline = 0;
+  #frameCount = 0;
   #running = false;
+  /** Set when a `StopPredicate` or a CPU debug hook refused an instruction during the current run. */
+  #stopped = false;
   /** Tracks whether the CPU is currently inside the BIOS IRQ handler */
   #inIrqHandler = false;
+  readonly #biosEnv: BiosEnv;
+  #eventSink: ((event: HardwareEvent) => void) | null = null;
 
   constructor() {
     this.scheduler = new Scheduler();
@@ -102,16 +141,18 @@ export class Gba {
       clearDmaSource: () => this.bus.clearDmaSource(),
     });
 
+    // The HLE BIOS reaches this machine's interrupt controller and no other.
+    this.#biosEnv = {
+      onIntrWait: (flags) => {
+        this.interrupts.intrWaitFlags = flags;
+      },
+    };
+
     // Create CPU with GBA BIOS SWI handler
-    this.armCpu = new ArmCpu(this.bus, { swiHandler: handleSwi });
+    this.armCpu = new ArmCpu(this.bus, { swiHandler: (cpu, swiNumber) => handleSwi(cpu, swiNumber, this.#biosEnv) });
     // Initialize banked stack pointers (mimics real BIOS boot)
     this.armCpu.setBankedSP(0x12, 0x03007fa0); // IRQ mode SP
     this.armCpu.setBankedSP(0x13, 0x03007fe0); // SVC mode SP
-
-    // Wire HLE IntrWait to the interrupt controller
-    setIntrWaitCallback((flags) => {
-      this.interrupts.intrWaitFlags = flags;
-    });
 
     // Install HLE BIOS IRQ handler stub
     this.#installBiosStub();
@@ -135,17 +176,65 @@ export class Gba {
     this.input.release(button);
   }
 
-  /** Run one full frame (~280,896 cycles) */
-  runFrame(): void {
+  /**
+   * Observe hardware events (interrupt requests and entries, DMA transfers, I/O
+   * writes, VBlank/HBlank, halts). One sink, or null to stop observing; the
+   * subsystems' hooks stay unset when nobody listens so the hot paths pay nothing.
+   */
+  set onHardwareEvent(sink: ((event: HardwareEvent) => void) | null) {
+    this.#eventSink = sink;
+    this.interrupts.onRequest = sink ? (flag) => sink({ kind: 'irq-request', flag }) : null;
+    this.dma.onTransfer = sink ? (channel, info) => sink({ kind: 'dma', channel, info }) : null;
+    this.bus.onMmioWrite = sink ? (address, value, size) => sink({ kind: 'mmio-write', address, value, size }) : null;
+  }
+
+  get onHardwareEvent(): ((event: HardwareEvent) => void) | null {
+    return this.#eventSink;
+  }
+
+  /** Hardware frames completed since reset (a frame ends when the scanline wraps to 0). */
+  get frameCount(): number {
+    return this.#frameCount;
+  }
+
+  /** The scanline the PPU is on (0–227; 160–227 is VBlank). */
+  get scanline(): number {
+    return this.#currentScanline;
+  }
+
+  /**
+   * Run until the current hardware frame ends (the scanline wraps to 0), or until
+   * `shouldStop` says so. After a stop, the next call finishes the SAME frame: frames
+   * stay aligned to the hardware however often the debugger interrupts them.
+   */
+  runFrame(shouldStop?: StopPredicate): RunOutcome {
+    const target = this.#frameCount + 1;
+    return this.#run(() => this.#frameCount >= target, shouldStop);
+  }
+
+  /** Run until the PPU moves to the next scanline (or the frame ends), or until `shouldStop`. */
+  runScanline(shouldStop?: StopPredicate): RunOutcome {
+    const line = this.#currentScanline;
+    const frame = this.#frameCount;
+    return this.#run(() => this.#currentScanline !== line || this.#frameCount !== frame, shouldStop);
+  }
+
+  /** The emulation loop: advance the whole machine until `done`, `shouldStop`, or the CPU gives up. */
+  #run(done: () => boolean, shouldStop?: StopPredicate): RunOutcome {
     this.#running = true;
+    this.#stopped = false;
+    let outcome: RunOutcome = 'done';
 
-    const targetCycle = this.scheduler.currentCycle + CYCLES_PER_FRAME;
-
-    while (this.#running && this.scheduler.currentCycle < targetCycle) {
+    while (this.#running && !done()) {
       // If halted, fast-forward to next event (but keep APU running)
       if (this.interrupts.halted) {
+        if (shouldStop?.()) {
+          outcome = 'stopped';
+          break;
+        }
         const skip = this.scheduler.cyclesUntilNextEvent();
         if (skip === Infinity) {
+          outcome = 'stalled';
           break;
         }
         this.scheduler.tick(skip);
@@ -157,20 +246,30 @@ export class Gba {
       const cyclesToNext = this.scheduler.cyclesUntilNextEvent();
       if (cyclesToNext === Infinity) {
         // No events scheduled — run a batch of CPU cycles
-        this.#runCpuCycles(CYCLES_PER_SCANLINE);
+        this.#runCpuCycles(CYCLES_PER_SCANLINE, shouldStop);
       } else if (cyclesToNext <= 0) {
         // Events are due — process them
         this.scheduler.tick(0);
       } else {
-        this.#runCpuCycles(cyclesToNext);
+        this.#runCpuCycles(cyclesToNext, shouldStop);
+      }
+
+      if (this.#stopped) {
+        outcome = 'stopped';
+        break;
+      }
+      if (!this.#running) {
+        outcome = 'halted';
+        break;
       }
     }
 
     this.#running = false;
+    return outcome;
   }
 
   /** Run CPU for approximately the given number of cycles */
-  #runCpuCycles(cycles: number): void {
+  #runCpuCycles(cycles: number, shouldStop?: StopPredicate): void {
     const cpu = this.armCpu;
     let cyclesRun = 0;
 
@@ -183,6 +282,13 @@ export class Gba {
       // If halted (e.g. by SWI Halt/VBlankIntrWait), stop running CPU
       // The outer loop will fast-forward to the next event
       if (this.interrupts.halted) {
+        this.#eventSink?.({ kind: 'halt' });
+        break;
+      }
+
+      // The debugger's turn: the instruction at PC has not run and costs nothing.
+      if (shouldStop?.()) {
+        this.#stopped = true;
         break;
       }
 
@@ -193,6 +299,16 @@ export class Gba {
       }
 
       const ok = cpu.step();
+      if (!ok) {
+        // Either the CPU halted itself, or a debug hook refused the instruction. In
+        // both cases nothing executed, so nothing is charged.
+        if (cpu.halted) {
+          this.#running = false;
+        } else {
+          this.#stopped = true;
+        }
+        break;
+      }
       cyclesRun += 1;
 
       // Detect BIOS IRQ handler return: the SUBS PC, LR, #4 at address 0x94
@@ -214,11 +330,6 @@ export class Gba {
             break;
           }
         }
-      }
-
-      if (!ok) {
-        this.#running = false;
-        break;
       }
     }
 
@@ -244,6 +355,7 @@ export class Gba {
     this.bus.write16(0x03007ff8, currentMirror | pending);
 
     this.#inIrqHandler = true;
+    this.#eventSink?.({ kind: 'irq-enter', pc: this.armCpu.registers[15]! });
     this.armCpu.enterIrq();
   }
 
@@ -265,6 +377,7 @@ export class Gba {
   }
 
   #onHBlank(): void {
+    this.#eventSink?.({ kind: 'hblank', scanline: this.#currentScanline });
     // Set HBlank flag in DISPSTAT
     const dispstat = this.bus.mmioRegisters[4]! | (this.bus.mmioRegisters[5]! << 8);
     this.bus.mmioRegisters[4] = (dispstat | 0x02) & 0xff; // Set HBlank bit
@@ -314,6 +427,8 @@ export class Gba {
     } else if (this.#currentScanline >= TOTAL_SCANLINES) {
       // End of frame — wrap back to scanline 0
       this.#currentScanline = 0;
+      this.bus.mmioRegisters[6] = 0;
+      this.#frameCount++;
       // Clear VBlank flag
       this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! & ~0x01;
     }
@@ -323,6 +438,7 @@ export class Gba {
   }
 
   #onVBlankStart(): void {
+    this.#eventSink?.({ kind: 'vblank' });
     // Set VBlank flag in DISPSTAT
     this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! | 0x01;
 
@@ -341,12 +457,13 @@ export class Gba {
 
   // ─── Save State ─────────────────────────────────────────────────
 
-  /** Serialize the entire emulator state to a snapshot (excludes CPU — serialized separately). */
+  /** Serialize the entire emulator state to a snapshot. */
   serialize(): GbaSnapshot {
     return {
       version: 1,
       cpu: this.armCpu.serialize(),
       currentScanline: this.#currentScanline,
+      frameCount: this.#frameCount,
       inIrqHandler: this.#inIrqHandler,
       scheduler: this.scheduler.serialize(),
       interrupts: this.interrupts.serialize(),
@@ -359,10 +476,19 @@ export class Gba {
     };
   }
 
-  /** Restore from a snapshot. ROM/BIOS must already be loaded. */
+  /**
+   * Restore from a snapshot. ROM/BIOS must already be loaded.
+   *
+   * Scheduled events come back at exactly the cycles the snapshot recorded — only
+   * their callbacks (which cannot be serialized) are reattached. Running K frames
+   * from a restored snapshot therefore yields the same machine as running K frames
+   * from the original — what replay-based rewind relies on.
+   */
   deserialize(snap: GbaSnapshot): void {
     this.#running = false;
+    this.#stopped = false;
     this.#currentScanline = snap.currentScanline;
+    this.#frameCount = snap.frameCount ?? 0;
     this.#inIrqHandler = snap.inIrqHandler;
 
     // Restore subsystems
@@ -382,26 +508,19 @@ export class Gba {
       this.armCpu.deserialize(snap.cpu);
     }
 
-    // Reconstruct scheduler event callbacks
-    this.#reconstructSchedulerEvents();
+    this.#reattachSchedulerCallbacks();
   }
 
-  /** Re-register scheduler callbacks after deserialize (callbacks can't be serialized). */
-  #reconstructSchedulerEvents(): void {
-    // Re-attach HBlank/HBlankEnd callbacks using remaining cycle counts
-    this.#reattachSchedulerCallback(EventId.HBlank, () => this.#onHBlank());
-    this.#reattachSchedulerCallback(EventId.HBlankEnd, () => this.#onHBlankEnd());
-
-    // Timers: reconstruct overflow events for enabled non-cascade timers
-    this.timers.reconstructEvents();
-  }
-
-  /** Set the callback for an already-scheduled event without changing its fireCycle. */
-  #reattachSchedulerCallback(id: EventId, callback: () => void): void {
-    if (this.scheduler.isScheduled(id)) {
-      const remaining = this.scheduler.cyclesUntilEvent(id);
-      this.scheduler.schedule(id, remaining, callback);
+  /** Give every pending event its callback back, without moving it. */
+  #reattachSchedulerCallbacks(): void {
+    if (this.scheduler.isScheduled(EventId.HBlank)) {
+      this.scheduler.reattach(EventId.HBlank, () => this.#onHBlank());
     }
+    if (this.scheduler.isScheduled(EventId.HBlankEnd)) {
+      this.scheduler.reattach(EventId.HBlankEnd, () => this.#onHBlankEnd());
+    }
+    this.timers.reattachEvents();
+    this.dma.reattachEvents();
   }
 
   /** Stop emulation */
@@ -412,7 +531,10 @@ export class Gba {
   /** Reset the entire system */
   reset(): void {
     this.#running = false;
+    this.#stopped = false;
     this.#currentScanline = 0;
+    this.#frameCount = 0;
+    this.#inIrqHandler = false;
     this.scheduler.reset();
     this.interrupts.reset();
     this.timers.reset();

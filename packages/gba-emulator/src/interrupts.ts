@@ -27,9 +27,13 @@ export class InterruptController {
    */
   intrWaitFlags = 0;
 
+  /** Observer for every interrupt request (an event log's IRQ rows). */
+  onRequest: ((flag: number) => void) | null = null;
+
   /** Request an interrupt by setting bits in IF. */
   requestInterrupt(flag: number): void {
     this.if_ |= flag;
+    this.onRequest?.(flag);
     // If this interrupt is enabled and master enable is on, wake from halt.
     // Always wake for ANY enabled interrupt, even during IntrWait.
     // On real GBA hardware, IntrWait wakes for all IRQs — the BIOS IRQ handler

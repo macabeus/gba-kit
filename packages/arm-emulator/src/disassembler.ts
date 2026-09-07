@@ -659,3 +659,68 @@ function formatPsrFields(mask: number): string {
   }
   return fields;
 }
+
+// ─── Debugger-facing disassembly ────────────────────────────────────
+
+export interface DisassembleOptions {
+  /**
+   * Name for an address an instruction refers to — a branch target, a literal-pool
+   * word — appended as `<name>` / `<name+0xNN>`. Return null for no name.
+   */
+  symbolize?: (address: number) => string | null;
+}
+
+export interface DisassembledInstruction {
+  text: string;
+  /** Bytes the instruction occupies: 4 for ARM and for a merged Thumb `bl` pair, else 2. */
+  size: 2 | 4;
+  /** The code or data address the instruction refers to, when it names one. */
+  target?: number;
+}
+
+/**
+ * Disassemble the Thumb instruction at `address`, reading halfwords through
+ * `read16`. A `bl` prefix/suffix pair is presented as one 4-byte `bl <target>`
+ * instead of two halves.
+ */
+export function disassembleThumbAt(
+  read16: (address: number) => number,
+  address: number,
+  options: DisassembleOptions = {},
+): DisassembledInstruction {
+  const instr = read16(address) & 0xffff;
+  if ((instr & 0xf800) === 0xf000) {
+    const next = read16((address + 2) >>> 0) & 0xffff;
+    if ((next & 0xf800) === 0xf800) {
+      const high = signExtend(instr & 0x7ff, 11) << 12;
+      const low = (next & 0x7ff) << 1;
+      const target = (address + 4 + high + low) >>> 0;
+      return { text: annotate(`bl ${addr(target)}`, target, options), size: 4, target };
+    }
+  }
+  return finish(disassembleThumb(instr, address), 2, options);
+}
+
+/** Disassemble the ARM instruction at `address`, reading words through `read32`. */
+export function disassembleArmAt(
+  read32: (address: number) => number,
+  address: number,
+  options: DisassembleOptions = {},
+): DisassembledInstruction {
+  return finish(disassembleArm(read32(address) >>> 0, address), 4, options);
+}
+
+/** Pick the address the text names (`b 0x08001234`, `; =0x03001234`) and symbolize it. */
+function finish(text: string, size: 2 | 4, options: DisassembleOptions): DisassembledInstruction {
+  const m = /0x([0-9a-f]{8})\b/.exec(text);
+  if (!m) {
+    return { text, size };
+  }
+  const target = parseInt(m[1]!, 16) >>> 0;
+  return { text: annotate(text, target, options), size, target };
+}
+
+function annotate(text: string, target: number, options: DisassembleOptions): string {
+  const name = options.symbolize?.(target);
+  return name ? `${text} <${name}>` : text;
+}
