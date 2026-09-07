@@ -6,7 +6,7 @@
   "private": true,
   "publisher": "macabeus",
   "license": "MIT",
-  "icon": "assets/logo.png",
+  "icon": "media/logo.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/macabeus/gba-kit",

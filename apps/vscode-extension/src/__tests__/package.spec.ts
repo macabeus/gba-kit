@@ -20,7 +20,7 @@ describe('package', () => {
     }
   }, 120_000);
 
-  it('ships the three bundles, the stylesheet and its icon font, the manifest, the README and the license, and nothing else', () => {
+  it('ships the three bundles, the stylesheet and its icon font, the marketplace icon, the manifest, the README and the license, and nothing else', () => {
     const listed = execFileSync(join(root, 'node_modules', '.bin', 'vsce'), ['ls', '--no-dependencies'], {
       cwd: root,
       encoding: 'utf8',
@@ -33,6 +33,7 @@ describe('package', () => {
       'dist/extension.js',
       'dist/webview.css',
       'dist/webview.js',
+      'media/logo.png',
       'package.json',
     ]);
   }, 30_000);
