@@ -1,5 +1,13 @@
 # @gba-kit/gba-node
 
+## 0.7.0
+
+### Patch Changes
+
+- Updated dependencies [2176949]
+  - @gba-kit/gba-emulator@0.7.0
+  - @gba-kit/arm-emulator@0.7.0
+
 ## 0.6.0
 
 ### Minor Changes

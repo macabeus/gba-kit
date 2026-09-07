@@ -1,6 +1,6 @@
 {
   "name": "@gba-kit/debug-core",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "IDE-agnostic GBA debugging session on top of gba-kit: breakpoints, stepping, frames and variables, rewind, tracing, and the emulator views",
   "author": "macabeus",
   "type": "module",

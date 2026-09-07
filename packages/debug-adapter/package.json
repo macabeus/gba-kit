@@ -1,6 +1,6 @@
 {
   "name": "@gba-kit/debug-adapter",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Debug Adapter Protocol server for GBA programs on top of gba-kit: VS Code, Neovim, Emacs, Zed and JetBrains debug a ROM with source, DWARF values, data breakpoints and exact rewind",
   "author": "macabeus",
   "type": "module",

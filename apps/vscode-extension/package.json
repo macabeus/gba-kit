@@ -2,7 +2,7 @@
   "name": "gba-kit-vscode",
   "displayName": "GBA Debugger",
   "description": "Debug Game Boy Advance programs in VS Code: breakpoints in C, DWARF variables, data breakpoints, exact rewind, the screen with a gamepad, and the PPU and I/O views",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "publisher": "macabeus",
   "license": "MIT",

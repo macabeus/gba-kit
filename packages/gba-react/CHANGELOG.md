@@ -1,5 +1,12 @@
 # @gba-kit/gba-react
 
+## 0.7.0
+
+### Patch Changes
+
+- Updated dependencies [2176949]
+  - @gba-kit/gba-browser@0.7.0
+
 ## 0.6.0
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "@gba-kit/debug-ui",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "React panels for a GBA debugger — screen with gamepad and audio, palette, tiles, tilemaps, sprites, I/O registers, trace, events, memory search, labels, save states, input recordings — over a transport an editor or a web page provides",
   "author": "macabeus",
   "type": "module",
