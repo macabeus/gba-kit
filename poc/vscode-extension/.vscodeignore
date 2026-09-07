@@ -1,0 +1,6 @@
+**
+!dist/extension.js
+!dist/adapter-cli.js
+!dist/dap.js
+!package.json
+!README.md

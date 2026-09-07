@@ -1,11 +1,12 @@
 {
   "name": "gba-kit-vscode",
-  "displayName": "gba-kit GBA Debugger",
+  "displayName": "GBA Debugger",
   "description": "Debug Game Boy Advance programs in VS Code: breakpoints in C, DWARF variables, data breakpoints, exact rewind, the screen with a gamepad, and the PPU and I/O views",
   "version": "0.6.0",
   "private": true,
   "publisher": "macabeus",
   "license": "MIT",
+  "icon": "assets/logo.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/macabeus/gba-kit",
@@ -65,7 +66,7 @@
               },
               "projectDir": {
                 "type": "string",
-                "description": "Where .gba-kit/ lives: labels and save states (default: cwd)"
+                "description": "Where .gba-kit/ lives: labels, save states and recordings (default: cwd)"
               },
               "sourceMap": {
                 "type": "object",

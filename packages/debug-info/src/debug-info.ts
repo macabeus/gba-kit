@@ -18,10 +18,20 @@ export interface SourceLocation {
 
 /** The verdict of {@link DebugInfo.checkRomIdentity}. */
 export type RomIdentity =
-  | { ok: true; comparedBytes: number }
+  | { ok: true; /** how many bytes were checked, the patched header not among them */ comparedBytes: number }
   | { ok: false; reason: string; section?: string; address?: number };
 
 const SHT_PROGBITS = 1;
+
+/**
+ * The part of the cartridge header a GBA build writes into the ROM after linking:
+ * the Nintendo logo, the title, the game and maker codes, and the complement check
+ * that `gbafix` computes from them. A crt0 reserves the space and leaves the values
+ * to that step, so the ELF's copy differs from the ROM's for a build that is doing
+ * exactly what it should. The entry branch that precedes it (`0x08000000`) is code
+ * the link produced, and is compared.
+ */
+const PATCHED_HEADER = { from: 0x08000004, to: 0x080000c0 };
 
 /** The lowest address of any loadable section, or null when the ELF has none. */
 function lowestLoadableAddress(elf: ElfFile): number | null {
@@ -143,9 +153,11 @@ export class DebugInfo {
   /**
    * Whether this ELF is the debug sidecar of `rom`: every loadable, initialized
    * section that lies in the cartridge window (`0x08000000–0x0DFFFFFF`) must match
-   * the ROM byte for byte at its offset. A wrong ELF (another build, an object-file
-   * wrapper around the ROM, a `-gdwarf` variant linked differently) fails on the
-   * first section that differs, which is named so the user can see what is off.
+   * the ROM byte for byte at its offset, save for the cartridge header a build
+   * writes after linking (see {@link PATCHED_HEADER}). A wrong ELF (another build,
+   * an object-file wrapper around the ROM, a `-gdwarf` variant linked differently)
+   * fails on the first section that differs, which is named so the user can see
+   * what is off.
    *
    * This checks the code and data the ELF placed in ROM. It does not compare bytes
    * the ELF says nothing about (padding, a post-link header patch), so a match is
@@ -174,16 +186,20 @@ export class DebugInfo {
         };
       }
       for (let i = 0; i < s.size; i++) {
+        const address = s.addr + i;
+        if (address >= PATCHED_HEADER.from && address < PATCHED_HEADER.to) {
+          continue;
+        }
         if (data[i] !== rom[offset + i]) {
           return {
             ok: false,
-            reason: `section ${s.name} differs from the ROM at 0x${(s.addr + i).toString(16)}`,
+            reason: `section ${s.name} differs from the ROM at 0x${address.toString(16)}`,
             section: s.name,
-            address: s.addr + i,
+            address,
           };
         }
+        compared++;
       }
-      compared += s.size;
     }
     if (compared === 0) {
       return { ok: false, reason: 'the ELF places nothing in the cartridge window' };

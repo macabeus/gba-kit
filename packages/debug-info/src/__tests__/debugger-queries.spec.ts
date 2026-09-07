@@ -159,11 +159,29 @@ describe('ROM / ELF identity', () => {
     expect(verdict.ok).toBe(true);
     expect(verdict.ok && verdict.comparedBytes).toBeGreaterThan(0);
 
+    // the last byte the ELF placed in ROM: past the header, and certainly covered
+    const last = rom.length - 1;
     const tampered = rom.slice();
-    tampered[0x10] ^= 0xff;
+    tampered[last] ^= 0xff;
     const bad = di.checkRomIdentity(tampered);
     expect(bad.ok).toBe(false);
-    expect(!bad.ok && bad.address).toBe(0x08000010);
+    expect(!bad.ok && bad.address).toBe(0x08000000 + last);
+  });
+
+  it('accepts a ROM whose header was written after the link, as every GBA build writes it', () => {
+    const bytes = new Uint8Array(readFileSync(DEVKITARM_ELF));
+    const di = DebugInfo.fromElf(bytes);
+    const rom = romFromElf(bytes);
+    // what `gbafix` does: the logo, the title and codes, and the complement check
+    const patched = rom.slice();
+    for (let at = 0x04; at < 0xc0; at++) {
+      patched[at] = (at * 7) & 0xff;
+    }
+    expect(di.checkRomIdentity(patched).ok).toBe(true);
+    // the entry branch before it is code, and is still compared
+    const moved = rom.slice();
+    moved[0x02] ^= 0xff;
+    expect(di.checkRomIdentity(moved)).toMatchObject({ ok: false, address: 0x08000002 });
   });
 
   it('rejects a ROM that is too short and an object file', () => {

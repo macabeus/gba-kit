@@ -63,7 +63,7 @@ export interface LaunchArguments extends DebugProtocol.LaunchRequestArguments {
   elf?: string | null;
   /** the project root relative DWARF paths resolve against (default: the ROM's directory) */
   cwd?: string;
-  /** where `.gba-kit/` lives: labels and save states (default: `cwd`) */
+  /** where `.gba-kit/` lives: labels, save states and recordings (default: `cwd`) */
   projectDir?: string;
   /** DWARF path prefix → local prefix, for sources compiled elsewhere (a Docker build) */
   sourceMap?: Record<string, string>;
