@@ -372,6 +372,11 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     // a pointer member, dereferenced: `->` binds tighter than `*`, as in C
     expect(h.session.evaluate('*p->counterRef').node.value).toBe(h.session.evaluate('g_vblank_count').node.value);
     expect(h.session.evaluate('&p->pos.y').address).toBe(h.session.evaluate('&g_player.pos.y').address);
+    // a memory reference means one thing: where the value lives, for a value that
+    // lives somewhere — so parenthesising the name cannot change what it points the
+    // memory view at, whichever build keeps `p` in a register
+    expect(h.session.evaluate('(p)').address).toBe(h.session.evaluate('p').address);
+    expect(h.session.evaluate('(p)').node.value).toBe(h.session.evaluate('p').node.value);
     expect(() => h.session.evaluate('p->nope')).toThrow(/has no member 'nope'/);
     expect(() => h.session.evaluate('*g_frame')).toThrow(/not a pointer/);
     expect(() => h.session.evaluate('*0x03000000')).toThrow(/not a typed pointer/);

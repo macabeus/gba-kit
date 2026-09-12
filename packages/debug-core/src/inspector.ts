@@ -7,10 +7,11 @@
  * A name is resolved one way everywhere — the variables tree, a hover, a watch,
  * a breakpoint condition: the selected frame's locals (innermost inlined layer
  * outward), its file's globals, any unit's globals, a declaration joined to a
- * linker symbol, then enumerators. Everything below a name — `a.b[i].c`, `p->m`,
- * `*p` — is the expression grammar's work, and its result is shown through the
- * same formatter the tree uses, so a member reads the same in a watch as it does
- * in the tree.
+ * linker symbol, then enumerators. A root is read by the tree's own reader, so
+ * what it says about where the compiler keeps it survives into a watch. Everything
+ * below a name — `a.b[i].c`, `p->m`, `*p` — is the expression grammar's work, and
+ * its result goes through `formatValue`, which is the reader the tree uses for a
+ * member, so a member reads the same in a watch as it does in the tree.
  */
 import { exceptionReturnBias } from '@gba-kit/arm-emulator/arm-cpu';
 import { disassembleArmAt, disassembleThumbAt } from '@gba-kit/arm-emulator/disassembler';
@@ -602,9 +603,12 @@ export class Inspector {
     const v = compiled.value(env);
     const word = v >>> 0;
     const computed = compiled.type;
-    // A pointer and an array both name memory the user can open in a memory view;
-    // any other number is a number, whatever region it happens to fall in.
-    const names = computed?.kind === 'pointer' || computed?.kind === 'array';
+    // A pointer or an array that a value *computed* — `&x`, `p + 1`, `(T *)x` — names
+    // memory the user can open in a memory view; any other number is a number, whatever
+    // region it happens to fall in. A value that names storage offers that storage
+    // instead, and offers nothing while the machine keeps it in a register, so a memory
+    // reference cannot mean where `p` lives in one build and where it points in the next.
+    const names = !type && (computed?.kind === 'pointer' || computed?.kind === 'array');
     const address = names && regionOf(word) !== null ? word : undefined;
     // An array's word is its own address, as C's decay makes it, so its contents come
     // from there. Anything else of a stated type is held in the word itself.
