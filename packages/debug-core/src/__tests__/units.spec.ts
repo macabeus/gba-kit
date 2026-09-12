@@ -41,6 +41,14 @@ entity.members = [
 const samplesType: TypeDesc = { kind: 'array', name: 'int[4]', size: 16, count: 4, target: int32 };
 /** `extern struct Entity gEntityInfo[];`: a decomp's header declaration, with no count. */
 const entityArray: TypeDesc = { kind: 'array', name: 'struct Entity[]', size: 0, count: null, target: entity };
+/** The two pointees a decomp's tables are full of and the DWARF gives no width: a void, and code. */
+const voidPtr: TypeDesc = { kind: 'pointer', name: 'void *', size: 4, target: { kind: 'void', name: 'void', size: 0 } };
+const handler: TypeDesc = {
+  kind: 'pointer',
+  name: 'Handler',
+  size: 4,
+  target: { kind: 'function', name: 'void (void)', size: 0 },
+};
 
 const SAMPLES_AT = 0x03000200;
 const ENTITIES_AT = 0x03000300;
@@ -83,6 +91,9 @@ const SYMBOLS: Record<string, number> = {
   g_frame: 2,
   // a pointer the compiler keeps in a register: no address, only a value
   p: ENTITIES_AT,
+  gRaw: ENTITIES_AT,
+  gRaw2: ENTITIES_AT + 8,
+  gHandler: 0x08001235,
 };
 
 const env: ExprEnv = {
@@ -114,6 +125,9 @@ const ROOT_TYPES: Record<string, TypeDesc> = {
   gEntityInfo: entityArray,
   p: entityPtr,
   g_frame: u32Type,
+  gRaw: voidPtr,
+  gRaw2: voidPtr,
+  gHandler: handler,
 };
 const NAMED_TYPES: Record<string, TypeDesc> = {
   Entity: entity,
@@ -269,6 +283,14 @@ describe('expression grammar', () => {
     expect(ev('p == &gEntityInfo[0]')).toBe(1);
   });
 
+  it('a pointee with no width steps by the byte, and counts bytes', () => {
+    expect(ev('gRaw + 4')).toBe(ENTITIES_AT + 4);
+    // two pointers of one type are one type whether or not that type has a size
+    expect(ev('gRaw2 - gRaw')).toBe(8);
+    expect(ev('gRaw - gRaw')).toBe(0);
+    expect(() => ev('gRaw - p')).toThrow(/they point at different types/);
+  });
+
   it('casts compose: a pointer value, and the T at an address', () => {
     expect(ev('(Entity *)0x03000300')).toBe(ENTITIES_AT);
     expect(ev('(*(Entity *)0x03000300).id')).toBe(100);
@@ -315,9 +337,16 @@ describe('expression grammar', () => {
     expect(() => ev('p.id')).toThrow(/is a pointer; read a member through it with 'p->id'/);
     expect(() => ev('gEntityInfo[0]->id')).toThrow(/is not a pointer; use '\.' for a member of a value/);
     expect(() => ev('r0[1]')).toThrow(/cannot subscript 'r0': a plain 32-bit word has no element type/);
+    expect(() => ev('r0.x')).toThrow(
+      /cannot read a member of 'r0': a plain 32-bit word has no members — cast it first, as in \(\(struct Foo \*\)r0\)->x/,
+    );
+    expect(() => ev('r0->x')).toThrow(/cast it first, as in \(\(struct Foo \*\)r0\)->x/);
     expect(() => ev('g_frame[1]')).toThrow(/'g_frame' \(u32\) is not an array or a pointer/);
     expect(() => ev('&5')).toThrow(/cannot take the address of '5': it is a value, not a place in memory/);
     expect(() => ev('p + p')).toThrow(/cannot add two pointers \('p' and 'p'\)/);
+    expect(() => ev('*gRaw')).toThrow(/a void \* points at no type — read what is there with u8\(gRaw\)/);
+    expect(() => ev('gHandler + 1')).toThrow(/cannot step 'gHandler' \(Handler\): it points at code, not at values/);
+    expect(() => ev('gHandler - gHandler')).toThrow(/it points at code, not at values/);
     expect(() => ev('p - &g_samples[0]')).toThrow(/they point at different types/);
     expect(() => ev('gEntityInfo[0]')).toThrow(/'gEntityInfo\[0\]' is a struct Entity, not a scalar/);
     expect(() => ev('(Nope *)0x03000300')).toThrow(/unknown type 'Nope' \(the ELF has no DWARF for it\)/);
@@ -333,9 +362,27 @@ describe('expression grammar', () => {
   });
 
   it('a root the compiler keeps in a register, and one it kept nowhere', () => {
+    /** a struct small enough to live in a register, holding another struct at its start */
+    const pair: TypeDesc = {
+      kind: 'struct',
+      name: 'struct Pair',
+      size: 4,
+      members: [
+        { name: 'lo', offset: 0, type: u16Type },
+        { name: 'hi', offset: 2, type: u16Type },
+      ],
+    };
+    const boxedType: TypeDesc = {
+      kind: 'struct',
+      name: 'struct Boxed',
+      size: 4,
+      members: [{ name: 'pair', offset: 0, type: pair }],
+    };
     const places: Record<string, ExprPlace> = {
       p: { word: ENTITIES_AT },
       arg0: { word: 0xffffff01 },
+      wide: { word: 0x11223344 },
+      boxed: { word: 0x11223344 },
       gone: { absent: 'r4 was not recovered in this frame' },
     };
     const live: ExprEnv = { ...env, place: (name) => places[name] };
@@ -346,7 +393,11 @@ describe('expression grammar', () => {
           ? ({ kind: 'uchar', name: 'u8', size: 1 } as TypeDesc)
           : name === 'gone'
             ? int32
-            : ROOT_TYPES[name],
+            : name === 'wide'
+              ? entity
+              : name === 'boxed'
+                ? boxedType
+                : ROOT_TYPES[name],
     };
     const run = (s: string): number => compileExpression(s, withPlaces)(live);
     expect(run('p->id')).toBe(100);
@@ -354,6 +405,14 @@ describe('expression grammar', () => {
     expect(run('gEntityInfo[arg0].id')).toBe(101); // a u8 register holding 1, its junk high bytes ignored
     expect(() => run('&p')).toThrow(/cannot take the address of 'p': the compiler keeps it in a register here/);
     expect(() => run('gone')).toThrow(/'gone' is not available here: r4 was not recovered in this frame/);
+    // the low bytes of a register-held struct are readable; what is not says which reason it is
+    expect(run('wide.id')).toBe(0x11223344);
+    expect(() => run('wide.next')).toThrow(
+      /'wide.next' is not available here: the compiler keeps 'wide' in a register, and 'next' is past its low 4 bytes/,
+    );
+    expect(() => run('boxed.pair.lo')).toThrow(
+      /the compiler keeps 'boxed' in a register, which gives 'pair' \(struct Pair\) no address to read/,
+    );
   });
 
   it('reports the type and the place it compiled, for the panes that need them', () => {

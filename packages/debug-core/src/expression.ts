@@ -799,7 +799,10 @@ function member(base: Node, name: string, arrow: boolean, text: string): Node {
   const type = base.type;
   if (!type) {
     if (base.root === undefined) {
-      throw new Error(`cannot read a member of '${base.text}': a plain 32-bit word has no members`);
+      throw new Error(
+        `cannot read a member of '${base.text}': a plain 32-bit word has no members — ` +
+          `cast it first, as in ((struct Foo *)${base.text})->${name}`,
+      );
     }
     return belowUntyped(base, text, `cast it to reach through it, as in ((struct Foo *)${base.text})->${name}`);
   }
@@ -834,9 +837,14 @@ function member(base: Node, name: string, arrow: boolean, text: string): Node {
     return locatedNode({ text, type: m.type, spot: (env) => ({ address: (word(env) + offset) >>> 0 }), bits });
   }
   const width = bits ? bits.span : scalarWidth(m.type);
-  // A ≤4-byte aggregate the compiler kept in a register has readable members, and
-  // nothing else of it is knowable: past those bytes the value is not available.
+  // A ≤4-byte aggregate the compiler kept in a register has readable scalar members
+  // and nothing else: a register is not a place, so a member that is itself an
+  // aggregate has no address to be read from, and one past the low four bytes is
+  // simply not in the word.
   const inWord = width > 0 && offset + width <= 4;
+  const missing = width
+    ? `the compiler keeps '${base.text}' in a register, and '${name}' is past its low 4 bytes`
+    : `the compiler keeps '${base.text}' in a register, which gives '${name}' (${m.type.name}) no address to read`;
   const spot = baseSpot!;
   return locatedNode({
     text,
@@ -847,9 +855,7 @@ function member(base: Node, name: string, arrow: boolean, text: string): Node {
         return { address: (p.address + offset) >>> 0 };
       }
       if ('word' in p) {
-        return inWord
-          ? { word: (p.word >>> (offset * 8)) >>> 0 }
-          : { absent: `the compiler keeps '${base.text}' in a register, and '${name}' is past its low 4 bytes` };
+        return inWord ? { word: (p.word >>> (offset * 8)) >>> 0 } : { absent: missing };
       }
       return p;
     },
@@ -882,8 +888,10 @@ function subscript(base: Node, index: Node, text: string): Node {
   if (!elem || !elem.size) {
     throw new Error(`'${base.text}' (${type.name}) has no element size in the debug info`);
   }
-  // A constant index outside a sized array is a mistake the program can be measured
-  // against; a runtime index is not, and neither is a pointer, which has no count.
+  // A literal index outside a sized array is a mistake the program can be measured
+  // against. Nothing else is: a pointer has no count, a runtime index is one GDB
+  // leaves unchecked too, and an index the reader folds in their head — `a[2 + 3]` —
+  // is arithmetic here like any other, so it is read rather than measured.
   if (
     index.literal !== undefined &&
     type.kind === 'array' &&
@@ -919,8 +927,13 @@ function dereference(x: Node, text: string): Node {
     throw new Error(`cannot dereference '${x.text}': it is a ${type.name}, not a pointer`);
   }
   const target = type.target;
-  if (!target) {
-    throw new Error(`cannot dereference '${x.text}': the debug info does not say what a ${type.name} points at`);
+  if (!target || target.kind === 'void') {
+    // There is no value at the end of a `void *`: a width would have to be invented
+    // for it, which is exactly what the reads that state their own width are for.
+    throw new Error(
+      `cannot dereference '${x.text}': a ${type.name} points at no type — ` +
+        `read what is there with u8(${x.text}), u16(${x.text}) or u32(${x.text})`,
+    );
   }
   const word = x.eval;
   return locatedNode({ text, type: target, spot: (env) => ({ address: word(env) >>> 0 }) });
@@ -1092,22 +1105,34 @@ function apply(op: string, l: Node, r: Node, text: string): Node {
  * else — a register, a literal, a `u32()` read, a machine value — has no type and
  * keeps the raw word, so `r3 + 1` and `u32(a) + 1` mean what they always did, and
  * so do `p & 3` and `p * 2`, which are not pointer arithmetic in C either.
+ *
+ * A pointee the debug info gives no width — a `void`, a struct a header only
+ * declares — steps by the byte and counts bytes, which is what GDB answers under
+ * C's own extension. Two pointers of one such type are still the same type, and
+ * saying otherwise while printing the two identical spellings side by side is the
+ * one answer that helps nobody.
  */
 function scale(op: '+' | '-', l: Node, r: Node, text: string): Node | null {
   const le = elementOf(l.type);
   const re = elementOf(r.type);
+  // Code is not an array of values: C forbids arithmetic on a pointer to a function,
+  // and a step of one byte would land in the middle of an instruction.
+  const code = le?.kind === 'function' ? l : re?.kind === 'function' ? r : null;
+  if (code) {
+    throw new Error(`cannot step '${code.text}' (${code.type!.name}): it points at code, not at values`);
+  }
   const a = l.eval;
   const b = r.eval;
   if (le && re) {
     if (op === '+') {
       throw new Error(`cannot add two pointers ('${l.text}' and '${r.text}')`);
     }
-    if (!le.size || !sameType(le, re)) {
+    if (!sameType(le, re)) {
       throw new Error(
         `cannot subtract '${r.text}' (${r.type!.name}) from '${l.text}' (${l.type!.name}): they point at different types`,
       );
     }
-    const step = le.size;
+    const step = le.size || 1;
     return { text, signed: true, type: PTRDIFF, eval: (env) => Math.trunc(((a(env) - b(env)) | 0) / step) >>> 0 };
   }
   const elem = le ?? re;
@@ -1117,7 +1142,6 @@ function scale(op: '+' | '-', l: Node, r: Node, text: string): Node | null {
   if (re && op === '-') {
     throw new Error(`cannot subtract '${r.text}' (${r.type!.name}) from '${l.text}', which is not a pointer`);
   }
-  // A void or incomplete pointee has no width to step by, so it steps by the byte, as GDB does in C.
   const step = elem.size || 1;
   const pointer = le ? a : b;
   const count = le ? b : a;
