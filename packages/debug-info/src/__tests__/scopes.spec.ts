@@ -17,6 +17,7 @@ import { entryRanges, locationAt } from '../dwarf/lists.js';
 import { ElfFile } from '../elf.js';
 import { DwarfScopes, type Memory } from '../scopes.js';
 import type { DwarfEntry } from '../types.js';
+import { callEndingAt } from '../unwind/calls.js';
 import { measurePrologue } from '../unwind/prologue.js';
 import { type MachineFacts, frameConfidence } from '../unwind/types.js';
 
@@ -233,25 +234,68 @@ describe('call-frame information', () => {
     expect(scopes.frames.cfa(main, regs({}))).toBe(0x03007f00);
   });
 
+  /**
+   * devkitARM's output is whatever `arm-none-eabi-gcc` the machine has, and CI
+   * rebuilds this fixture with its own, so the addresses and frame sizes below are
+   * read out of the ELF rather than written down. (agbcc is pinned to a revision CI
+   * caches, which is why the agbcc tests can name addresses outright.)
+   */
+  const insideBump = (): { pc: number; cfa: number; entry: number } => {
+    const entry = devkitarm.symbolToAddress('bump')!;
+    const sp = 0x03007ef0;
+    const atEntry = devkitarm.scopes.frames.cfa(entry, regs({ 13: sp }));
+    // past the prologue: the first address whose CFA has moved off sp
+    for (let pc = entry; pc < entry + 0x80; pc += 2) {
+      const cfa = devkitarm.scopes.frames.cfa(pc, regs({ 13: sp }));
+      if (cfa !== undefined && cfa !== atEntry) {
+        return { pc, cfa, entry };
+      }
+    }
+    throw new Error('no address inside bump where .debug_frame has moved the CFA off sp');
+  };
+
   it('unwinds from inside bump to main and stops where main returns to nothing', () => {
     // bump's frame, then main's, both described by .debug_frame; main's own saved
     // lr is 0, which is how the root of the stack announces itself.
-    const facts = elfFacts(devkitarm, devkitarmBytes, { 0x03007ef4: 0x0800001b, 0x03007efc: 0 });
-    const walk = devkitarm.scopes.physicalFrames(0x08000034, regs({ 13: 0x03007ef0 }), facts);
+    const { pc, cfa } = insideBump();
+    // the return address bump was called with: just past main's `bl bump`
+    const entry = devkitarm.symbolToAddress('bump')!;
+    const bare = elfFacts(devkitarm, devkitarmBytes);
+    let returnInMain = 0;
+    for (let a = devkitarm.symbolToAddress('main')!; a < devkitarm.symbolToAddress('main')! + 0x80; a += 2) {
+      if (callEndingAt(a, bare) === entry) {
+        returnInMain = a;
+        break;
+      }
+    }
+    expect(returnInMain).toBeGreaterThan(0);
+    const mainCfa = devkitarm.scopes.frames.cfa(returnInMain, regs({ 13: cfa }));
+    const facts = elfFacts(devkitarm, devkitarmBytes, {
+      [cfa - 4]: returnInMain + 1, // bump's saved lr: a Thumb return into main
+      [(mainCfa ?? cfa) - 4]: 0,
+    });
+    const walk = devkitarm.scopes.physicalFrames(pc, regs({ 13: 0x03007ef0 }), facts);
     expect(walk.frames.map((f) => f.method)).toEqual(['live', 'cfi']);
-    expect(walk.frames.map((f) => f.pc)).toEqual([0x08000034, 0x0800001a]);
-    expect(walk.frames.map((f) => f.cfa)).toEqual([0x03007ef8, 0x03007f00]);
-    expect(walk.frames[1]!.regs[13]).toBe(0x03007ef8);
+    expect(walk.frames.map((f) => f.pc)).toEqual([pc, returnInMain]);
+    expect(walk.frames[0]!.cfa).toBe(cfa);
+    expect(walk.frames[1]!.regs[13]).toBe(cfa);
     expect(frameConfidence(walk.frames[1]!.method)).toBe('derived');
     expect(walk.end).toMatch(/saved return address reads 0/);
   });
 
-  it("measures devkitARM's bump, whose push the scheduler moved below four other instructions", () => {
+  it("measures devkitARM's bump, whose push the scheduler moved below other instructions", () => {
     const facts = elfFacts(devkitarm, devkitarmBytes);
-    const bump = devkitarm.symbolToAddress('bump')!;
-    const measured = measurePrologue(bump, 0x08000034, bump + 0x78, 'thumb', facts);
-    expect(measured.ok && measured.frame.frameSize).toBe(8);
-    expect(measured.ok && Object.fromEntries(measured.frame.saved)).toEqual({ 4: -8, 14: -4 });
+    const { pc, cfa, entry } = insideBump();
+    const measured = measurePrologue(entry, pc, entry + 0x78, 'thumb', facts);
+    expect(measured.ok).toBe(true);
+    if (!measured.ok) {
+      return;
+    }
+    // The prologue decoder must agree with `.debug_frame` about where the CFA is,
+    // and must have found the saved lr, whatever this compiler's frame layout is.
+    expect(0x03007ef0 + measured.frame.frameSize).toBe(cfa);
+    expect(measured.frame.saved.get(14)).toBe(-4);
+    expect(measured.frame.frameSize % 4).toBe(0);
   });
 
   it('unwinds agbcc, which has no .debug_frame at all, three frames deep from its prologues', () => {
