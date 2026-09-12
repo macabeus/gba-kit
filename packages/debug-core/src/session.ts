@@ -902,10 +902,11 @@ export class Session {
   }
 
   /**
-   * What a data breakpoint on `name` would watch: a variable or member path visible
-   * from frame `frameIndex` (a local's stack slot included), a DWARF-typed global
-   * path, a symbol (whole extent), a hex address (`size` bytes, default 4), or a
-   * label. Null when nothing by that name has an address (a register-held local).
+   * What a data breakpoint on `name` would watch: storage named from frame
+   * `frameIndex` (`g_samples[i]`, `p->pos.x`, a local's stack slot included), a
+   * DWARF-typed global path, a symbol (whole extent), a hex address (`size` bytes,
+   * default 4), or a label. Null when nothing by that name has an address (a
+   * register-held local).
    */
   dataBreakpointTarget(
     name: string,
@@ -926,7 +927,7 @@ export class Session {
           return { address: scalar.address, length: size ?? scalar.length, name: trimmed };
         }
       } catch {
-        // not a typed path: the symbol table may still know it
+        // it names no typed storage here: the symbol table may still know the name
       }
     }
     if (di) {

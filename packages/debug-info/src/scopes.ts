@@ -538,9 +538,9 @@ export class DwarfScopes {
   }
 
   /**
-   * `name` typed as `typeEntry`, read from `address`: the cast operator, and a
-   * declaration (`extern`) joined to storage the linker placed — pass the
-   * declaration as `declaredBy` so an unsized array stays unsized.
+   * `name` typed as `typeEntry`, read from `address`: a type imposed on storage from
+   * outside, as a declaration (`extern`) joined to storage the linker placed is —
+   * pass the declaration as `declaredBy` so an unsized array stays unsized.
    */
   castNode(name: string, typeEntry: DwarfEntry, address: number, memory: Memory, declaredBy?: DwarfEntry): VarNode {
     const type = declaredBy ? this.types.describeDeclared(declaredBy) : this.types.describe(typeEntry);

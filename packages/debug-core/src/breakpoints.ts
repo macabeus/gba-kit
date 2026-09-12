@@ -107,8 +107,8 @@ export class BreakpointStore {
 
   /**
    * Replace every breakpoint of `owner` (a file path, 'instruction' or 'function').
-   * The condition and log message are compiled where the breakpoint lands, so a
-   * local's signedness is known to them.
+   * The condition and log message are compiled where the breakpoint lands, so the
+   * names they read are typed as they are there, a local of that frame included.
    */
   replace(owner: string, specs: BreakpointSpec[], resolve: BreakpointResolver, hints = NO_HINTS): Breakpoint[] {
     const list = specs.map((spec): Breakpoint => {

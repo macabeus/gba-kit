@@ -60,9 +60,9 @@ export interface ExprEnv {
   /**
    * Where the root name `name` keeps its value right now. A local's location
    * varies with the pc and may be a register, so this is asked per evaluation
-   * rather than per compilation. An env that does not answer it falls back to
-   * `symbol` and `symbolAddress`, which is what an env written against the older
-   * interface provides.
+   * rather than per compilation. It is optional because an env with only a symbol
+   * table behind it has no such answer to give: that one is asked `symbolAddress`
+   * and `symbol`, which is the whole of what a symbol table knows.
    */
   place?(name: string): ExprPlace | undefined;
 }
@@ -751,8 +751,8 @@ function startsPrimary(t: Token): boolean {
 
 /**
  * A root the DWARF types: where the machine keeps it, asked once per evaluation.
- * An env with no {@link ExprEnv.place} is asked the older pair of questions
- * instead — the address first, since a name with one is in memory.
+ * An env with no {@link ExprEnv.place} is asked for the address first and for the
+ * word only then, since a name with an address is in memory and its word is a copy.
  */
 function typedRoot(name: string, type: TypeDesc): Node {
   const spot = (env: ExprEnv): ExprPlace => {
@@ -1107,8 +1107,9 @@ function apply(op: string, l: Node, r: Node, text: string): Node {
  * C's pointer arithmetic, where and only where a type says pointer or array:
  * `e + 1` steps one element, and one pointer minus another counts them. Everything
  * else — a register, a literal, a `u32()` read, a machine value — has no type and
- * keeps the raw word, so `r3 + 1` and `u32(a) + 1` mean what they always did, and
- * so do `p & 3` and `p * 2`, which are not pointer arithmetic in C either.
+ * takes the number as it stands, so `r3 + 1` is the word in r3 plus one. Nor is a
+ * pointer scaled outside `+` and `-`: `p & 3` and `p * 2` are the raw word too,
+ * being no more pointer arithmetic here than they are in C.
  *
  * A pointee the debug info gives no width — a `void`, a struct a header only
  * declares — steps by the byte and counts bytes, which is what GDB answers under

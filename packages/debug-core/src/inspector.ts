@@ -688,9 +688,10 @@ export class Inspector {
   }
 
   /**
-   * What a data breakpoint on `name` would watch when `name` is a typed variable
-   * or member path visible from `frames[frameIndex]` (a local's stack slot
-   * included): its address and size. Null when it is not, or lives in a register.
+   * What a data breakpoint on `name` would watch when `name` names storage the
+   * program types, seen from `frames[frameIndex]` — a variable, a member, an
+   * element, a pointee, a local's stack slot: its address and size. Null when it
+   * names no such storage, or when the compiler keeps it in a register.
    */
   variableTarget(name: string, frames: StackFrame[], frameIndex: number): { address: number; length: number } | null {
     const scope = this.#scopeOfFrame(frames, frameIndex);

@@ -269,7 +269,7 @@ describe('expression grammar', () => {
     expect(ev('gEntityInfo + 1')).toBe(ev('&gEntityInfo[1]'));
     expect(ev('(p + 1) - 1')).toBe(ev('p'));
     expect(ev('&g_samples[2] - g_samples')).toBe(2);
-    // the compatibility spine: nothing without a type is ever scaled
+    // nothing without a type is ever scaled, whatever address it happens to hold
     expect(ev('r0 + 1')).toBe(11);
     expect(ev('u32(0x03000000) + 1')).toBe(0x78563413);
     expect(ev('[0x03000000] + 1')).toBe(0x13);
@@ -298,7 +298,7 @@ describe('expression grammar', () => {
     expect(ev('((Entity *)0x03000300)[1].id')).toBe(101);
     expect(ev('((struct Entity *)0x03000300)->next->id')).toBe(101);
     expect(ev('*(vu16 *)0x03000000')).toBe(0x3412);
-    expect(ev('(u16)0x03000000')).toBe(0x3412); // (T)x is still the T at x's address
+    expect(ev('(u16)0x03000000')).toBe(0x3412); // (T)x is the T at x's address, where (T *)x is the pointer
     expect(ev('(u16)(0x03000000)')).toBe(0x3412);
     expect(ev('(int)&g_samples[1]')).toBe(5);
     expect(ev('1 + (u16)0x03000000')).toBe(0x3413);
