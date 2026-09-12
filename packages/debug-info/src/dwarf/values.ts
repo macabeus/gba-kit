@@ -324,6 +324,28 @@ export function isSignedType(type: TypeDesc): boolean {
 }
 
 /**
+ * The bytes a value of `type` occupies when it is a scalar — a number, a character,
+ * a bool, an enumerator, a pointer — and 0 when it is an aggregate, a function or a
+ * void, which no single machine word stands for. Every reader that has to decide how
+ * wide a read is asks here, so the grammar and the tree cannot disagree about it.
+ */
+export function scalarSize(type: TypeDesc): number {
+  switch (type.kind) {
+    case 'int':
+    case 'uint':
+    case 'bool':
+    case 'char':
+    case 'uchar':
+    case 'float':
+    case 'enum':
+    case 'pointer':
+      return type.size;
+    default:
+      return 0;
+  }
+}
+
+/**
  * Where a bitfield member sits: the first byte of the storage that covers it, and
  * the bits within that storage, LSB-first. Null when the member is not a bitfield.
  */

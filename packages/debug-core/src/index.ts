@@ -47,7 +47,6 @@ export {
   splitAssignment,
   type Compiled,
   type CompiledExpr,
-  type ExprBits,
   type ExprEnv,
   type ExprHints,
   type ExprLvalue,

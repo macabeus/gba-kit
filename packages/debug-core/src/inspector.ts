@@ -26,7 +26,7 @@ import type {
   VirtualFrame,
   WritableScalar,
 } from '@gba-kit/debug-info';
-import { formatBitfield, formatValue, frameConfidence, le32, toInt } from '@gba-kit/debug-info';
+import { formatBitfield, formatValue, frameConfidence, le32, scalarSize, toInt } from '@gba-kit/debug-info';
 import { BIOS_IRQ_STUB } from '@gba-kit/gba-emulator';
 
 import {
@@ -631,13 +631,6 @@ export class Inspector {
   hints(scope: NameScope | null): ExprHints {
     const di = this.program.debugInfo;
     return {
-      symbolSigned: (path) => {
-        try {
-          return this.#namedNode(path, scope)?.scalar?.signed;
-        } catch {
-          return undefined;
-        }
-      },
       rootType: (name) => this.#rootType(name, scope),
       typeByName: (name) => {
         const entry = di?.scopes.typeByName(name);
@@ -694,7 +687,9 @@ export class Inspector {
     if (address === undefined) {
       return null;
     }
-    return { address, length: lvalue.bits ? lvalue.bits.span : scalarLength(lvalue.type) };
+    // An aggregate is watched where it starts rather than silently across its whole
+    // extent, so a type with no single word to it falls back to the word there.
+    return { address, length: lvalue.bits ? lvalue.bits.span : scalarSize(lvalue.type) || 4 };
   }
 
   /**
@@ -954,25 +949,4 @@ function fromBytes(bytes: Uint8Array): bigint {
     v = (v << 8n) | BigInt(bytes[i]!);
   }
   return v;
-}
-
-/**
- * What a data breakpoint watches for a value of `type`: a scalar's own bytes, and
- * otherwise the word at its address — an aggregate is watched where it starts
- * rather than silently across its whole extent.
- */
-function scalarLength(type: TypeDesc): number {
-  switch (type.kind) {
-    case 'int':
-    case 'uint':
-    case 'bool':
-    case 'char':
-    case 'uchar':
-    case 'float':
-    case 'enum':
-    case 'pointer':
-      return type.size || 4;
-    default:
-      return 4;
-  }
 }

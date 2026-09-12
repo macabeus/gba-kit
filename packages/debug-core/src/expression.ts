@@ -35,7 +35,7 @@
  * an offset, a read width, a signedness flag.
  */
 import type { BitPlacement, MemberDesc, TypeDesc } from '@gba-kit/debug-info';
-import { bitfieldPlacement, isSignedType } from '@gba-kit/debug-info';
+import { bitfieldPlacement, isSignedType, scalarSize } from '@gba-kit/debug-info';
 
 /** Where a name keeps its value at this moment, or why it is nowhere. */
 export type ExprPlace = { address: number } | { word: number } | { absent: string };
@@ -69,16 +69,11 @@ export interface ExprEnv {
 
 /** What the compiler may ask about the program, so the closure it builds is exact without an env. */
 export interface ExprHints {
-  /** Whether a name the debug info does not type reads as signed; undefined when unknown (taken as unsigned). */
-  symbolSigned?(name: string): boolean | undefined;
   /** The C type of the root name `name` where this expression is compiled; undefined when it has none. */
   rootType?(name: string): TypeDesc | undefined;
   /** A type by its C spelling — `Entity`, `struct Entity`, `u16` — for a cast. */
   typeByName?(name: string): TypeDesc | undefined;
 }
-
-/** A bitfield inside the bytes a place names: LSB-first, and how many bytes cover it. */
-export type ExprBits = BitPlacement;
 
 /**
  * The storage an expression names. `address` answers undefined when the value is
@@ -90,7 +85,8 @@ export interface ExprLvalue {
   address: (env: ExprEnv) => number | undefined;
   /** the C type of what is stored there, absent when the program does not type it */
   type?: TypeDesc;
-  bits?: ExprBits;
+  /** which bits of the bytes at `address` the value occupies, when it is a bitfield */
+  bits?: BitPlacement;
 }
 
 /**
@@ -272,19 +268,15 @@ export function hex8(v: number): string {
 
 /** The width a scalar of `type` is read at, or 0 when no 32-bit word can hold it. */
 function scalarWidth(type: TypeDesc): number {
-  switch (type.kind) {
-    case 'int':
-    case 'uint':
-    case 'bool':
-    case 'char':
-    case 'uchar':
-    case 'enum':
-      return type.size >= 1 && type.size <= 4 ? type.size : 0;
-    case 'pointer':
-      return type.size >= 1 && type.size <= 4 ? type.size : 4;
-    default:
-      return 0;
+  if (type.kind === 'float') {
+    return 0; // the grammar works on integers; a float is refused by name, not read narrow
   }
+  const size = scalarSize(type);
+  if (size >= 1 && size <= 4) {
+    return size;
+  }
+  // An address is four bytes on this machine whatever the debug info says of it.
+  return type.kind === 'pointer' ? 4 : 0;
 }
 
 /** Why this value is not a 32-bit word: the grammar's limit, said in the program's terms. */
@@ -366,7 +358,7 @@ interface Located {
   type: TypeDesc;
   /** where the value is kept right now: one question, so one answer per evaluation */
   spot: (env: ExprEnv) => ExprPlace;
-  bits?: ExprBits;
+  bits?: BitPlacement;
 }
 
 /**
@@ -719,14 +711,15 @@ class Parser {
   /**
    * A root the DWARF does not type — a decomp's `gUnk_*`, a linker symbol, a label:
    * the env answers its word and its address from the symbol table, which is all a
-   * program without debug info offers. Nothing below it can be measured, so `.`,
+   * program without debug info offers. A symbol table states no signedness either,
+   * so the word is read as it is stored. Nothing below it can be measured, so `.`,
    * `->` and `[` on it say so through {@link belowUntyped}.
    */
   #untypedRoot(name: string): Node {
     return {
       text: name,
       root: name,
-      signed: this.hints.symbolSigned?.(name) ?? false,
+      signed: false,
       eval: (env) => {
         const v = env.symbol(name);
         if (v === undefined) {
@@ -865,7 +858,7 @@ function member(base: Node, name: string, arrow: boolean, text: string): Node {
 }
 
 /** Where a member sits in its struct: a byte offset, and the bits of it when it is a bitfield. */
-function placeOf(m: MemberDesc): { offset: number; bits?: ExprBits } {
+function placeOf(m: MemberDesc): { offset: number; bits?: BitPlacement } {
   const placement = bitfieldPlacement(m);
   return placement ? { offset: placement.byteOffset, bits: placement.bits } : { offset: m.offset };
 }

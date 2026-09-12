@@ -64,6 +64,7 @@ export {
   isSignedType,
   le32,
   quoteBytes,
+  scalarSize,
   toBigInt,
   toInt,
   type BitPlacement,

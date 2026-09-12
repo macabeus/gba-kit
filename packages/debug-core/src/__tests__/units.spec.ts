@@ -109,6 +109,7 @@ const env: ExprEnv = {
 
 /** What the DWARF would say: `gHp` is deliberately untyped, as a symbol map's names are. */
 const ROOT_TYPES: Record<string, TypeDesc> = {
+  gSigned: int32,
   g_samples: samplesType,
   gEntityInfo: entityArray,
   p: entityPtr,
@@ -122,7 +123,6 @@ const NAMED_TYPES: Record<string, TypeDesc> = {
   int: int32,
 };
 const hints: ExprHints = {
-  symbolSigned: (path) => (path === 'gSigned' ? true : undefined),
   rootType: (name) => ROOT_TYPES[name],
   typeByName: (name) => NAMED_TYPES[name],
 };
