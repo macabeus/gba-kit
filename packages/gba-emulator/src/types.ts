@@ -34,6 +34,51 @@ export const HBLANK_CYCLES = 272;
 /** Target frame rate (Hz) */
 export const FRAME_RATE = CPU_FREQ / CYCLES_PER_FRAME; // ~59.7275 Hz
 
+// ─── Boot state ───────────────────────────────────────────────────────
+
+/**
+ * Where the BIOS leaves each mode's stack pointer, in the order it sets them —
+ * `[mode, sp]`, so the boot sequence is explicit rather than left to the order a
+ * record happens to enumerate in. These are the top of IWRAM, so they also bound
+ * how deep a call stack can be: an unwinder walks until the frame addresses reach
+ * them.
+ */
+export const BOOT_STACK_POINTERS: ReadonlyArray<readonly [mode: number, sp: number]> = [
+  [0x12, 0x03007fa0], // IRQ
+  [0x13, 0x03007fe0], // SVC
+  [0x1f, 0x03007f00], // SYS — the user stack
+];
+
+/**
+ * The push the BIOS interrupt stub enters a handler with: `stmfd sp!, {r0-r3,
+ * r12, lr}`, written into the BIOS at 0x80. The stub the emulator installs and the
+ * block an unwinder reads back are both counted off this one word, so they cannot
+ * drift apart.
+ */
+export const BIOS_IRQ_STUB_PUSH = 0xe92d500f;
+
+/**
+ * The stub as something reading the machine's stack sees it: the mode it runs in,
+ * and where the interrupted lr sits in the block it pushed. The offset is counted
+ * off {@link BIOS_IRQ_STUB_PUSH}, since `stmfd` lays its registers out lowest
+ * first at the lowest address.
+ */
+export const BIOS_IRQ_STUB = {
+  mode: 0x12, // IRQ
+  lrOffset: slotOf(14, BIOS_IRQ_STUB_PUSH & 0xffff) * 4,
+} as const;
+
+/** Which slot of a block transfer's register list `reg` occupies. */
+function slotOf(reg: number, list: number): number {
+  let slot = 0;
+  for (let r = 0; r < reg; r++) {
+    if (list & (1 << r)) {
+      slot++;
+    }
+  }
+  return slot;
+}
+
 // ─── Screen Dimensions ────────────────────────────────────────────────
 
 export const SCREEN_WIDTH = 240;

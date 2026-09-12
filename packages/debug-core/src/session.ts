@@ -11,7 +11,7 @@
  * before an instruction runs and charges nothing, so a stopped machine can be
  * inspected, resumed, or replayed exactly.
  */
-import type { VarNode } from '@gba-kit/debug-info';
+import { FRAME_METHODS, type FrameMethod, type VarNode } from '@gba-kit/debug-info';
 import type { HardwareEvent, WatchpointRead, WatchpointWrite } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
@@ -27,7 +27,14 @@ import {
 import { type PackedSnapshot, packSnapshot, unpackSnapshot } from './delta.js';
 import type { CompiledExpr, ExprEnv } from './expression.js';
 import type { Host } from './host.js';
-import { type DisassembledLine, type EvaluateResult, Inspector, type Scope, type StackFrame } from './inspector.js';
+import {
+  type DisassembledLine,
+  type EvaluateResult,
+  Inspector,
+  type Scope,
+  type StackFrame,
+  type StackTrace,
+} from './inspector.js';
 import { type IoRegisterValue, ioRegisterAt, ioSnapshot } from './io.js';
 import { LabelStore, type LabelsFile } from './labels.js';
 import { Machine, romHash } from './machine.js';
@@ -200,7 +207,7 @@ export class Session {
   #busy = false;
   /** inlined layers of frame 0 the views hide; AUTO_HIDDEN until the stop resolves it */
   #hiddenInline = AUTO_HIDDEN;
-  #frameCache: StackFrame[] | null = null;
+  #frameCache: StackTrace | null = null;
   #dataDisposers: Array<() => void> = [];
   #tracing = false;
   #hooksInstalled = false;
@@ -734,11 +741,13 @@ export class Session {
   }
 
   /**
-   * Step out: run to the caller's next instruction. The caller is the unwound
-   * frame when the ELF has call-frame information; an exception handler entered
-   * through the BIOS (nothing names its return) is left by its mode changing back;
-   * without either, lr is trusted only while it still points outside this function
-   * (once the function has made a call, lr is that call's return, not ours).
+   * Step out: run to the caller's next instruction, where the caller and the stack
+   * pointer it will have are both established — that pair is what keeps the run
+   * from stopping at a recursive call of the same address. A handler whose caller
+   * is the BIOS boundary has no such address to run to and is left by its mode
+   * changing back instead. Failing all of that, lr is trusted only where it points
+   * at program code outside this function, since once the function has made a call
+   * lr is that call's return.
    */
   stepOut(): void {
     this.#requireStopped('step out');
@@ -750,16 +759,13 @@ export class Session {
     }
     const caller =
       frames.find((f) => f.index > 0 && f.virtual && f.virtual.physical !== top?.virtual?.physical) ?? frames[1];
-    if (caller && !caller.heuristic) {
-      this.#runStep(stepOutTo(this.#stepContext(), caller.address, caller.virtual?.physical.regs[13]), 'step out');
+    const callerSp = caller?.virtual?.physical.regs[13];
+    if (caller && callerSp !== undefined && canRunToCaller(caller.method)) {
+      this.#runStep(stepOutTo(this.#stepContext(), caller.address, callerSp), 'step out');
       return;
     }
     if (isExceptionMode(this.machine.gba.armCpu.getMode())) {
       this.#runStep(stepOutOfException(this.#stepContext()), 'step out');
-      return;
-    }
-    if (!caller) {
-      this.#refuseStep('step out', 'no caller frame to step out to');
       return;
     }
     const lr = (this.machine.registers[14]! & ~1) >>> 0;
@@ -767,7 +773,14 @@ export class Session {
     if (fn && lr >= fn.lo && lr < fn.hi) {
       this.#refuseStep(
         'step out',
-        'the caller is unknown: no call-frame information, and lr is the return of a call this function made',
+        'the caller is unknown: nothing above this frame was established, and lr is the return of a call this function made',
+      );
+      return;
+    }
+    if (!this.program.isExecutableCode(lr)) {
+      this.#refuseStep(
+        'step out',
+        'the caller is unknown: nothing above this frame was established, and lr does not point at program code',
       );
       return;
     }
@@ -1020,12 +1033,24 @@ export class Session {
   // ─── inspection ────────────────────────────────────────────────────
 
   #frames(): StackFrame[] {
-    if (!this.#frameCache) {
-      this.#frameCache = this.inspector.callStack(this.#hiddenInline);
-    }
+    return this.#stack().frames;
+  }
+
+  #stack(): StackTrace {
+    this.#frameCache ??= this.inspector.callStack(this.#hiddenInline);
     return this.#frameCache;
   }
 
+  /**
+   * The call stack and why it ends where it does. The reason is shown rather than
+   * implied: a stack that stops because nothing could be established looks exactly
+   * like one that stops because it is over.
+   */
+  stack(): StackTrace {
+    return this.#stack();
+  }
+
+  /** The frames alone, for a caller that has no use for why the walk ended. */
   callStack(): StackFrame[] {
     return this.#frames();
   }
@@ -1823,6 +1848,15 @@ export class Session {
     this.#handlers = [];
     this.#state = 'disposed';
   }
+}
+
+/**
+ * Whether a step-out can run to a caller this method produced: the address has to
+ * be a place execution will really arrive at, which is the method's own answer in
+ * {@link FRAME_METHODS} rather than a list kept here.
+ */
+function canRunToCaller(method: FrameMethod): boolean {
+  return FRAME_METHODS[method].runnable;
 }
 
 /** The hit-count test of a breakpoint of either kind, if it has one. */

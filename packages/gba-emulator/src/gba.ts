@@ -24,6 +24,8 @@ import { Scheduler } from './scheduler.js';
 import { GbaSystemBus } from './system-bus.js';
 import { TimerController } from './timers.js';
 import {
+  BIOS_IRQ_STUB_PUSH,
+  BOOT_STACK_POINTERS,
   CYCLES_PER_SCANLINE,
   DmaStartTiming,
   EventId,
@@ -150,9 +152,9 @@ export class Gba {
 
     // Create CPU with GBA BIOS SWI handler
     this.armCpu = new ArmCpu(this.bus, { swiHandler: (cpu, swiNumber) => handleSwi(cpu, swiNumber, this.#biosEnv) });
-    // Initialize banked stack pointers (mimics real BIOS boot)
-    this.armCpu.setBankedSP(0x12, 0x03007fa0); // IRQ mode SP
-    this.armCpu.setBankedSP(0x13, 0x03007fe0); // SVC mode SP
+    for (const [mode, sp] of BOOT_STACK_POINTERS) {
+      this.armCpu.setBankedSP(mode, sp);
+    }
 
     // Install HLE BIOS IRQ handler stub
     this.#installBiosStub();
@@ -574,7 +576,7 @@ export class Gba {
     // handler via LDR PC, restore, return. The BIOS does NOT acknowledge
     // IF or update the BIOS IF mirror — that's the user handler's job.
     // 0x80: STMFD SP!, {R0-R3, R12, LR}   — save regs to IRQ stack
-    this.bus.writeBios32(0x80, 0xe92d500f);
+    this.bus.writeBios32(0x80, BIOS_IRQ_STUB_PUSH);
     // 0x84: MOV R0, #0x04000000            — IO register base
     this.bus.writeBios32(0x84, 0xe3a00301);
     // 0x88: ADD LR, PC, #0                 — LR = 0x88+8 = 0x90 (return point)

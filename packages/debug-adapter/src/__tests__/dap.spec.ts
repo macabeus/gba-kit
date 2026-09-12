@@ -688,8 +688,16 @@ describe('inspection', () => {
     const client = await launch({ breakpoints: [{ path: UTIL, lines: [await lineOf(UTIL, 'g_bonus_calls++;')] }] });
     await stopped(client, 'continue', { threadId: 1 });
     const { stackFrames } = await client.body<DebugProtocol.StackTraceResponse['body']>('stackTrace', { threadId: 1 });
-    expect(stackFrames.map((f) => f.name)).toEqual(['add_bonus', 'update', 'main']);
+    // The frames, then one row saying where the stack ends and why, rather than
+    // leaving the reader to guess whether it ran out of program or of information.
+    expect(stackFrames.map((f) => f.name)).toEqual([
+      'add_bonus',
+      'update',
+      'main',
+      "— the stack ends here: the outermost frame's saved return address reads 0, which is either the root of the stack or a slot the program overwrote",
+    ]);
     expect(stackFrames[0]!.source).toEqual({ name: 'util.c', path: UTIL });
+    expect(stackFrames.at(-1)).toMatchObject({ presentationHint: 'label', id: -1 });
     const { scopes } = await client.body<DebugProtocol.ScopesResponse['body']>('scopes', { frameId: 0 });
     expect(scopes.map((s) => s.name)).toEqual(['Locals', 'Globals (this file)', 'Registers', 'Machine']);
     expect(scopes[0]!.presentationHint).toBe('locals');
@@ -1006,6 +1014,73 @@ describe('inspection', () => {
       count: 0,
     });
     expect(zero).toMatchObject({ data: '', unreadableBytes: 0 });
+  });
+});
+
+describe('a stack the ELF has no call-frame information for', () => {
+  // thumb-O0 with .debug_frame removed — the shape a decomp ELF has. Same ROM, so
+  // only what the unwinder has to work with changes.
+  const NO_CFI = join(fixtures, 'build', 'thumb-O0-nocfi.elf');
+
+  it('unwinds past the two frames an lr guess gives, saying how each frame was recovered', async () => {
+    const client = await launch({
+      elf: NO_CFI,
+      breakpoints: [{ path: UTIL, lines: [await lineOf(UTIL, 'return result;')] }],
+    });
+    await stopped(client, 'continue', { threadId: 1 });
+    const { stackFrames, totalFrames } = await client.body<DebugProtocol.StackTraceResponse['body']>('stackTrace', {
+      threadId: 1,
+    });
+    expect(stackFrames.map((f) => f.name)).toEqual([
+      'add_bonus',
+      'update (from its prologue)',
+      'main (from its prologue)',
+      expect.stringContaining('the stack ends here'),
+    ]);
+    expect(totalFrames).toBe(4);
+    expect(stackFrames.at(-1)).toMatchObject({ presentationHint: 'label', id: -1 });
+    // A measured frame is not a guess, so it is not dimmed.
+    expect(stackFrames.slice(0, 3).every((f) => f.presentationHint === 'normal')).toBe(true);
+  });
+
+  it('answers scopes, variables and evaluate for a frame that is not the top one', async () => {
+    const client = await launch({
+      elf: NO_CFI,
+      breakpoints: [{ path: UTIL, lines: [await lineOf(UTIL, 'return result;')] }],
+    });
+    await stopped(client, 'continue', { threadId: 1 });
+    const { scopes } = await client.body<DebugProtocol.ScopesResponse['body']>('scopes', { frameId: 1 });
+    const locals = await variables(client, scopes[0]!.variablesReference);
+    expect(locals.map((v) => v.name)).toEqual(['bonus', 'total']);
+    expect(locals[0]!.value).toBe('2');
+    const { result } = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: 'bonus',
+      frameId: 1,
+    });
+    expect(result).toContain('2');
+    // and the registers of that frame, not the machine's
+    const registers = await variables(client, scopes.find((s) => s.name === 'Registers')!.variablesReference);
+    expect(registers.find((v) => v.name === 'r0')!.value).toBe('<not recovered in this frame>');
+    expect(registers.find((v) => v.name === 'sp')!.value).not.toBe('<not recovered in this frame>');
+  });
+
+  it('unwinds an interrupt handler deep enough that frame 3 is real, and names the boundary', async () => {
+    const client = await launch({ elf: NO_CFI });
+    await client.body('setFunctionBreakpoints', { breakpoints: [{ name: 'isr' }] });
+    await stopped(client, 'continue', { threadId: 1 });
+    const { stackFrames } = await client.body<DebugProtocol.StackTraceResponse['body']>('stackTrace', { threadId: 1 });
+    expect(stackFrames.map((f) => f.name).slice(0, 4)).toEqual([
+      'isr',
+      '<BIOS stub +0x90>',
+      'wait_vblank',
+      'main (from its prologue)',
+    ]);
+    expect(stackFrames[1]!.source).toBeUndefined();
+    const { scopes } = await client.body<DebugProtocol.ScopesResponse['body']>('scopes', { frameId: 3 });
+    expect(scopes.map((s) => s.name)).toContain('Registers');
+    // The interrupted frame says which of its registers the handler may be holding.
+    const interrupted = await client.body<DebugProtocol.ScopesResponse['body']>('scopes', { frameId: 2 });
+    expect(interrupted.scopes[0]!.name).toMatch(/^Locals — r4–r11 were not recovered across the interrupt/);
   });
 });
 

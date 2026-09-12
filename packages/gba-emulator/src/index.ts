@@ -26,6 +26,9 @@ export type { ScriptingHost, WatchHit } from './scripting.js';
 
 // Types and constants
 export {
+  BIOS_IRQ_STUB,
+  BIOS_IRQ_STUB_PUSH,
+  BOOT_STACK_POINTERS,
   CPU_FREQ,
   CYCLES_PER_FRAME,
   CYCLES_PER_SCANLINE,

@@ -14,15 +14,46 @@ import { DW_AT, DW_FORM, DW_OP, DW_TAG } from '../dwarf/constants.js';
 import { EntryIndex, type UnitInfo, addrxValue } from '../dwarf/entries.js';
 import { type EvalContext, evaluate } from '../dwarf/expr.js';
 import { entryRanges, locationAt } from '../dwarf/lists.js';
-import type { Memory } from '../scopes.js';
+import { ElfFile } from '../elf.js';
+import { DwarfScopes, type Memory } from '../scopes.js';
 import type { DwarfEntry } from '../types.js';
+import { measurePrologue } from '../unwind/prologue.js';
+import { type MachineFacts, frameConfidence } from '../unwind/types.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DEVKITARM_ELF = join(here, '..', '..', 'test-projects', 'devkitarm-min', 'build', 'min.elf');
 const AGBCC_ELF = join(here, '..', '..', 'test-projects', 'agbcc-min', 'build', 'min.elf');
 
-const devkitarm = DebugInfo.fromElf(new Uint8Array(readFileSync(DEVKITARM_ELF)));
-const agbcc = DebugInfo.fromElf(new Uint8Array(readFileSync(AGBCC_ELF)));
+const devkitarmBytes = new Uint8Array(readFileSync(DEVKITARM_ELF));
+const agbccBytes = new Uint8Array(readFileSync(AGBCC_ELF));
+/**
+ * A DIE as the parsers read one: attributes as `[form, value]` pairs, since every
+ * address attribute is resolved through its form, plus the offsets that place the
+ * entry in its unit.
+ */
+function die(
+  tag: number,
+  attrs: Record<number, [form: number, value: unknown]> = {},
+  ids: { offset?: number; unitOffset?: number } = {},
+): DwarfEntry {
+  const entry: DwarfEntry = {
+    tag,
+    offset: ids.offset ?? 0,
+    attrs: new Map(),
+    forms: new Map(),
+    children: [],
+    version: 5,
+    unitOffset: ids.unitOffset ?? 0,
+  };
+  for (const [at, [form, value]] of Object.entries(attrs)) {
+    entry.attrs.set(Number(at), value as never);
+    entry.forms.set(Number(at), form);
+  }
+  return entry;
+}
+
+const devkitarm = DebugInfo.fromElf(devkitarmBytes);
+const agbcc = DebugInfo.fromElf(agbccBytes);
 
 /** A memory that answers with a fixed byte pattern: byte at `a` is `a & 0xff`. */
 const patternMemory: Memory = {
@@ -34,6 +65,58 @@ const patternMemory: Memory = {
     return out;
   },
 };
+
+/** A section holding no bytes in the file (`.bss`), whose addresses read as nothing here. */
+const SHT_NOBITS = 8;
+
+/**
+ * The machine an unwinder sees when the only things that exist are this ELF's
+ * loaded bytes and a stack written down by the test. Nothing is banked, so the
+ * exception boundary has nothing to read — these tests are about the layers that
+ * work from the ELF.
+ */
+function elfFacts(di: DebugInfo, bytes: Uint8Array, stack: Record<number, number> = {}): MachineFacts {
+  const elf = ElfFile.parse(bytes);
+  const loaded = elf.sections.filter((s) => s.addr > 0 && s.size > 0 && s.type !== SHT_NOBITS);
+  const byteAt = (address: number): number | undefined => {
+    const s = loaded.find((sec) => address >= sec.addr && address < sec.addr + sec.size);
+    return s ? bytes[s.offset + (address - s.addr)] : undefined;
+  };
+  const read = (address: number, size: number): number | undefined => {
+    if (size === 4 && stack[address] !== undefined) {
+      return stack[address];
+    }
+    let v = 0;
+    for (let i = size - 1; i >= 0; i--) {
+      const b = byteAt(address + i);
+      if (b === undefined) {
+        return undefined;
+      }
+      v = v * 256 + b;
+    }
+    return v >>> 0;
+  };
+  return {
+    read16: (a) => read(a, 2),
+    read32: (a) => read(a, 4),
+    isExecutable: (a) => di.isExecutable(a),
+    nameable: (a) => di.scopes.functionAt(a) !== null || di.pcToFunction(a) !== null,
+    isaAt: (a) => di.modeAt(a),
+    functionBounds: (pc) => {
+      const fn = di.pcToFunction(pc);
+      return fn ? { lo: fn.address, hi: fn.end } : null;
+    },
+    mode: 0x1f,
+    bankedSp: () => undefined,
+    bankedLr: () => undefined,
+    spsr: () => undefined,
+    codeFloor: 0x4000,
+    isCodeRegion: (a) => a >= 0x4000,
+    stackBoundFor: () => 0x03008000,
+    exceptionReturnBias: () => -4,
+    exceptionStub: { mode: 0x12, lrOffset: 20 },
+  };
+}
 
 function regs(overrides: Record<number, number>): number[] {
   const r = new Array<number>(16).fill(0);
@@ -150,30 +233,77 @@ describe('call-frame information', () => {
     expect(scopes.frames.cfa(main, regs({}))).toBe(0x03007f00);
   });
 
-  it('unwinds one physical frame from inside add back to its caller through the saved lr', () => {
-    const scopes = devkitarm.scopes;
-    const add = devkitarm.symbolToAddress('add')!;
-    // At entry nothing is pushed yet: the caller's pc is lr, and its sp is ours.
-    const frames = scopes.physicalFrames(
-      add,
-      regs({ 14: 0x08000123 }),
-      patternMemory,
-      (a) => a >= 0x08000000 && a < 0x08010000,
-    );
-    expect(frames.length).toBe(2);
-    expect(frames[1]!.pc).toBe(0x08000122);
-    expect(frames[1]!.regs[13]).toBe(0x03007f00);
-    expect(frames[1]!.exact).toBe(true);
+  it('unwinds from inside bump to main and stops where main returns to nothing', () => {
+    // bump's frame, then main's, both described by .debug_frame; main's own saved
+    // lr is 0, which is how the root of the stack announces itself.
+    const facts = elfFacts(devkitarm, devkitarmBytes, { 0x03007ef4: 0x0800001b, 0x03007efc: 0 });
+    const walk = devkitarm.scopes.physicalFrames(0x08000034, regs({ 13: 0x03007ef0 }), facts);
+    expect(walk.frames.map((f) => f.method)).toEqual(['live', 'cfi']);
+    expect(walk.frames.map((f) => f.pc)).toEqual([0x08000034, 0x0800001a]);
+    expect(walk.frames.map((f) => f.cfa)).toEqual([0x03007ef8, 0x03007f00]);
+    expect(walk.frames[1]!.regs[13]).toBe(0x03007ef8);
+    expect(frameConfidence(walk.frames[1]!.method)).toBe('derived');
+    expect(walk.end).toMatch(/saved return address reads 0/);
   });
 
-  it('agbcc has no .debug_frame, so only the LR guess is offered and it is flagged', () => {
-    const scopes = agbcc.scopes;
-    expect(scopes.frames.size).toBe(0);
-    const add = agbcc.symbolToAddress('add')!;
-    const frames = scopes.physicalFrames(add, regs({ 14: 0x08000201 }), patternMemory, () => true);
-    expect(frames.length).toBe(2);
-    expect(frames[1]!.exact).toBe(false);
-    expect(frames[1]!.pc).toBe(0x08000200);
+  it("measures devkitARM's bump, whose push the scheduler moved below four other instructions", () => {
+    const facts = elfFacts(devkitarm, devkitarmBytes);
+    const bump = devkitarm.symbolToAddress('bump')!;
+    const measured = measurePrologue(bump, 0x08000034, bump + 0x78, 'thumb', facts);
+    expect(measured.ok && measured.frame.frameSize).toBe(8);
+    expect(measured.ok && Object.fromEntries(measured.frame.saved)).toEqual({ 4: -8, 14: -4 });
+  });
+
+  it('unwinds agbcc, which has no .debug_frame at all, three frames deep from its prologues', () => {
+    expect(agbcc.scopes.frames.size).toBe(0);
+    // Stopped inside bump, which pushed {r4,r5,r6,lr}; main pushed {r4,lr} and
+    // _start reached it with a bl, so the chain is measurable all the way down.
+    const facts = elfFacts(agbcc, agbccBytes, {
+      0x03007ee0: 0x0000c0de, // bump's saved r4
+      0x03007eec: 0x080000bb, // bump's saved lr: the return of main's `bl bump`
+      0x03007ef4: 0x08000005, // main's saved lr: the return of _start's `bl main`
+    });
+    const walk = agbcc.scopes.physicalFrames(0x08000020, regs({ 13: 0x03007ee0, 4: 0x1111 }), facts);
+    expect(walk.frames.map((f) => f.method)).toEqual(['live', 'prologue', 'prologue']);
+    expect(walk.frames.map((f) => f.pc)).toEqual([0x08000020, 0x080000ba, 0x08000004]);
+    expect(walk.frames.map((f) => (f.fn ? agbcc.scopes.name(f.fn) : null))).toEqual(['bump', 'main', null]);
+    expect(walk.frames.map((f) => frameConfidence(f.method))).toEqual(['derived', 'derived', 'derived']);
+    // Every unwound frame knows its own stack pointer, which is what makes an
+    // agbcc local — whose frame base is DW_OP_reg13 — readable at all.
+    expect(walk.frames.map((f) => f.regs[13])).toEqual([0x03007ee0, 0x03007ef0, 0x03007ef8]);
+    expect(walk.frames[1]!.regs[4]).toBe(0x0000c0de);
+    expect(walk.frames[1]!.regs.slice(0, 4)).toEqual([undefined, undefined, undefined, undefined]);
+    expect(walk.end).toMatch(/lr has been overwritten/);
+  });
+});
+
+describe('a subprogram the linker discarded', () => {
+  /**
+   * A DIE whose code was garbage-collected keeps its `high_pc` and has its
+   * `low_pc` zeroed — the shape balatro-gba's ELF carries, with a 0x1a8-byte
+   * range starting at 0. Accepting it makes every address below 0x1a8 resolve to a
+   * function that is not there, which on a GBA is the whole BIOS exception-stub
+   * region: the interrupt dispatcher would be named after a deleted function and
+   * given its source lines.
+   */
+  it('claims no address, while a real one still resolves', () => {
+    const elf = ElfFile.parse(devkitarmBytes);
+    const scope = (tag: number, lo: number, size: number): DwarfEntry =>
+      die(
+        tag,
+        {
+          [DW_AT.low_pc]: [DW_FORM.addr, lo],
+          [DW_AT.high_pc]: [DW_FORM.data4, size],
+          [DW_AT.name]: [DW_FORM.string, `fn${lo}`],
+        },
+        { offset: lo },
+      );
+    const root = scope(DW_TAG.compile_unit, 0x08000100, 0x200);
+    root.children.push(scope(DW_TAG.subprogram, 0, 0x1a8), scope(DW_TAG.subprogram, 0x08000100, 0x20));
+    const scopes = new DwarfScopes([root], elf, []);
+    expect(scopes.functionAt(0x8e)).toBeNull();
+    expect(scopes.functionAt(0x1a0)).toBeNull();
+    expect(scopes.name(scopes.functionAt(0x08000104)!)).toBe('fn134217984');
   });
 });
 
@@ -224,17 +354,10 @@ describe('DWARF expressions', () => {
 });
 
 describe('unit lookup', () => {
-  const die = (offset: number, unitOffset: number, attrs: Record<number, unknown> = {}): DwarfEntry => ({
-    tag: DW_TAG.compile_unit,
-    offset,
-    attrs: new Map(Object.entries(attrs).map(([at, v]) => [Number(at), v as never])),
-    forms: new Map(),
-    children: [],
-    version: 5,
-    unitOffset,
-  });
-  const first = die(0x0b, 0, { [DW_AT.low_pc]: 0x08000000 });
-  const second = die(0x4b, 0x40, { [DW_AT.low_pc]: 0x08001000 });
+  const cu = (offset: number, unitOffset: number, lowPc: number): DwarfEntry =>
+    die(DW_TAG.compile_unit, { [DW_AT.low_pc]: [DW_FORM.addr, lowPc] }, { offset, unitOffset });
+  const first = cu(0x0b, 0, 0x08000000);
+  const second = cu(0x4b, 0x40, 0x08001000);
   const index = new EntryIndex([first, second]);
 
   it('answers with the unit whose offset the entry names', () => {
@@ -244,7 +367,7 @@ describe('unit lookup', () => {
   it('throws naming the offset when the entry belongs to no indexed unit', () => {
     // The per-unit facts (lowPc, the .debug_addr/loclists/rnglists bases) are what every
     // address form is resolved against, so a substituted unit misplaces addresses silently.
-    expect(() => index.unit(die(0x90, 0x80))).toThrow(/0x80/);
+    expect(() => index.unit(cu(0x90, 0x80, 0x08002000))).toThrow(/0x80/);
   });
 });
 
@@ -254,37 +377,20 @@ describe('range and location lists', () => {
   const unit = (version: number, lowPc: number): UnitInfo => ({
     offset: 0,
     version,
-    root: entry(0x11, {}),
+    root: die(0x11),
     lowPc,
     addrBase: 8,
     loclistsBase: 12,
     rnglistsBase: 12,
   });
-  function entry(tag: number, attrs: Record<number, [number, unknown]>): DwarfEntry {
-    const e: DwarfEntry = {
-      tag,
-      offset: 0,
-      attrs: new Map(),
-      forms: new Map(),
-      children: [],
-      version: 5,
-      unitOffset: 0,
-    };
-    for (const [at, [form, value]] of Object.entries(attrs)) {
-      e.attrs.set(Number(at), value as never);
-      e.forms.set(Number(at), form);
-    }
-    return e;
-  }
-
   it('high_pc is an offset in a constant form and an address in an address form', () => {
     const u = unit(5, 0);
-    const byOffset = entry(0x2e, {
+    const byOffset = die(0x2e, {
       [DW_AT.low_pc]: [DW_FORM.addr, 0x08000100],
       [DW_AT.high_pc]: [DW_FORM.data4, 0x20],
     });
     expect(entryRanges(byOffset, u, LE)).toEqual([[0x08000100, 0x08000120]]);
-    const byAddress = entry(0x2e, {
+    const byAddress = die(0x2e, {
       [DW_AT.low_pc]: [DW_FORM.addr, 0x08000100],
       [DW_AT.high_pc]: [DW_FORM.addr, 0x08000130],
     });
@@ -300,7 +406,7 @@ describe('range and location lists', () => {
     expect(addrxValue(0, u, { littleEndian: false, addr: big })).toBe(0x08001234);
     // a rnglistx offset is an index-table read too: the same list, addressed through it
     const rnglists = new Uint8Array([0, 0, 0, 0, 4, 0x10, 0x20, 0]);
-    const indexed = entry(0x1d, { [DW_AT.ranges]: [DW_FORM.rnglistx, 0] });
+    const indexed = die(0x1d, { [DW_AT.ranges]: [DW_FORM.rnglistx, 0] });
     const base = { ...unit(5, 0x08000000), rnglistsBase: 0 };
     for (const [littleEndian, table] of [
       [true, new Uint8Array([4, 0, 0, 0])],
@@ -315,7 +421,7 @@ describe('range and location lists', () => {
   it('reads a DWARF 5 range list of offset pairs against the unit base', () => {
     // DW_RLE_offset_pair(0x10, 0x20), DW_RLE_offset_pair(0x40, 0x48), DW_RLE_end_of_list
     const rnglists = new Uint8Array([4, 0x10, 0x20, 4, 0x40, 0x48, 0]);
-    const e = entry(0x1d, { [DW_AT.ranges]: [DW_FORM.sec_offset, 0] });
+    const e = die(0x1d, { [DW_AT.ranges]: [DW_FORM.sec_offset, 0] });
     expect(entryRanges(e, unit(5, 0x08000000), { ...LE, rnglists })).toEqual([
       [0x08000010, 0x08000020],
       [0x08000040, 0x08000048],
@@ -330,14 +436,14 @@ describe('range and location lists', () => {
     dv.setUint32(8, 0x10, true);
     dv.setUint32(12, 0x18, true);
     // 0,0 terminator already zero
-    const e = entry(0x0b, { [DW_AT.ranges]: [DW_FORM.data4, 0] });
+    const e = die(0x0b, { [DW_AT.ranges]: [DW_FORM.data4, 0] });
     expect(entryRanges(e, unit(4, 0), { ...LE, ranges })).toEqual([[0x08001010, 0x08001018]]);
   });
 
   it('picks the location-list entry covering pc, and says where the value was otherwise', () => {
     // DW_LLE_offset_pair(0x00, 0x10) → reg0 ; DW_LLE_offset_pair(0x10, 0x30) → reg4 ; end
     const loclists = new Uint8Array([4, 0x00, 0x10, 1, DW_OP.reg0, 4, 0x10, 0x30, 1, DW_OP.reg0 + 4, 0]);
-    const e = entry(0x34, { [DW_AT.location]: [DW_FORM.sec_offset, 0] });
+    const e = die(0x34, { [DW_AT.location]: [DW_FORM.sec_offset, 0] });
     const u = unit(5, 0x08000000);
     expect(locationAt(e, DW_AT.location, 0x08000008, u, { ...LE, loclists })).toEqual({
       kind: 'expr',
@@ -356,11 +462,11 @@ describe('range and location lists', () => {
   });
 
   it('an exprloc is the expression itself, and a missing attribute is none', () => {
-    const e = entry(0x34, { [DW_AT.location]: [DW_FORM.exprloc, new Uint8Array([DW_OP.fbreg, 0x7c])] });
+    const e = die(0x34, { [DW_AT.location]: [DW_FORM.exprloc, new Uint8Array([DW_OP.fbreg, 0x7c])] });
     expect(locationAt(e, DW_AT.location, 0, unit(5, 0), LE)).toEqual({
       kind: 'expr',
       expr: new Uint8Array([DW_OP.fbreg, 0x7c]),
     });
-    expect(locationAt(entry(0x34, {}), DW_AT.location, 0, unit(5, 0), LE)).toEqual({ kind: 'none' });
+    expect(locationAt(die(0x34), DW_AT.location, 0, unit(5, 0), LE)).toEqual({ kind: 'none' });
   });
 });

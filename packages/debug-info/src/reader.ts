@@ -3,6 +3,11 @@
  * (ARM GBA); big-endian for MSB-first targets (MIPS, PowerPC) — the DWARF
  * payload's byte order always matches its ELF container's.
  */
+/** An address as this package writes one down: eight hex digits, no prefix. */
+export function hex8(value: number): string {
+  return value.toString(16).padStart(8, '0');
+}
+
 export class Cursor {
   readonly view: DataView;
   readonly bytes: Uint8Array;

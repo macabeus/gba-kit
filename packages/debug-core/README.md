@@ -26,13 +26,17 @@ What a session does:
   and leaf functions step correctly. Inlined calls are hidden layers: a step-over
   walks past them, a step-into reveals one, and a stop at the entry of an inlined
   call shows the call site until stepped into.
-- **Reads frames, scopes and values from the DWARF.** Physical frames unwound
-  through `.debug_frame` (with a link-register fallback for hand-written
-  assembly), inlined frames in between, locals and parameters with their location
-  at this PC, globals, registers and machine state. Values unfold structs,
-  unions, bitfields, arrays, enums and pointers; a scalar that lives in memory is
-  writable, as are the `r0`–`r15` rows of the Registers scope, while a local the
-  compiler kept in a register is shown rather than written.
+- **Reads frames, scopes and values from the DWARF.** Physical frames unwound as
+  deep as the stack goes — through `.debug_frame` where the ELF has it and the pc
+  is not in a teardown it stopped describing, across an interrupt boundary into the
+  code it interrupted, by measuring the callee's own prologue or the teardown left
+  to run, and last by testing a stack word for credibility — with inlined frames in
+  between, locals and parameters with their location at this PC, globals, registers
+  and machine state. Each frame says which of those recovered it, and a register the
+  frame did not establish says so instead of showing the callee's value. Values
+  unfold structs, unions, bitfields, arrays, enums and pointers; a scalar that lives
+  in memory is writable, as are the `r0`–`r15` rows of the Registers scope, while a
+  local the compiler kept in a register is shown rather than written.
 - **Evaluates a Mesen-style expression grammar** for conditions, logpoints and
   watches: C operators, `[addr]` / `{addr}` / `u32(addr)` reads, registers,
   `frame` / `scanline` / `cycle`, symbols and `a.b[3].c` paths (locals of the

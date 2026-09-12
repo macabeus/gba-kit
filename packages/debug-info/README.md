@@ -18,7 +18,9 @@ queries a source-level debugger needs:
 - **scopes, variables and unwinding** (`scopes`) — the function and the inlined
   calls containing a PC, the variables visible there and where they live at that
   PC (location lists, DWARF expressions, `.debug_frame` CFA), typed value trees,
-  and call-frame unwinding.
+  and stack unwinding — the teardown a return has left to run, call-frame
+  information, prologue analysis, then a credibility-tested stack word, each frame
+  recording which answered.
 - **the `-g3` macro table** (`macros`, `parseDebugMacinfo`) — the only place an
   address-cast `#define gCounter (*(u16 *)0x03001234)` name survives: a macro leaves
   no symbol and no DIE.

@@ -14,6 +14,7 @@ import {
   type DataAccess,
   EVENT_BREAKPOINT_KINDS,
   type EventBreakpointKind,
+  type FrameMethod,
   type InputRecording,
   MAX_RECORDINGS,
   REGISTER_NAMES,
@@ -21,6 +22,7 @@ import {
   type Scope,
   type SearchOptions,
   Session,
+  type StackFrame,
   type StopInfo,
   type VarNode,
   decodeTake,
@@ -753,20 +755,32 @@ export class GbaDebugSession extends DebugSession {
     args: DebugProtocol.StackTraceArguments,
   ): void {
     this.#inspect(response, (s) => {
-      const all = s.callStack();
+      const stack = s.stack();
+      const rows: DebugProtocol.StackFrame[] = stack.frames.map((f) => ({
+        id: f.index,
+        name: frameName(f),
+        source: f.source ? this.#source(f.source.path) : undefined,
+        line: f.source?.line ?? 0,
+        column: f.source ? 1 : 0,
+        instructionPointerReference: `0x${hex8(f.address)}`,
+        presentationHint: f.heuristic ? 'subtle' : 'normal',
+      }));
+      // Where the stack ends, and why, as the last row: a walk that stopped because
+      // nothing further could be established looks exactly like one that ran out of
+      // program unless it says so. It is not a frame, so it carries an id no frame
+      // can have, which keeps a client from asking it for scopes or variables.
+      rows.push({
+        id: -1,
+        name: `— the stack ends here: ${stack.end}`,
+        line: 0,
+        column: 0,
+        presentationHint: 'label',
+      });
       const start = args.startFrame ?? 0;
-      const frames = (args.levels ? all.slice(start, start + args.levels) : all.slice(start)).map(
-        (f): DebugProtocol.StackFrame => ({
-          id: f.index,
-          name: f.name,
-          source: f.source ? this.#source(f.source.path) : undefined,
-          line: f.source?.line ?? 0,
-          column: f.source ? 1 : 0,
-          instructionPointerReference: `0x${hex8(f.address)}`,
-          presentationHint: f.heuristic ? 'subtle' : 'normal',
-        }),
-      );
-      response.body = { stackFrames: frames, totalFrames: all.length };
+      response.body = {
+        stackFrames: args.levels ? rows.slice(start, start + args.levels) : rows.slice(start),
+        totalFrames: rows.length,
+      };
     });
   }
 
@@ -775,7 +789,9 @@ export class GbaDebugSession extends DebugSession {
       response.body = {
         scopes: s.scopes(args.frameId).map(
           (scope): DebugProtocol.Scope => ({
-            name: scope.name,
+            // The protocol has no per-scope hint, so the name is the only place a
+            // caveat about the values inside can be read.
+            name: scope.doubt ? `${scope.name} — ${scope.doubt}` : scope.name,
             presentationHint: scope.kind === 'locals' ? 'locals' : scope.kind === 'registers' ? 'registers' : undefined,
             variablesReference: this.#handle(s, {
               scope: scope.kind,
@@ -1699,6 +1715,39 @@ function dataSpec(b: DebugProtocol.DataBreakpoint): DataSpec | string {
     hitCondition: b.hitCondition,
   };
 }
+
+/**
+ * A frame's row, with how it was recovered appended when that is worth saying.
+ * DAP gives a frame no field for this but its name, and dimming the row alone
+ * does not say what about it is uncertain. An inferred row is in question itself,
+ * so it carries the caveat; an established one carries only which layer
+ * established it, and its caveats belong on the scope whose values they concern.
+ */
+function frameName(frame: StackFrame): string {
+  const suffix = (frame.heuristic ? frame.doubt : null) ?? METHOD_LABELS[frame.method];
+  return suffix ? `${frame.name} (${suffix})` : frame.name;
+}
+
+/**
+ * How a row says it was recovered, or null when it needs no saying. A frame that
+ * call-frame information described, or that an exception boundary spelled out, is
+ * simply true; one measured from a prologue or taken from a register is a
+ * different kind of claim, and a reader deciding whether to trust its variables
+ * needs to be told which.
+ *
+ * Exhaustive over {@link FrameMethod} on purpose: a new layer of the unwinder has
+ * to decide here what its rows say, instead of silently arriving unlabelled.
+ */
+const METHOD_LABELS: Record<FrameMethod, string | null> = {
+  live: null,
+  cfi: null,
+  exception: null,
+  prologue: 'from its prologue',
+  lr: 'from lr',
+  'lr-corroborated': 'from lr, corroborated',
+  scan: 'inferred from the stack',
+  guess: 'from lr, unverified',
+};
 
 /** Marker: the handler already sent the response itself. */
 const SENT = Symbol('sent');

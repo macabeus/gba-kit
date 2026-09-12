@@ -1,3 +1,4 @@
+import { MODE_IRQ, MODE_SYS } from '@gba-kit/arm-emulator/arm-cpu';
 import { describe, expect, it } from 'vitest';
 
 import { applySnapshotDelta, decodeDelta, deltaSnapshot, encodeDelta } from '../delta.js';
@@ -12,6 +13,7 @@ import {
 import { ManualHost } from '../host.js';
 import { ioRegisterAt } from '../io.js';
 import { LabelStore } from '../labels.js';
+import { stackBoundFor } from '../machine.js';
 import { LOG, TILES, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
 import { decodeTake, encodeTake, recordingToScript, toSegments } from '../recorder.js';
 import { Ring } from '../rings.js';
@@ -377,6 +379,24 @@ describe('source mapper', () => {
       exists: (p) => existing.has(p),
     });
     expect(stripped.toLocal('/docker/build/source/main.c')).toBe('/home/me/game/source/main.c');
+  });
+});
+
+describe('the stack bound', () => {
+  it("is the mode's own stack top, or the top of the mirror a relocated stack is in", () => {
+    // Not the end of IWRAM: the IRQ and SVC stacks sit above the SYS stack's top, and
+    // a search that ran past it would read the interrupt stub's pushed block and
+    // report a caller for the program's entry point.
+    expect(stackBoundFor(MODE_SYS, 0x03007cd4)).toBe(0x03007f00);
+    expect(stackBoundFor(MODE_IRQ, 0x03007f90)).toBe(0x03007fa0);
+    // IWRAM repeats every 32 KB and EWRAM every 256 KB up to the next region, and a
+    // stack pointer in a mirror addresses the same memory — so a bound taken from
+    // the region's base would sit below the stack and end every walk at frame 0.
+    expect(stackBoundFor(MODE_SYS, 0x03fffcd4)).toBe(0x04000000);
+    expect(stackBoundFor(MODE_SYS, 0x0203fff0)).toBe(0x02040000);
+    // A pointer in no region a stack belongs in leaves only the boot layout.
+    expect(stackBoundFor(MODE_IRQ, undefined)).toBe(0x03007fa0);
+    expect(stackBoundFor(MODE_SYS, 0x08000000)).toBe(0x03007f00);
   });
 });
 

@@ -4,4 +4,4 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 docker run --rm -v "$PWD":/fixtures -w /fixtures devkitpro/devkitarm:latest bash -lc 'make clean && make'
-echo "Built build/{thumb-O0,thumb-O2,arm-O0}.{elf,gba}"
+echo "Built build/{thumb-O0,thumb-O2,arm-O0}.{elf,gba} + thumb-O0-nocfi.elf"

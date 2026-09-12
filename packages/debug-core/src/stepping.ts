@@ -8,16 +8,13 @@
  * body but presents the call-site line, hiding the inlined layer; a step-into
  * reveals one layer without executing.
  */
+import { MODE_SYS, MODE_USR } from '@gba-kit/arm-emulator/arm-cpu';
 import type { DwarfEntry } from '@gba-kit/debug-info';
 
 import type { Machine } from './machine.js';
 import type { Program } from './program.js';
 
 export type StepPredicate = (pc: number) => boolean;
-
-/** ARM7TDMI modes that are not an exception being handled: user and system. */
-const MODE_USR = 0x10;
-const MODE_SYS = 0x1f;
 
 /** Whether the CPU is inside an exception handler (IRQ, FIQ, SVC, abort, undefined). */
 export function isExceptionMode(mode: number): boolean {
