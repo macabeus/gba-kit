@@ -121,6 +121,44 @@ describe('host bridge', () => {
     expect(posted.length).toBe(2);
   });
 
+  it('opens the file dialogs the host has, and answers when it has none', async () => {
+    const posted: HostToTransport[] = [];
+    const asked: unknown[] = [];
+    const bridge = new HostBridge({
+      post: (m) => posted.push(m),
+      pickFile: async (options) => {
+        asked.push(options);
+        return { name: 'Klonoa (USA).sav', bytes: Uint8Array.of(1, 2, 3) };
+      },
+      saveFile: async (options) => {
+        asked.push(options);
+        return true;
+      },
+    });
+    const filters = { 'Save files': ['sav'] };
+
+    await bridge.receive({ type: 'pickFile', id: 1, title: 'Import a .sav file', filters });
+    expect(asked[0]).toEqual({ title: 'Import a .sav file', filters });
+    // the file crosses back base64-encoded, the way it crossed out
+    expect(posted[0]).toEqual({ type: 'response', id: 1, body: { name: 'Klonoa (USA).sav', bytes: 'AQID' } });
+
+    await bridge.receive({
+      type: 'saveFile',
+      id: 2,
+      title: 'Export the cartridge save',
+      suggestedName: 'save.sav',
+      filters,
+      bytes: 'AQID',
+    });
+    expect(asked[1]).toMatchObject({ suggestedName: 'save.sav', bytes: Uint8Array.of(1, 2, 3) });
+    expect(posted[1]).toEqual({ type: 'response', id: 2, body: true });
+
+    // a host with no dialog says so rather than leaving the webview waiting
+    const silent = new HostBridge({ post: (m) => posted.push(m) });
+    await silent.receive({ type: 'pickFile', id: 3, title: 'x', filters });
+    expect(posted[2]).toEqual({ type: 'response', id: 3, error: 'this host cannot open files' });
+  });
+
   it('knows the DAP request behind each control', () => {
     expect(CONTROL_REQUESTS.stepInstruction).toEqual({
       command: 'next',

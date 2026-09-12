@@ -7,6 +7,7 @@
 import type { GbaKitCommand, GbaKitRequests, StateBody } from '@gba-kit/debug-core/protocol';
 
 import type { PanelId } from './panels/DebugPanels.js';
+import { base64ToBytes, bytesToBase64 } from './render.js';
 
 // A host that only serves the transport (an extension host bundling no React) imports this module alone.
 export type { PanelId };
@@ -49,6 +50,22 @@ export interface Transport {
   /** Show text to the user in an editor (a recording's script, an exported symbol file), when the host has one. */
   openText?(content: string, language: string, title: string): void;
   /**
+   * Ask the user for a file and read it, when the host has a way to open one. Null
+   * when they picked nothing. `filters` is extension lists by description, the way an
+   * editor's open dialog takes them.
+   */
+  pickFile?(options: { title: string; filters: Record<string, string[]> }): Promise<{
+    name: string;
+    bytes: Uint8Array;
+  } | null>;
+  /** Write bytes to a file the user names, when the host has a way to save one. False when they cancelled. */
+  saveFile?(options: {
+    title: string;
+    suggestedName: string;
+    filters: Record<string, string[]>;
+    bytes: Uint8Array;
+  }): Promise<boolean>;
+  /**
    * Bring one of the tool panels into view (a stopped recording, in the Recording
    * tab), when the host has somewhere to show it. Whoever renders `DebugPanels`
    * hears it through `onShowPanel`; a host with several views routes it between them.
@@ -68,6 +85,16 @@ export type TransportToHost =
   /** the last listener of a feed left: the host may stop sending it */
   | { type: 'unsubscribe'; what: Feed }
   | { type: 'openText'; content: string; language: string; title: string }
+  | { type: 'pickFile'; id: number; title: string; filters: Record<string, string[]> }
+  /** `bytes` is base64: nothing has crossed webview→host as a typed array here, and text always has */
+  | {
+      type: 'saveFile';
+      id: number;
+      title: string;
+      suggestedName: string;
+      filters: Record<string, string[]>;
+      bytes: string;
+    }
   | { type: 'showPanel'; panel: PanelId };
 
 /** Messages a host sends to a webview transport. */
@@ -135,7 +162,7 @@ export function createMessageTransport(port: MessagePort): Transport {
   });
 
   const send = (message: TransportToHost): Promise<unknown> => {
-    if (message.type !== 'request' && message.type !== 'control') {
+    if (!('id' in message)) {
       port.post(message);
       return Promise.resolve(undefined);
     }
@@ -187,6 +214,15 @@ export function createMessageTransport(port: MessagePort): Transport {
     onAudio: (listener) => listen('audio', listeners.audio, listener),
     onLabels: (listener) => listen('labels', listeners.labels, listener),
     openText: (content, language, title) => port.post({ type: 'openText', content, language, title }),
+    async pickFile(options) {
+      const picked = (await send({ type: 'pickFile', id: nextId++, ...options })) as {
+        name: string;
+        bytes: string;
+      } | null;
+      return picked && { name: picked.name, bytes: base64ToBytes(picked.bytes) };
+    },
+    saveFile: ({ bytes, ...rest }) =>
+      send({ type: 'saveFile', id: nextId++, ...rest, bytes: bytesToBase64(bytes) }) as Promise<boolean>,
     showPanel: (panel) => port.post({ type: 'showPanel', panel }),
     // the subscription tells the host this view can show a panel: one asked for before it loaded arrives now
     onShowPanel: (listener) => listen('showPanel', listeners.showPanel, listener),
@@ -201,9 +237,14 @@ export interface TransportBackend {
   /** the webview's last listener of the feed left */
   unsubscribe(what: Feed): void;
   openText?(content: string, language: string, title: string): void;
+  pickFile?: Transport['pickFile'];
+  saveFile?: Transport['saveFile'];
   /** a webview asked for a tool panel; the host brings the view that holds it up and tells it which */
   showPanel?(panel: PanelId): void;
 }
+
+/** What a host that can open no file answers, rather than leaving the webview waiting. */
+const NO_FILE_DIALOG = 'this host cannot open files';
 
 /** Handle one message from a webview transport on the host side. */
 export async function serveTransport(
@@ -236,8 +277,36 @@ export async function serveTransport(
     case 'openText':
       backend.openText?.(message.content, message.language, message.title);
       return;
+    case 'pickFile':
+    case 'saveFile': {
+      const serve = message.type === 'pickFile' ? backend.pickFile : backend.saveFile;
+      if (!serve) {
+        reply({ type: 'response', id: message.id, error: NO_FILE_DIALOG });
+        return;
+      }
+      try {
+        const body =
+          message.type === 'pickFile'
+            ? await backend.pickFile!({ title: message.title, filters: message.filters })
+            : await backend.saveFile!({
+                title: message.title,
+                suggestedName: message.suggestedName,
+                filters: message.filters,
+                bytes: base64ToBytes(message.bytes),
+              });
+        reply({ type: 'response', id: message.id, body: encodePicked(body) });
+      } catch (err) {
+        reply({ type: 'response', id: message.id, error: (err as Error).message });
+      }
+      return;
+    }
     case 'showPanel':
       backend.showPanel?.(message.panel);
       return;
   }
+}
+
+/** A picked file crosses back base64-encoded, the way it crossed out. */
+function encodePicked(body: { name: string; bytes: Uint8Array } | boolean | null): unknown {
+  return body && typeof body === 'object' ? { name: body.name, bytes: bytesToBase64(body.bytes) } : body;
 }

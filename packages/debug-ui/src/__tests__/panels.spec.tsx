@@ -88,6 +88,32 @@ describe('screen panel controls', () => {
     expect(html).toContain('Save state');
     expect(renderToString(<ScreenPanel transport={transport} saveStates={false} />)).not.toContain('gk-drawer');
   });
+
+  /** A menu item whose host cannot serve it is not shown at all. */
+  it('offers the .sav actions the host can serve, and no menu when it can serve neither', () => {
+    current.state = stoppedAt(0);
+    const drawer = (extra: Partial<Transport>): string =>
+      renderToString(<ScreenPanel transport={{ ...transport, ...extra }} />);
+    const pickFile = (): Promise<null> => Promise.resolve(null);
+    const saveFile = (): Promise<boolean> => Promise.resolve(false);
+
+    expect(drawer({})).not.toContain('gk-menu');
+    expect(drawer({ pickFile })).toContain('Import from a .sav file');
+    expect(drawer({ pickFile })).not.toContain('Export to a .sav file');
+    expect(drawer({ saveFile })).toContain('Export to a .sav file');
+    expect(drawer({ saveFile })).not.toContain('Import from a .sav file');
+    const both = drawer({ pickFile, saveFile });
+    expect(both).toContain('Import from a .sav file');
+    expect(both).toContain('Export to a .sav file');
+  });
+
+  it('keeps the menu shut until it is opened, and says so to a screen reader', () => {
+    current.state = stoppedAt(0);
+    const html = renderToString(<ScreenPanel transport={{ ...transport, pickFile: () => Promise.resolve(null) }} />);
+    expect(html).toContain('aria-haspopup="menu"');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toMatch(/<div class="gk-menu-list" role="menu" hidden=""/);
+  });
 });
 
 describe('editable name', () => {

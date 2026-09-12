@@ -14,6 +14,18 @@ export function cssColor(color: number): string {
   return `#${(color & 0xffffff).toString(16).padStart(6, '0')}`;
 }
 
+/**
+ * Bytes to base64 a character at a time: a `.sav` is up to 64 KB, and spreading that
+ * into `String.fromCharCode` is as many arguments as the call stack will hold.
+ */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
 export function base64ToBytes(text: string): Uint8Array {
   const binary = atob(text);
   const out = new Uint8Array(binary.length);

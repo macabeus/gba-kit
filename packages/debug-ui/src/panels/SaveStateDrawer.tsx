@@ -5,7 +5,7 @@
  */
 import { useState } from 'react';
 
-import { Button, Icon } from '../components.js';
+import { Button, Icon, Menu } from '../components.js';
 import { useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
 import { SaveStatesView } from './save-states.js';
@@ -17,6 +17,28 @@ export function SaveStateDrawer({ transport, stopped }: { transport: Transport; 
   const newSave = (): void => {
     void saves.save().then(() => setOpen(true));
   };
+
+  /**
+   * A `.sav` becomes a state the same way the button beside it does: added, then the
+   * drawer opened on it. Neither it nor the export is gated on `stopped` — the import
+   * builds its snapshot on a machine of its own and the export reads copies of the
+   * backing arrays, so neither borrows the machine's execution.
+   */
+  const items = [
+    transport.pickFile && {
+      label: 'Import from a .sav file',
+      onSelect: () =>
+        void saves.importSave(transport.pickFile!).then((added) => {
+          if (added) {
+            setOpen(true);
+          }
+        }),
+    },
+    transport.saveFile && {
+      label: 'Export to a .sav file',
+      onSelect: () => void saves.exportSave(transport.saveFile!),
+    },
+  ].filter((item) => item !== undefined);
 
   return (
     <div className="gk-drawer">
@@ -40,6 +62,7 @@ export function SaveStateDrawer({ transport, stopped }: { transport: Transport; 
           <Icon name="add" />
           Save state
         </Button>
+        {items.length > 0 && <Menu label="More save state actions" items={items} disabled={saves.busy} />}
       </div>
       {saves.error && <span className="gk-bad gk-small">{saves.error}</span>}
       {open &&

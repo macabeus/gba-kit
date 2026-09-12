@@ -51,7 +51,9 @@ export function checkSaveFile(save: CartridgeSave, byteLength: number): void {
     refuseFlash1m(save);
   }
   if (!SAVE_FILE_SIZES[save.type].includes(byteLength)) {
-    throw new Error(`this ROM declares ${save.id}, whose save is ${sizesOf(save.type)}; this file is ${byteLength} bytes`);
+    throw new Error(
+      `this ROM declares ${save.id}, whose save is ${sizesOf(save.type)}; this file is ${byteLength} bytes`,
+    );
   }
 }
 

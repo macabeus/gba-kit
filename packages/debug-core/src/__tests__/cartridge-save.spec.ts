@@ -24,7 +24,7 @@ describe('which .sav belongs in which cartridge', () => {
   });
 
   it.each([
-    [EEPROM, 32768, "this ROM declares EEPROM_V121, whose save is 512 or 8192 bytes; this file is 32768 bytes"],
+    [EEPROM, 32768, 'this ROM declares EEPROM_V121, whose save is 512 or 8192 bytes; this file is 32768 bytes'],
     [SRAM, 65536, 'this ROM declares SRAM_V113, whose save is 32768 bytes; this file is 65536 bytes'],
     [FLASH, 32768, 'this ROM declares FLASH512_V130, whose save is 65536 bytes; this file is 32768 bytes'],
     [FLASH, 0, 'this ROM declares FLASH512_V130, whose save is 65536 bytes; this file is 0 bytes'],

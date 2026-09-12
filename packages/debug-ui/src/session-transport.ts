@@ -10,6 +10,9 @@ import {
   EVENT_BREAKPOINT_KINDS,
   type InputRecording,
   type Session,
+  base64ToBytes,
+  bytesToBase64,
+  freeStateName,
   renameSaveState,
   saveStateMeta,
 } from '@gba-kit/debug-core';
@@ -46,6 +49,8 @@ export interface SessionTransportOptions {
     remove?(nameOrPath: string): Promise<boolean>;
   };
   openText?: Transport['openText'];
+  pickFile?: Transport['pickFile'];
+  saveFile?: Transport['saveFile'];
 }
 
 /** What a client is told about a saved state, read back from the state itself. */
@@ -231,6 +236,23 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         memoryStates.set(target, { ...held, text });
         return { ...stateInfoOf(target, target, text), createdAt: held.createdAt } as never;
       }
+      case 'gba-kit/importSave': {
+        const { bytes, name } = a as A<'gba-kit/importSave'>;
+        const stateName = await freeStateName(name?.trim() || 'imported save', async (candidate) =>
+          options.states ? (await options.states.load(candidate)) !== null : memoryStates.has(candidate),
+        );
+        const text = session.importSaveState(base64ToBytes(bytes), stateName);
+        const createdAt = new Date().toISOString();
+        const path = options.states ? await options.states.save(stateName, text, 0) : stateName;
+        if (!options.states) {
+          memoryStates.set(stateName, { text, frame: 0, createdAt });
+        }
+        return { ...stateInfoOf(stateName, path, text), createdAt } as never;
+      }
+      case 'gba-kit/exportSave': {
+        const { bytes, declared } = session.exportSaveFile();
+        return { bytes: bytesToBase64(bytes), size: bytes.length, declared } as never;
+      }
       case 'gba-kit/deleteState': {
         const { name, path } = a as A<'gba-kit/deleteState'>;
         const key = stateKey(name, path);
@@ -336,6 +358,8 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       return () => labelListeners.delete(listener);
     },
     openText: options.openText,
+    pickFile: options.pickFile,
+    saveFile: options.saveFile,
     showPanel(panel) {
       panelListeners.forEach((l) => l(panel));
     },

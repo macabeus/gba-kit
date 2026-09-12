@@ -23,6 +23,9 @@ export interface BridgeSession {
 export interface BridgeSink {
   post(message: HostToTransport): void;
   openText?(content: string, language: string, title: string): void;
+  /** the webview asked for a file to read, or for one to write; the host opens the editor's dialog */
+  pickFile?: TransportBackend['pickFile'];
+  saveFile?: TransportBackend['saveFile'];
   /** the webview asked for a tool panel to be shown; the host brings up the view that holds it */
   showPanel?(panel: PanelId): void;
   /** the feeds the webview wants changed (`subscriptions`); the host stops producing what no panel takes */
@@ -77,6 +80,8 @@ export class HostBridge {
         }
       },
       openText: sink.openText?.bind(sink),
+      pickFile: sink.pickFile?.bind(sink),
+      saveFile: sink.saveFile?.bind(sink),
       showPanel: sink.showPanel?.bind(sink),
     };
   }

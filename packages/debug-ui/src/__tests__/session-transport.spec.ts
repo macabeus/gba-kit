@@ -16,10 +16,24 @@ const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, '..', '..', '..', 'debug-core', 'test-fixtures');
 const FRAME_MS = 1000 / 59.7275;
 
-async function boot(files?: HostFiles): Promise<{ session: Session; host: ManualHost }> {
+/**
+ * The fixture ROM with an SDK save-type string appended past the code, so a session
+ * has a cartridge that declares a save; `loadRom` only scans the bytes it is handed.
+ */
+function romDeclaring(id: string): Uint8Array {
+  const base = new Uint8Array(readFileSync(join(fixtures, 'build', 'thumb-O0.gba')));
+  const rom = new Uint8Array(base.length + id.length + 4);
+  rom.set(base);
+  for (let i = 0; i < id.length; i++) {
+    rom[base.length + i] = id.charCodeAt(i);
+  }
+  return rom;
+}
+
+async function boot(files?: HostFiles, rom?: Uint8Array): Promise<{ session: Session; host: ManualHost }> {
   const host = new ManualHost(files);
   const session = await Session.create(host, {
-    rom: new Uint8Array(readFileSync(join(fixtures, 'build', 'thumb-O0.gba'))),
+    rom: rom ?? new Uint8Array(readFileSync(join(fixtures, 'build', 'thumb-O0.gba'))),
     elf: new Uint8Array(readFileSync(join(fixtures, 'build', 'thumb-O0.elf'))),
     cwd: fixtures,
     exists: () => true,
@@ -373,5 +387,80 @@ describe('session transport', () => {
     stop();
     transport.showPanel!('trace');
     expect(shown).toEqual(['recording']);
+  });
+});
+
+/**
+ * Importing and exporting a `.sav` here has to answer exactly what the debug adapter
+ * answers — the same bodies, the same numbering, the same refusals — since the panels
+ * cannot tell the two apart.
+ */
+describe('a .sav through the session transport', () => {
+  const sav = (length: number): Uint8Array => Uint8Array.from({ length }, (_, i) => (i * 11 + 5) & 0xff);
+  const toBase64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64');
+
+  it('imports into the states held in memory, numbering rather than writing over one', async () => {
+    const { session } = await boot(undefined, romDeclaring('EEPROM_V121'));
+    const transport = createSessionTransport(session);
+    await transport.request('gba-kit/stepFrame');
+    const args = { bytes: toBase64(sav(512)), name: 'Klonoa - Empire of Dreams (USA)' };
+
+    const first = await transport.request('gba-kit/importSave', args);
+    expect(first).toMatchObject({ name: 'Klonoa - Empire of Dreams (USA)', frame: 0 });
+    const second = await transport.request('gba-kit/importSave', args);
+    expect(second.name).toBe('Klonoa - Empire of Dreams (USA) (2)');
+    expect((await transport.request('gba-kit/listStates')).states.map((s) => s.name).sort()).toEqual([
+      'Klonoa - Empire of Dreams (USA)',
+      'Klonoa - Empire of Dreams (USA) (2)',
+    ]);
+
+    // the machine kept running where it was: the import is not a load
+    expect(await frameOf(transport)).toBe(1);
+    await transport.request('gba-kit/loadState', { path: first.path });
+    expect(await frameOf(transport)).toBe(0);
+    const exported = await transport.request('gba-kit/exportSave');
+    expect(exported).toEqual({ bytes: toBase64(sav(512)), size: 512, declared: 'EEPROM_V121' });
+  });
+
+  it('numbers against the store the host gave it too', async () => {
+    const { session } = await boot(undefined, romDeclaring('SRAM_V113'));
+    const store = new Map<string, string>();
+    const transport = createSessionTransport(session, {
+      states: {
+        list: async () => [...store.keys()].map((name) => ({ name, path: name, frame: 0, createdAt: '' })),
+        save: async (name, text) => {
+          store.set(name, text);
+          return `/states/${name}`;
+        },
+        load: async (nameOrPath) => store.get(nameOrPath.replace('/states/', '')) ?? null,
+      },
+    });
+    const args = { bytes: toBase64(sav(32768)), name: 'game' };
+    expect((await transport.request('gba-kit/importSave', args)).path).toBe('/states/game');
+    expect((await transport.request('gba-kit/importSave', args)).name).toBe('game (2)');
+    expect([...store.keys()]).toEqual(['game', 'game (2)']);
+  });
+
+  it("refuses what the cartridge cannot account for, in the adapter's words", async () => {
+    const { session } = await boot(undefined, romDeclaring('EEPROM_V121'));
+    const transport = createSessionTransport(session);
+    await expect(transport.request('gba-kit/importSave', { bytes: toBase64(sav(32768)) })).rejects.toThrow(
+      'this ROM declares EEPROM_V121, whose save is 512 or 8192 bytes; this file is 32768 bytes',
+    );
+    await expect(transport.request('gba-kit/exportSave')).rejects.toThrow(/4 Kbit or 64 Kbit/);
+  });
+
+  it('has nowhere to put a .sav when the ROM declares no save', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session);
+    await expect(transport.request('gba-kit/importSave', { bytes: toBase64(sav(512)) })).rejects.toThrow(
+      'this ROM declares no save type, so there is nowhere to put a .sav',
+    );
+  });
+
+  it('names an unnamed import rather than leaving the state without one', async () => {
+    const { session } = await boot(undefined, romDeclaring('EEPROM_V121'));
+    const transport = createSessionTransport(session);
+    expect((await transport.request('gba-kit/importSave', { bytes: toBase64(sav(512)) })).name).toBe('imported save');
   });
 });

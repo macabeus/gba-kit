@@ -1,6 +1,7 @@
 import type { SavedStateInfo, StateBody } from '@gba-kit/debug-core/protocol';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
+import { base64ToBytes, bytesToBase64 } from './render.js';
 import type { Transport } from './transport.js';
 
 /**
@@ -111,18 +112,21 @@ export function usePixels(
 export function useAction(): {
   busy: boolean;
   error: string | null;
-  run(what: () => Promise<unknown>, after?: () => void): Promise<void>;
+  /** what `what` answered, or undefined when it failed — which `error` then says. */
+  run<T>(what: () => Promise<T>, after?: () => void): Promise<T | undefined>;
 } {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const run = useCallback(async (what: () => Promise<unknown>, after?: () => void): Promise<void> => {
+  const run = useCallback(async <T>(what: () => Promise<T>, after?: () => void): Promise<T | undefined> => {
     setBusy(true);
     try {
-      await what();
+      const answer = await what();
       setError(null);
       after?.();
+      return answer;
     } catch (err) {
       setError((err as Error).message);
+      return undefined;
     } finally {
       setBusy(false);
     }
@@ -140,10 +144,14 @@ export function useSaveStates(transport: Transport): {
   error: string | null;
   busy: boolean;
   refresh: () => void;
-  save: (name?: string) => Promise<void>;
+  save: (name?: string) => Promise<SavedStateInfo | undefined>;
+  /** A `.sav` the host picks, as a state named after it; false when the user picked nothing. */
+  importSave: (pick: NonNullable<Transport['pickFile']>) => Promise<boolean | undefined>;
+  /** The machine's cartridge backup memory, handed to whatever the host saves files with. */
+  exportSave: (save: NonNullable<Transport['saveFile']>) => Promise<boolean | undefined>;
   load: (state: SavedStateInfo) => Promise<void>;
-  rename: (state: SavedStateInfo, to: string) => Promise<void>;
-  remove: (state: SavedStateInfo) => Promise<void>;
+  rename: (state: SavedStateInfo, to: string) => Promise<SavedStateInfo | undefined>;
+  remove: (state: SavedStateInfo) => Promise<{ deleted: boolean } | undefined>;
 } {
   const connected = useDebugState(transport) !== null;
   const listed = useFetched(transport, (t) => t.request('gba-kit/listStates'), connected ? 'connected' : null);
@@ -157,6 +165,28 @@ export function useSaveStates(transport: Transport): {
     busy: action.busy,
     refresh,
     save: (name) => run(() => transport.request('gba-kit/saveState', { name: name?.trim() || undefined }), refresh),
+    importSave: (pick) =>
+      run(async () => {
+        const file = await pick({ title: 'Import a .sav file', filters: { 'Save files': ['sav'] } });
+        if (!file) {
+          return false;
+        }
+        await transport.request('gba-kit/importSave', {
+          bytes: bytesToBase64(file.bytes),
+          name: file.name.replace(/\.[^.]+$/, ''),
+        });
+        return true;
+      }, refresh),
+    exportSave: (save) =>
+      run(async () => {
+        const body = await transport.request('gba-kit/exportSave');
+        return save({
+          title: 'Export the cartridge save',
+          suggestedName: 'save.sav',
+          filters: { 'Save files': ['sav'] },
+          bytes: base64ToBytes(body.bytes),
+        });
+      }),
     load: (s) => run(() => transport.request('gba-kit/loadState', { path: s.path })),
     rename: (s, to) => run(() => transport.request('gba-kit/renameState', { path: s.path, to }), refresh),
     remove: (s) => run(() => transport.request('gba-kit/deleteState', { path: s.path }), refresh),

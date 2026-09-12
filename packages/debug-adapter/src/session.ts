@@ -1599,10 +1599,7 @@ export class GbaDebugSession extends DebugSession {
     const files = this.#files(session);
     const stateName = await freeStateName(
       name?.trim() || 'imported save',
-      async (candidate) =>
-        (await files
-          .readText(this.#statePath(session, candidate))
-          .catch(() => null)) !== null,
+      async (candidate) => (await files.readText(this.#statePath(session, candidate)).catch(() => null)) !== null,
     );
     const file = this.#statePath(session, stateName);
     const text = session.importSaveState(bytes, stateName);
