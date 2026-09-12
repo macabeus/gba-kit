@@ -345,7 +345,9 @@ describe('expression grammar', () => {
     expect(() => ev('&5')).toThrow(/cannot take the address of '5': it is a value, not a place in memory/);
     expect(() => ev('p + p')).toThrow(/cannot add two pointers \('p' and 'p'\)/);
     expect(() => ev('*gRaw')).toThrow(/a void \* points at no type — read what is there with u8\(gRaw\)/);
-    expect(() => ev('gHandler + 1')).toThrow(/cannot step 'gHandler' \(Handler\): it points at code, not at values/);
+    expect(() => ev('gHandler + 1')).toThrow(
+      /cannot do arithmetic on 'gHandler' \(Handler\): it points at code, not at values/,
+    );
     expect(() => ev('gHandler - gHandler')).toThrow(/it points at code, not at values/);
     expect(() => ev('p - &g_samples[0]')).toThrow(/they point at different types/);
     expect(() => ev('gEntityInfo[0]')).toThrow(/'gEntityInfo\[0\]' is a struct Entity, not a scalar/);

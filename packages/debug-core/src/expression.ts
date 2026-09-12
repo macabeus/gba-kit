@@ -1123,7 +1123,7 @@ function scale(op: '+' | '-', l: Node, r: Node, text: string): Node | null {
   // and a step of one byte would land in the middle of an instruction.
   const code = le?.kind === 'function' ? l : re?.kind === 'function' ? r : null;
   if (code) {
-    throw new Error(`cannot step '${code.text}' (${code.type!.name}): it points at code, not at values`);
+    throw new Error(`cannot do arithmetic on '${code.text}' (${code.type!.name}): it points at code, not at values`);
   }
   const a = l.eval;
   const b = r.eval;
