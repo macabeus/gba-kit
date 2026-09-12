@@ -4,7 +4,7 @@
  * Works off `.symtab` regardless of DWARF, so PC→function resolution covers
  * every linked function (including `INCLUDE_ASM` stubs that have no DWARF).
  */
-import { ElfFile } from './elf.js';
+import { ElfFile, SHF_EXECINSTR } from './elf.js';
 import { Cursor, cstrAt } from './reader.js';
 
 export const STT_NOTYPE = 0;
@@ -39,6 +39,9 @@ export interface ElfSymbol {
 /** What the instruction set is at an address, from GNU `$a` / `$t` / `$d` mapping symbols. */
 export type IsaMode = 'arm' | 'thumb' | 'data';
 
+/** The two of those an instruction can be decoded as. */
+export type CodeIsa = Exclude<IsaMode, 'data'>;
+
 export interface FunctionEntry {
   name: string;
   address: number;
@@ -61,6 +64,8 @@ export interface FunctionEntry {
 interface SectionRange {
   addr: number;
   end: number;
+  /** the section is marked executable, so its addresses can hold code */
+  code: boolean;
 }
 
 interface MappingSymbol {
@@ -79,9 +84,11 @@ export class SymbolIndex {
   readonly #allByName = new Map<string, ElfSymbol[]>();
   /** `$a` / `$t` / `$d` mapping symbols sorted by address. */
   readonly #mappings: MappingSymbol[];
+  readonly #executable: SectionRange[];
 
   constructor(symbols: ElfSymbol[], sections: SectionRange[] = [], mappings: MappingSymbol[] = []) {
     this.symbols = symbols;
+    this.#executable = sections.filter((s) => s.code);
     for (const s of symbols) {
       const existing = this.#byName.get(s.name);
       // First definition wins, EXCEPT a typed symbol (FUNC/OBJECT) always beats a
@@ -135,7 +142,7 @@ export class SymbolIndex {
     elf.sections.forEach((s, i) => {
       if (s.addr > 0 && s.size > 0) {
         loadable.add(i);
-        sections.push({ addr: s.addr, end: s.addr + s.size });
+        sections.push({ addr: s.addr, end: s.addr + s.size, code: (s.flags & SHF_EXECINSTR) !== 0 });
       }
     });
 
@@ -227,6 +234,18 @@ export class SymbolIndex {
   }
 
   /**
+   * The extent of the nearest enclosing symbol of any type, or null. Where
+   * {@link pcToFunction} answers only for symbols the ELF typed `STT_FUNC`, this
+   * answers for the hand-written assembly that carries no `.type` at all — crt0 is
+   * all of it — so an address that has a name also has bounds. `exact` is false
+   * whenever the extent came from the next symbol's address rather than an
+   * `st_size`.
+   */
+  symbolRangeAt(address: number): FunctionEntry | null {
+    return findContaining(this.#all, address);
+  }
+
+  /**
    * Nearest enclosing symbol (function or data object) as `name+0xNN`, or null.
    *
    * `exact` says whether the ELF actually placed `addr` inside that symbol (the symbol
@@ -260,6 +279,16 @@ export class SymbolIndex {
       }
     }
     return m[lo]!.mode;
+  }
+
+  /**
+   * Whether `address` lies in a section the ELF marked executable. A symbol is not
+   * the only thing that vouches for code: crt0's `bl main` returns into a NOTYPE
+   * symbol of size 0, and a mapping symbol can name an `__ewram_end`-style boundary
+   * that no instruction lives at.
+   */
+  isExecutable(address: number): boolean {
+    return this.#executable.some((s) => address >= s.addr && address < s.end);
   }
 
   /** True when the ELF carries mapping symbols at all. */

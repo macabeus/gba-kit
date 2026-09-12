@@ -9,6 +9,17 @@ import { type DwarfSections, type UnitInfo, addrxValue, attrAddress } from './en
 
 export type Range = [number, number];
 
+/**
+ * Whether a code range the ELF still carries describes code the link kept. An
+ * entry for a function the linker discarded keeps its size with its address
+ * zeroed, so its range claims the bottom of the address space — which on this
+ * hardware is the BIOS — and a DIE or an FDE for a deleted function would answer
+ * for an exception stub, complete with source lines and a canonical frame address.
+ */
+export function isLinkedRange(lo: number): boolean {
+  return lo > 0;
+}
+
 /** `[low, high)` ranges of a scope DIE (subprogram, lexical block, inlined subroutine, CU). */
 export function entryRanges(entry: DwarfEntry, unit: UnitInfo, sections: DwarfSections): Range[] {
   const low = attrAddress(entry, DW_AT.low_pc, unit, sections);

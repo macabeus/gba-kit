@@ -3,7 +3,7 @@
  * holding a value, then narrow the candidates as the value changes. Reads through the machine's side-effect-free
  * peek, so a search never disturbs the game.
  */
-import type { Machine } from './machine.js';
+import { type Machine, RAM_REGIONS } from './machine.js';
 
 export type SearchRegion = 'iwram' | 'ewram' | 'both';
 
@@ -15,11 +15,6 @@ export interface SearchOptions {
   limit?: number;
 }
 
-const REGIONS: Record<Exclude<SearchRegion, 'both'>, [number, number]> = {
-  iwram: [0x03000000, 0x8000],
-  ewram: [0x02000000, 0x40000],
-};
-
 export function searchMemory(machine: Machine, options: SearchOptions): number[] {
   const size = options.size;
   const limit = options.limit ?? 10_000;
@@ -29,7 +24,7 @@ export function searchMemory(machine: Machine, options: SearchOptions): number[]
   const regions =
     options.region === 'both' || !options.region ? (['iwram', 'ewram'] as const) : ([options.region] as const);
   for (const name of regions) {
-    const [base, length] = REGIONS[name];
+    const { base, size: length } = RAM_REGIONS[name];
     const data = machine.peekPartial(base, length).data;
     for (let i = 0; i + size <= length; i += size === 1 ? 1 : size) {
       let v = 0;

@@ -24,7 +24,14 @@ export {
 export { Machine, REGISTER_NAMES, isCodeAddress, regionOf, romHash } from './machine.js';
 export { Program, type FunctionRange, type SourceLocation } from './program.js';
 export { SourceMapper, type SourceMapperOptions } from './source-map.js';
-export { hex8, type DisassembledLine, type EvaluateResult, type Scope, type StackFrame } from './inspector.js';
+export {
+  hex8,
+  type DisassembledLine,
+  type EvaluateResult,
+  type Scope,
+  type StackFrame,
+  type StackTrace,
+} from './inspector.js';
 export {
   EVENT_BREAKPOINT_KINDS,
   type Breakpoint,
@@ -87,4 +94,4 @@ export {
 } from './io.js';
 export { filterMemory, searchMemory, type SearchOptions, type SearchRegion } from './memory-search.js';
 export { ManualHost, timerHost, type Host, type HostFiles } from './host.js';
-export type { VarNode } from '@gba-kit/debug-info';
+export type { FrameMethod, VarNode } from '@gba-kit/debug-info';

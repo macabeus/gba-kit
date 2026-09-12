@@ -7,6 +7,7 @@
  * ARM DWARF register numbers: r0–r15 = 0–15. Return address column is 14 (lr).
  */
 import { Cursor } from '../reader.js';
+import { isLinkedRange } from './lists.js';
 
 type Rule =
   | { kind: 'undefined' }
@@ -86,12 +87,14 @@ export class FrameTable {
         if (cie) {
           const start = c.u32();
           const range = c.u32();
-          this.#fdes.push({
-            cie,
-            start: start >>> 0,
-            end: (start + range) >>> 0,
-            instructions: section.subarray(c.offset, end),
-          });
+          if (isLinkedRange(start)) {
+            this.#fdes.push({
+              cie,
+              start: start >>> 0,
+              end: (start + range) >>> 0,
+              instructions: section.subarray(c.offset, end),
+            });
+          }
         }
       }
       c.seek(end);

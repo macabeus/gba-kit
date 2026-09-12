@@ -17,6 +17,14 @@ const fixtures = join(here, '..', '..', 'test-fixtures');
 const FRAME_MS = 1000 / 59.7275;
 
 const VARIANTS = ['thumb-O0', 'thumb-O2', 'arm-O0'] as const;
+/**
+ * thumb-O0 with `.debug_frame` removed — the shape an agbcc decomp ELF has, where
+ * the unwinder must measure prologues instead of reading call-frame information.
+ * The code is untouched, so it pairs with thumb-O0's ROM and only the unwinder's
+ * inputs change.
+ */
+const NO_CFI = 'thumb-O0-nocfi';
+type Variant = (typeof VARIANTS)[number] | typeof NO_CFI;
 
 function lineOf(file: string, snippet: string): number {
   const lines = readFileSync(join(fixtures, 'source', file), 'utf8').split('\n');
@@ -39,14 +47,14 @@ interface Harness {
   finish(maxFrames?: number): StopInfo | null;
 }
 
-function fixture(variant: (typeof VARIANTS)[number]): { rom: Uint8Array; elf: Uint8Array } {
+function fixture(variant: Variant): { rom: Uint8Array; elf: Uint8Array } {
   return {
-    rom: new Uint8Array(readFileSync(join(fixtures, 'build', `${variant}.gba`))),
+    rom: new Uint8Array(readFileSync(join(fixtures, 'build', `${variant === NO_CFI ? 'thumb-O0' : variant}.gba`))),
     elf: new Uint8Array(readFileSync(join(fixtures, 'build', `${variant}.elf`))),
   };
 }
 
-async function boot(variant: (typeof VARIANTS)[number], host: ManualHost = new ManualHost()): Promise<Harness> {
+async function boot(variant: Variant, host: ManualHost = new ManualHost()): Promise<Harness> {
   const session = await Session.create(host, {
     ...fixture(variant),
     cwd: fixtures,
@@ -103,10 +111,12 @@ const START = join(fixtures, 'source', 'start.s');
 /** the closing brace of wait_vblank: the instruction the CPU sits on while it waits */
 const WAIT_RETURN_LINE = lineOf('main.c', '#endif') + 1;
 const IRQ_MODE = 0x12;
+/** The instructions that undo a frame, as the disassembler spells them. */
+const TEARDOWN = /^(pop|ldm|add\s+sp|bx)\b/;
 const SYS_MODE = 0x1f;
 
 /** The line whose code the CPU sits on, halted, after the `swi` (inlined at -O2, so it is the caller's next line). */
-function lineAfterSwi(variant: (typeof VARIANTS)[number]): number {
+function lineAfterSwi(variant: Variant): number {
   return variant === 'thumb-O2' ? lineOf('main.c', 'tick();') : WAIT_RETURN_LINE;
 }
 
@@ -642,17 +652,22 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(top.source!.line).toBe(variant === 'thumb-O2' ? lineOf('main.c', 'tick();') : WAIT_RETURN_LINE);
   });
 
-  it('step out with no caller frame says so instead of running to a stale lr', async () => {
+  it('step out with no caller frame says why instead of running to a stale lr', async () => {
     const h = await boot(variant);
     const line = lineOf('main.c', 'update();');
     h.session.setSourceBreakpoints(MAIN, [{ line }]);
     h.run();
     const frame = h.session.frame;
     h.session.stepOut();
-    expect(h.stops.at(-1)?.description).toMatch(/no caller/);
+    // Two ways for there to be nothing to run to, and the reason says which: lr is
+    // the return of a call main made (-O0), or main never made one and lr is still
+    // the 0 a reset left behind (-O2, where everything main calls is inlined).
+    expect(h.stops.at(-1)?.description).toMatch(
+      variant === 'thumb-O2' ? /lr does not point at program code/ : /lr is the return of a call this function made/,
+    );
     expect(h.session.frame).toBe(frame);
     expect(h.session.callStack()[0]!).toMatchObject({ name: 'main', source: { line } });
-    expect(h.output.at(-1)).toMatch(/^\[console\] step out: no caller/);
+    expect(h.output.at(-1)).toMatch(/^\[console\] step out: the caller is unknown/);
   });
 
   it('hit counts start over on restart', async () => {
@@ -1588,5 +1603,179 @@ describe('Session views and tools', () => {
     expect(h.session.pc).toBe(0x08000000);
     expect(h.session.frame).toBe(0);
     expect(h.run()?.reason).toBe('breakpoint');
+  });
+});
+
+describe('unwinding past the end of the call-frame information', () => {
+  it('bounds the hand-written entry point from its symbol, so the bottom frame can be measured at all', async () => {
+    const h = await boot('thumb-O0');
+    // `_start` is NOTYPE with no size, the shape every hand-written entry point has:
+    // nothing in the ELF types it a function, so only the extent inferred from the
+    // next symbol bounds it — and with no bounds, nothing about the frame at the
+    // bottom of every stack can be measured or even named by the same ELF that
+    // names the address.
+    const range = h.session.program.functionRange(0x08000000);
+    expect(range).toMatchObject({ name: '_start', lo: 0x08000000, exact: false });
+    expect(range!.hi).toBeGreaterThan(0x08000000);
+    expect(h.session.program.symbolName(0x08000000)).toBe('_start');
+  });
+
+  it('measures the chain from the prologues when the ELF has no .debug_frame at all', async () => {
+    const h = await boot(NO_CFI);
+    // The ROM is thumb-O0's, so the ELF still matches it: only the unwinder's inputs differ.
+    expect(h.session.program.identity?.ok).toBe(true);
+    expect(h.session.program.debugInfo!.scopes.frames.size).toBe(0);
+    h.session.setSourceBreakpoints(UTIL, [{ line: lineOf('util.c', 'return result;') }]);
+    expect(h.run()?.reason).toBe('breakpoint');
+    const frames = h.session.callStack();
+    // Three measured frames, rather than the innermost one and a guess from lr.
+    expect(frames.map((f) => f.name)).toEqual(['add_bonus', 'update', 'main']);
+    expect(frames.map((f) => f.method)).toEqual(['live', 'prologue', 'prologue']);
+    expect(frames.every((f) => !f.heuristic)).toBe(true);
+    expect(h.session.stack().end).toMatch(/saved return address reads 0/);
+  });
+
+  it('gives every frame of that chain its own variables, selected by index', async () => {
+    const h = await boot(NO_CFI);
+    h.session.setSourceBreakpoints(UTIL, [{ line: lineOf('util.c', 'return result;') }]);
+    h.run();
+    // A local of the caller, read through its own recovered stack pointer — which
+    // without call-frame information is what a frame base has to resolve against.
+    const caller = h.session.scopes(1).find((s) => s.kind === 'locals')!;
+    expect(caller.nodes.find((n) => n.name === 'bonus')?.value).toBe('2');
+    expect(caller.doubt).toBeNull();
+    expect(h.session.evaluate('bonus', 1).node.value).toBe('2');
+    expect(h.session.evaluate('value', 0).node.value).toBe(String(Number(h.session.evaluate('g_frame', 0).node.value)));
+    // and the innermost frame's own names still win at index 0
+    expect(
+      h.session
+        .scopes(0)
+        .find((s) => s.kind === 'locals')!
+        .nodes.map((n) => n.name),
+    ).toEqual(['value', 'bonus', 'result']);
+  });
+
+  it("reports a caller's scratch registers as unrecovered rather than showing the callee's", async () => {
+    const h = await boot(NO_CFI);
+    h.session.setSourceBreakpoints(UTIL, [{ line: lineOf('util.c', 'return result;') }]);
+    h.run();
+    const inner = h.session.callStack()[0]!.virtual!.physical;
+    const caller = h.session.callStack()[1]!.virtual!.physical;
+    // r0-r3 and r12 belong to the callee under the ABI; the caller's are gone, and
+    // showing the callee's would be a plausible value that is simply false.
+    const byName = Object.fromEntries(
+      h.session
+        .scopes(1)
+        .find((s) => s.kind === 'registers')!
+        .nodes.map((n) => [n.name, n.value]),
+    );
+    for (const name of ['r0', 'r1', 'r2', 'r3', 'r12']) {
+      expect(byName[name]).toBe('<not recovered in this frame>');
+    }
+    // The caller's stack pointer is the callee's frame address, which is the fact
+    // the whole chain is built on.
+    expect(caller.regs[13]).toBe(inner.cfa);
+    expect(caller.regs[13]).toBeGreaterThan(inner.regs[13]!);
+  });
+
+  it('unwinds an interrupt handler into the code it interrupted, on the stack that code was using', async () => {
+    const h = await boot(NO_CFI);
+    h.session.setFunctionBreakpoints([{ functionName: 'isr' }]);
+    h.run();
+    expect(h.session.machine.gba.armCpu.getMode()).toBe(IRQ_MODE);
+    const frames = h.session.callStack();
+    expect(frames.map((f) => f.name)).toEqual(['isr', '<BIOS stub +0x90>', 'wait_vblank', 'main']);
+    expect(frames.map((f) => f.method)).toEqual(['live', 'exception', 'exception', 'prologue']);
+    // The dispatcher is not a function of this program, whatever the symbol table
+    // and a discarded DIE would like to claim about the BIOS region.
+    expect(frames[1]!.source).toBeNull();
+    // An interrupted pc is the next instruction, not a return address: looked up as
+    // a return address it would land on the `swi` and report the line before this.
+    expect(frames[2]!.virtual!.physical.lookupPc).toBe(frames[2]!.address);
+    expect(frames[2]!.source).toEqual({ path: MAIN, line: WAIT_RETURN_LINE });
+    expect(frames[2]!.doubt).toMatch(/r4–r11 were not recovered across the interrupt/);
+    // The interrupted code's own stack, not the handler's.
+    const irqSp = h.session.machine.registers[13]!;
+    expect(frames[2]!.virtual!.physical.regs[13]!).toBeLessThan(irqSp);
+    expect(frames[3]!.source).toEqual({ path: MAIN, line: lineOf('main.c', 'wait_vblank();') });
+  });
+
+  it('steps out into a measured caller, and refuses from one that rests on lr', async () => {
+    const h = await boot(NO_CFI);
+    h.session.setSourceBreakpoints(UTIL, [{ line: lineOf('util.c', 'return result;') }]);
+    h.run();
+    h.session.setSourceBreakpoints(UTIL, []);
+    h.session.stepOut();
+    expect(h.session.callStack()[0]!.name).toBe('update');
+    // At main there is no caller to find: start.s reaches it with `bx r0`, so the
+    // saved return address is the 0 a reset leaves behind.
+    h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'update();') }]);
+    h.run();
+    h.session.stepOut();
+    expect(h.stops.at(-1)?.description).toMatch(/the caller is unknown/);
+    expect(h.session.callStack()).toHaveLength(1);
+    expect(h.session.stack().end).toMatch(/saved return address reads 0/);
+  });
+
+  it('reports the same depth and the same frames after stepping an instruction and back', async () => {
+    const h = await boot(NO_CFI);
+    h.session.setSourceBreakpoints(UTIL, [{ line: lineOf('util.c', 'return result;') }]);
+    h.run();
+    const before = h.session.callStack().map((f) => `${f.name} ${f.method} ${f.address}`);
+    h.session.stepInstruction();
+    h.session.stepBack();
+    expect(h.session.callStack().map((f) => `${f.name} ${f.method} ${f.address}`)).toEqual(before);
+  });
+});
+
+describe.each(VARIANTS)('the call stack on %s', (variant) => {
+  it('unwinds the interrupt handler through the BIOS stub into the interrupted code', async () => {
+    const h = await boot(variant);
+    h.session.setFunctionBreakpoints([{ functionName: 'isr' }]);
+    h.run();
+    const frames = h.session.callStack();
+    // The handler's return address is a BIOS address, so the chain continues only
+    // by crossing the boundary it names.
+    expect(frames.length).toBeGreaterThanOrEqual(3);
+    expect(frames[0]!.name).toBe('isr');
+    expect(frames[1]!.name).toBe('<BIOS stub +0x90>');
+    expect(frames[1]!.source).toBeNull();
+    expect(frames.map((f) => f.name)).toContain('main');
+    // Every frame of it answers for its own variables rather than throwing.
+    for (let i = 0; i < frames.length; i++) {
+      expect(() => h.session.scopes(i)).not.toThrow();
+    }
+  });
+
+  it('names the same caller at every instruction of a return, where the table stops describing the frame', async () => {
+    // gcc's `.debug_frame` is synchronous: its rows track the prologue and stop, so
+    // from the first teardown instruction onward the CFA it gives is a whole frame
+    // too high and the slot it reads for the return address has been popped. What
+    // the epilogue has left to run is the measurement that holds there.
+    const h = await boot(variant);
+    h.session.setSourceBreakpoints(UTIL, [{ line: lineOf('util.c', 'return result;') }]);
+    expect(h.run()?.reason).toBe('breakpoint');
+    h.session.setSourceBreakpoints(UTIL, []);
+    const chain = h.session.callStack().map((f) => f.name);
+    expect(chain[0]).toBe('add_bonus');
+    expect(chain.length).toBeGreaterThanOrEqual(3);
+    let teardowns = 0;
+    for (let step = 0; step < 24 && h.session.program.functionRange(h.session.pc)?.name === 'add_bonus'; step++) {
+      expect(h.session.callStack().map((f) => f.name)).toEqual(chain);
+      if (TEARDOWN.test(h.session.disassemble(h.session.pc, 1)[0]!.text)) {
+        teardowns++;
+      }
+      h.session.stepInstruction();
+    }
+    // The walk has to have passed through the teardown for that to mean anything.
+    expect(teardowns).toBeGreaterThan(0);
+  });
+
+  it('says why the stack ends where it does', async () => {
+    const h = await boot(variant);
+    h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'update();') }]);
+    h.run();
+    expect(h.session.callStack().map((f) => f.name)).toEqual(['main']);
+    expect(h.session.stack().end).toMatch(/saved return address reads 0/);
   });
 });

@@ -131,6 +131,7 @@ describe('the adapter as a process', () => {
       'add_bonus',
       'update',
       'main',
+      expect.stringContaining('the stack ends here'),
     ]);
     const state = await client.send('gba-kit/state');
     expect((state.body as { state: string }).state).toBe('stopped');

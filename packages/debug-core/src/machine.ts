@@ -4,9 +4,26 @@
  * write through `poke`, and the run loop is the machine's own (`runFrame` with a
  * stop predicate), never the CPU stepped by hand.
  */
+import { MODE_SYS } from '@gba-kit/arm-emulator/arm-cpu';
 import type { HardwareEvent, RunOutcome, StopPredicate } from '@gba-kit/gba-emulator';
-import { Gba } from '@gba-kit/gba-emulator';
+import { BOOT_STACK_POINTERS, Gba } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
+
+/**
+ * Below this there is no program code: the region holds the BIOS and its exception
+ * stubs, which is what makes a return address landing here a mode boundary rather
+ * than a caller, and what no program symbol may name.
+ */
+export const LOWEST_PROGRAM_ADDRESS = 0x4000;
+
+/** The two regions a stack or a memory search lives in; both are mirrored every `size`. */
+export const RAM_REGIONS = {
+  iwram: { base: 0x03000000, size: 0x8000 },
+  ewram: { base: 0x02000000, size: 0x40000 },
+} as const;
+
+/** The boot layout by mode, for asking about one mode rather than replaying the sequence. */
+const BOOT_STACKS = new Map(BOOT_STACK_POINTERS);
 
 export const REGISTER_NAMES = [
   'r0',
@@ -52,13 +69,12 @@ export class Machine {
     this.gba.loadRom(this.rom);
     const cpu = this.gba.armCpu;
     cpu.resetState();
-    cpu.switchMode(0x12); // IRQ
-    cpu.registers[13] = 0x03007fa0;
-    cpu.switchMode(0x13); // SVC
-    cpu.registers[13] = 0x03007fe0;
-    cpu.switchMode(0x1f); // SYS
-    cpu.registers[13] = 0x03007f00;
-    cpu.cpsr = 0x1f; // SYS mode, IRQs enabled, ARM state
+    for (const [mode, sp] of BOOT_STACK_POINTERS) {
+      cpu.switchMode(mode);
+      cpu.registers[13] = sp;
+    }
+    cpu.switchMode(MODE_SYS);
+    cpu.cpsr = MODE_SYS; // SYS mode, IRQs enabled, ARM state
     cpu.registers[15] = 0x08000000;
   }
 
@@ -174,7 +190,7 @@ export function regionOf(
 ): 'bios' | 'ewram' | 'iwram' | 'mmio' | 'palette' | 'vram' | 'oam' | 'rom' | 'sram' | null {
   switch ((address >>> 24) & 0xff) {
     case 0x00:
-      return (address & 0x00ffffff) < 0x4000 ? 'bios' : null;
+      return (address & 0x00ffffff) < LOWEST_PROGRAM_ADDRESS ? 'bios' : null;
     case 0x02:
       return 'ewram';
     case 0x03:
@@ -206,6 +222,36 @@ export function regionOf(
 export function isCodeAddress(address: number): boolean {
   const region = regionOf(address);
   return region === 'rom' || region === 'iwram' || region === 'ewram' || region === 'bios';
+}
+
+/**
+ * The highest address a stack of `mode` can reach, which is what bounds how deep a
+ * call stack can be — the real bound, where a constant frame limit is a guess.
+ *
+ * Each mode's stack ends where the BIOS left its pointer, and the modes are
+ * stacked on each other at the top of IWRAM: searching past a SYS stack's top
+ * reads the IRQ stack above it, whose words belong to no frame of this one. A
+ * pointer that is not under its mode's boot top is a program that moved its own
+ * stack, and then the region holding it is all that bounds it — rounded up from
+ * the pointer, because both RAM regions are mirrored every region size, so a stack
+ * in IWRAM's 0x03ffxxxx mirror is the same memory far above the top of the first
+ * copy.
+ */
+export function stackBoundFor(mode: number, sp: number | undefined): number {
+  const bootTop = BOOT_STACKS.get(mode);
+  const fallback = bootTop ?? (RAM_REGIONS.iwram.base + RAM_REGIONS.iwram.size) >>> 0;
+  if (sp === undefined) {
+    return fallback;
+  }
+  const region = regionOf(sp);
+  if (bootTop !== undefined && sp <= bootTop && region === regionOf(bootTop)) {
+    return bootTop;
+  }
+  if (region === 'iwram' || region === 'ewram') {
+    const size = RAM_REGIONS[region].size;
+    return ((sp & ~(size - 1)) + size) >>> 0;
+  }
+  return fallback;
 }
 
 /**

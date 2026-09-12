@@ -6,6 +6,7 @@
  */
 import { DebugInfo, type FunctionEntry, type IsaMode, type RomIdentity } from '@gba-kit/debug-info';
 
+import { LOWEST_PROGRAM_ADDRESS } from './machine.js';
 import { SourceMapper, type SourceMapperOptions } from './source-map.js';
 
 export interface SourceLocation {
@@ -85,12 +86,24 @@ export class Program {
       }
     }
     const fn: FunctionEntry | null = this.debugInfo.pcToFunction(pc);
-    return fn ? { name: fn.name, lo: fn.address, hi: fn.end, exact: fn.exact } : null;
+    if (fn) {
+      return { name: fn.name, lo: fn.address, hi: fn.end, exact: fn.exact };
+    }
+    // Nothing in the ELF typed this address as a function, but something names it:
+    // hand-written assembly carries no `.type`, and crt0 is all of it, so the frame
+    // at the bottom of every stack has a name and no stated extent. The nearest
+    // enclosing symbol, bounded by the next one, is the same basis the name came
+    // from — reported inexact, because the ELF stated neither end. Executable
+    // sections are not the test: a decomp's IWRAM code is copied there at runtime
+    // from a section the ELF marks NOBITS and writable, and the mixer the machine
+    // spends its interrupts in lives there.
+    const sym = pc < LOWEST_PROGRAM_ADDRESS ? null : this.debugInfo.symbolRangeAt(pc);
+    return sym ? { name: sym.name, lo: sym.address, hi: sym.end, exact: sym.exact } : null;
   }
 
-  /** `<BIOS stub +0xNN>` below 0x4000, else `name` / `name+0xNN` / `0x........`. */
+  /** `<BIOS stub +0xNN>` below the program's own address space, else `name` / `name+0xNN` / `0x........`. */
   symbolName(address: number): string {
-    if (address < 0x4000) {
+    if (address < LOWEST_PROGRAM_ADDRESS) {
       return `<BIOS stub +0x${address.toString(16)}>`;
     }
     return this.symbolize(address) ?? `0x${address.toString(16).padStart(8, '0')}`;
@@ -133,11 +146,19 @@ export class Program {
   }
 
   /**
-   * Whether a return address points at something we can name: a DWARF function or
-   * a symbol the ELF placed there. Unwinding stops where this says no, so the call
-   * stack never ends in a made-up caller inside crt0's gap.
+   * Whether an address points at something we can name: a DWARF function or a
+   * symbol the ELF placed there. It corroborates a return address rather than
+   * gating it — a `bl main` from crt0 returns into a NOTYPE symbol of size 0, and
+   * dropping that frame loses the bottom of every stack.
+   *
+   * The BIOS region is never nameable, whatever the ELF claims about it. A
+   * discarded symbol keeps its size with its address zeroed, so the symbol table
+   * will gladly name an exception stub after a function that was thrown away.
    */
   isNamedCode(address: number): boolean {
+    if (address < LOWEST_PROGRAM_ADDRESS) {
+      return false;
+    }
     if (!this.debugInfo) {
       return true;
     }
@@ -146,6 +167,11 @@ export class Program {
     }
     const fn = this.debugInfo.pcToFunction(address);
     return !!fn && (fn.exact || address - fn.address < MAX_SYMBOL_OFFSET);
+  }
+
+  /** Whether `address` lies in a section the ELF marked executable (true without an ELF). */
+  isExecutableCode(address: number): boolean {
+    return address >= LOWEST_PROGRAM_ADDRESS && (this.debugInfo?.isExecutable(address) ?? true);
   }
 
   /**

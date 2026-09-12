@@ -12,10 +12,13 @@ import { DW_AT, DW_TAG } from './dwarf/constants.js';
 import { type DwarfSections, EntryIndex, type UnitInfo, attrAddress, attrFlag, attrNum } from './dwarf/entries.js';
 import { type EvalContext, type Location, evaluate } from './dwarf/expr.js';
 import { FrameTable } from './dwarf/frame.js';
-import { type Range, describeExpr, entryRanges, locationAt, rangesContain } from './dwarf/lists.js';
+import { type Range, describeExpr, entryRanges, isLinkedRange, locationAt, rangesContain } from './dwarf/lists.js';
 import { type TypeDesc, TypeResolver, type ValueReader, type VarNode, formatValue, toInt } from './dwarf/values.js';
 import type { ElfFile } from './elf.js';
+import { hex8 } from './reader.js';
 import type { DwarfEntry } from './types.js';
+import { type MachineFacts, type UnwoundFrame, type WalkOptions } from './unwind/types.js';
+import { unwindStack } from './unwind/walker.js';
 
 /** What the machine answers with: `size` bytes at `address`, or null when any byte is unreadable. */
 export type Memory = ValueReader;
@@ -26,17 +29,16 @@ export interface Enumerator {
   type: DwarfEntry;
 }
 
-/** A real frame on the machine's stack. */
-export interface PhysicalFrame {
-  /** where execution is (frame 0) or will resume (callers: the return address) */
-  pc: number;
-  /** an address inside the call instruction, for line/scope lookups of callers */
-  lookupPc: number;
-  /** r0–r15 as they were in this frame; undefined where a caller's value could not be recovered */
-  regs: Array<number | undefined>;
+/** A frame the unwinder produced, with the DWARF subprogram executing in it. */
+export interface PhysicalFrame extends UnwoundFrame {
   fn: DwarfEntry | null;
-  /** from call-frame information, as opposed to the one-level LR guess */
-  exact: boolean;
+}
+
+/** The machine's stack as {@link DwarfScopes.physicalFrames} reports it. */
+export interface PhysicalStack {
+  frames: PhysicalFrame[];
+  /** why the walk stopped where it did */
+  end: string;
 }
 
 /** A physical frame, or one of the inlined layers inside it. */
@@ -104,7 +106,9 @@ export class DwarfScopes {
   #collectFunctions(entry: DwarfEntry): void {
     if (entry.tag === DW_TAG.subprogram) {
       for (const [lo, hi] of this.ranges(entry)) {
-        this.#functions.push({ lo, hi, entry });
+        if (isLinkedRange(lo)) {
+          this.#functions.push({ lo, hi, entry });
+        }
       }
     }
     for (const ch of entry.children) {
@@ -451,7 +455,10 @@ export class DwarfScopes {
         const b = memory.read(address, size);
         return !b || b.length < size ? undefined : toInt(b, false) >>> 0;
       },
-      cfa: () => this.frames.cfa(frame.lookupPc, frame.regs),
+      // A frame the walk unwound from carries the CFA that step established;
+      // call-frame information answers for the outermost frame, which nothing was
+      // unwound from.
+      cfa: () => frame.cfa ?? this.frames.cfa(frame.lookupPc, frame.regs),
       frameBase: () => {
         if (frameBaseCache !== null) {
           return frameBaseCache;
@@ -497,10 +504,7 @@ export class DwarfScopes {
         // split it into registers it never described" is visible in the ranges.
         const where = attr.entries
           .slice(0, 3)
-          .map(
-            (e) =>
-              `${describeExpr(e.expr)} for 0x${e.lo.toString(16).padStart(8, '0')}–0x${e.hi.toString(16).padStart(8, '0')}`,
-          )
+          .map((e) => `${describeExpr(e.expr)} for 0x${hex8(e.lo)}–0x${hex8(e.hi)}`)
           .join(', ');
         const more = attr.entries.length > 3 ? `, +${attr.entries.length - 3} more` : '';
         return {
@@ -538,7 +542,15 @@ export class DwarfScopes {
 
   /** A frame standing for "right here, live registers": for evaluating outside the call stack. */
   liveFrame(pc: number, regs: ArrayLike<number>): PhysicalFrame {
-    return { pc, lookupPc: pc, regs: Array.from(regs), fn: this.functionAt(pc), exact: true };
+    return {
+      pc,
+      lookupPc: pc,
+      regs: Array.from(regs),
+      fn: this.functionAt(pc),
+      method: 'live',
+      cfa: undefined,
+      doubt: null,
+    };
   }
 
   #nodeFor(name: string, type: TypeDesc, loc: Location, frame: PhysicalFrame, reader: ValueReader): VarNode {
@@ -606,57 +618,17 @@ export class DwarfScopes {
   // ─── frames ────────────────────────────────────────────────────────
 
   /**
-   * Physical frames from the live registers outward: call-frame information where
-   * the ELF has it; otherwise a single LR guess for frame 1, flagged `exact: false`.
-   * `isCode` says whether a return address is worth following (mapped, named).
+   * Physical frames from the live registers outward, as deep as the machine's
+   * stack goes, each saying which layer of {@link unwindStack} recovered it — and
+   * why the walk ended where it did, so a short stack is a statement rather than
+   * a silence.
    */
-  physicalFrames(
-    pc: number,
-    liveRegs: ArrayLike<number>,
-    memory: Memory,
-    isCode: (a: number) => boolean,
-    maxDepth = 32,
-  ): PhysicalFrame[] {
-    const regs: Array<number | undefined> = Array.from(liveRegs);
-    const frames: PhysicalFrame[] = [{ pc, lookupPc: pc, regs, fn: this.functionAt(pc), exact: true }];
-    const readWord = (address: number): number | undefined => {
-      const b = memory.read(address, 4);
-      return b && b.length === 4 ? (b[0]! | (b[1]! << 8) | (b[2]! << 16) | (b[3]! << 24)) >>> 0 : undefined;
+  physicalFrames(pc: number, liveRegs: ArrayLike<number>, facts: MachineFacts, options?: WalkOptions): PhysicalStack {
+    const walk = unwindStack(pc, liveRegs, facts, this.frames, options);
+    return {
+      frames: walk.frames.map((f) => ({ ...f, fn: this.functionAt(f.lookupPc) })),
+      end: walk.end,
     };
-    const seen = new Set<string>();
-    for (let depth = 0; depth < maxDepth; depth++) {
-      const top = frames[frames.length - 1]!;
-      const result = this.frames.unwind(top.lookupPc, top.regs, readWord);
-      if (!result) {
-        if (depth === 0) {
-          const lr = (Number(liveRegs[14]) & ~1) >>> 0;
-          if (isCode(lr) && lr !== pc) {
-            const lookupPc = (lr - 2) >>> 0;
-            frames.push({
-              pc: lr,
-              lookupPc,
-              regs: [...regs.slice(0, 13), undefined, undefined, lr],
-              fn: this.functionAt(lookupPc),
-              exact: false,
-            });
-          }
-        }
-        break;
-      }
-      const ra = (result.returnAddress & ~1) >>> 0;
-      if (ra === 0 || !isCode(ra)) {
-        break;
-      }
-      const key = `${ra}:${result.cfa}`;
-      if (seen.has(key)) {
-        break;
-      }
-      seen.add(key);
-      const lookupPc = (ra - 2) >>> 0;
-      result.regs[15] = ra;
-      frames.push({ pc: ra, lookupPc, regs: result.regs, fn: this.functionAt(lookupPc), exact: true });
-    }
-    return frames;
   }
 
   /** Expand each physical frame into its inlined layers, innermost first. */

@@ -5,6 +5,11 @@
 #   arm-O0    — ARM code paths (the CPU boots in ARM anyway; here main is ARM too)
 # Each variant yields a matching .elf (DWARF 5, symbols) and .gba (objcopy binary).
 #
+# thumb-O0-nocfi.elf is thumb-O0 with .debug_frame removed: the shape a decomp ELF
+# built with agbcc has, where the unwinder has to measure prologues instead of
+# reading call-frame information. The code is untouched, so it pairs with
+# thumb-O0.gba and the ROM/ELF identity check still matches.
+#
 # Toolchain: arm-none-eabi-gcc on PATH, or $(DEVKITARM)/bin/arm-none-eabi-gcc.
 PREFIX ?= arm-none-eabi-
 ifneq ($(strip $(DEVKITARM)),)
@@ -21,7 +26,7 @@ COMMON := -mcpu=arm7tdmi -mthumb-interwork -g -gdwarf-5 -ffreestanding -nostdlib
 LDFLAGS := -Wl,-T,source/link.ld -Wl,--gc-sections
 SOURCES := source/start.s source/main.c source/util.c source/util.h source/link.ld
 
-all: build/thumb-O0.gba build/thumb-O2.gba build/arm-O0.gba
+all: build/thumb-O0.gba build/thumb-O2.gba build/arm-O0.gba build/thumb-O0-nocfi.elf
 .PHONY: all clean
 
 build/thumb-O0.elf: $(SOURCES)
@@ -35,6 +40,9 @@ build/thumb-O2.elf: $(SOURCES)
 build/arm-O0.elf: $(SOURCES)
 	@mkdir -p build
 	$(CC) $(COMMON) -marm -O0 $(LDFLAGS) source/start.s source/main.c source/util.c -o $@
+
+build/thumb-O0-nocfi.elf: build/thumb-O0.elf
+	$(OBJCOPY) --remove-section=.debug_frame $< $@
 
 build/%.gba: build/%.elf
 	$(OBJCOPY) -O binary $< $@

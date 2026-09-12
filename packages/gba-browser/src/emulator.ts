@@ -5,9 +5,9 @@
  * Manages the emulation loop, screen rendering, and keyboard input.
  */
 import type { DebugHooks } from '@gba-kit/arm-emulator';
-import { ArmCpu } from '@gba-kit/arm-emulator/arm-cpu';
+import { ArmCpu, MODE_SYS } from '@gba-kit/arm-emulator/arm-cpu';
 import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassembler';
-import { Gba } from '@gba-kit/gba-emulator';
+import { BOOT_STACK_POINTERS, Gba } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
 /** Keyboard mapping: key → GBA button bit */
@@ -109,27 +109,16 @@ export class EmulatorBridge {
 
     const cpu = this.#gba.armCpu;
 
-    // Set up initial CPU state matching post-BIOS boot:
-    // The GBA BIOS normally initializes stacks and then jumps to ROM.
-    // Since we skip the BIOS, we replicate the post-boot state.
+    // Set up initial CPU state matching post-BIOS boot: the BIOS initializes each
+    // mode's stack and then jumps to ROM, and skipping it means replicating that.
+    for (const [mode, sp] of BOOT_STACK_POINTERS) {
+      cpu.switchMode(mode);
+      cpu.registers[13] = sp;
+    }
 
-    // Set up IRQ mode stack pointer
-    cpu.switchMode(0x12); // MODE_IRQ
-    cpu.registers[13] = 0x03007fa0;
-
-    // Set up SVC mode stack pointer
-    cpu.switchMode(0x13); // MODE_SVC
-    cpu.registers[13] = 0x03007fe0;
-
-    // Switch to System mode (privileged, but uses USR registers)
-    cpu.switchMode(0x1f); // MODE_SYS
-
-    // Set USR/SYS stack pointer
-    cpu.registers[13] = 0x03007f00;
-
-    // Enable IRQs (clear I bit), keep FIQ disabled, System mode
-    // CPSR: 0x1F (SYS mode) with I=0, F=0, T=0 (ARM state initially)
-    cpu.cpsr = 0x1f; // SYS mode, IRQs enabled, ARM state
+    // System mode (privileged, but uses the USR registers), IRQs enabled, ARM state
+    cpu.switchMode(MODE_SYS);
+    cpu.cpsr = MODE_SYS;
 
     // PC to ROM entry point
     cpu.registers[15] = 0x08000000;

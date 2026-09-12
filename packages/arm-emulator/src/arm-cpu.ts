@@ -37,6 +37,17 @@ export const MODE_ABT = 0x17;
 export const MODE_UND = 0x1b;
 export const MODE_SYS = 0x1f;
 
+/**
+ * What an exception stub subtracts from its link register to resume the
+ * instruction it interrupted. IRQ, FIQ and a prefetch abort return through
+ * `subs pc, lr, #4`; a software interrupt and an undefined instruction resume at
+ * lr itself. (A data abort's lr is one instruction further still, but nothing on
+ * this hardware raises one.)
+ */
+export function exceptionReturnBias(mode: number): number {
+  return mode === MODE_IRQ || mode === MODE_FIQ || mode === MODE_ABT ? -4 : 0;
+}
+
 /** Index into banked SP/LR arrays by mode */
 const SP_LR_BANK_INDEX: Record<number, number> = {
   [MODE_USR]: 0,
@@ -225,6 +236,36 @@ export class ArmCpu {
     if (bankIdx !== undefined) {
       this.#bankedSP[bankIdx] = value;
     }
+  }
+
+  /**
+   * The stack pointer of `mode`: the live register when the CPU is in that mode,
+   * else its bank. Undefined for a mode that has no bank.
+   *
+   * An unwinder crossing an exception boundary needs another mode's sp and lr, and
+   * the alternative to reading them is `serialize()`, which copies six arrays.
+   */
+  getBankedSP(mode: number): number | undefined {
+    if (mode === this.getMode()) {
+      return this.registers[SP]!;
+    }
+    const bankIdx = SP_LR_BANK_INDEX[mode];
+    return bankIdx === undefined ? undefined : this.#bankedSP[bankIdx]!;
+  }
+
+  /** The link register of `mode`, on the same terms as {@link getBankedSP}. */
+  getBankedLR(mode: number): number | undefined {
+    if (mode === this.getMode()) {
+      return this.registers[LR]!;
+    }
+    const bankIdx = SP_LR_BANK_INDEX[mode];
+    return bankIdx === undefined ? undefined : this.#bankedLR[bankIdx]!;
+  }
+
+  /** The SPSR of `mode` — what it interrupted — without switching into it. Undefined for USR/SYS. */
+  getBankedSPSR(mode: number): number | undefined {
+    const idx = SPSR_BANK_INDEX[mode];
+    return idx === undefined ? undefined : this.#spsr[idx]!;
   }
 
   // ─── CPSR Accessors ──────────────────────────────────────────────

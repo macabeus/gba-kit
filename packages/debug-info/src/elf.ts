@@ -9,6 +9,8 @@ import { Cursor, cstrAt } from './reader.js';
 export interface ElfSection {
   name: string;
   type: number;
+  /** `sh_flags`; {@link SHF_EXECINSTR} is what says the section's addresses can hold code at all. */
+  flags: number;
   /** Virtual address (0 for non-loadable sections like .debug_*). */
   addr: number;
   /** Byte offset of the section's data within the file. */
@@ -24,6 +26,9 @@ const ELFDATA2LSB = 1;
 const ELFDATA2MSB = 2;
 const SHT_SYMTAB = 2;
 const SHT_RELA = 4;
+
+/** `sh_flags` bit for a section holding executable instructions. */
+export const SHF_EXECINSTR = 0x4;
 
 /** `e_type` values a debugger cares about. */
 export const ET_REL = 1;
@@ -87,6 +92,7 @@ export class ElfFile {
       raw.push({
         // sh_name is at +0x00 (offset into shstrtab); kept separately below.
         type: c.u32At(base + 0x04),
+        flags: c.u32At(base + 0x08),
         addr: c.u32At(base + 0x0c),
         offset: c.u32At(base + 0x10),
         size: c.u32At(base + 0x14),

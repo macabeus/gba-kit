@@ -10,9 +10,12 @@
  * linker symbol, then enumerators. A `a.b[3].c` path walks the same typed nodes,
  * so a member reads the same in a watch as in the tree.
  */
+import { exceptionReturnBias } from '@gba-kit/arm-emulator/arm-cpu';
 import { disassembleArmAt, disassembleThumbAt } from '@gba-kit/arm-emulator/disassembler';
 import type {
   DwarfEntry,
+  FrameMethod,
+  MachineFacts,
   Memory,
   PhysicalFrame,
   UnitInfo,
@@ -20,11 +23,12 @@ import type {
   VirtualFrame,
   WritableScalar,
 } from '@gba-kit/debug-info';
-import { formatValue } from '@gba-kit/debug-info';
+import { formatValue, frameConfidence } from '@gba-kit/debug-info';
+import { BIOS_IRQ_STUB } from '@gba-kit/gba-emulator';
 
 import { type ExprEnv, type ExprHints, compileExpression, formatNumber, parseU32Literal } from './expression.js';
 import type { LabelStore } from './labels.js';
-import { Machine, REGISTER_NAMES, isCodeAddress, regionOf } from './machine.js';
+import { LOWEST_PROGRAM_ADDRESS, Machine, REGISTER_NAMES, isCodeAddress, regionOf, stackBoundFor } from './machine.js';
 import type { Program } from './program.js';
 
 export interface StackFrame {
@@ -35,9 +39,20 @@ export interface StackFrame {
   source: { path: string; line: number } | null;
   /** an inlined layer of the physical frame below it */
   inlined: boolean;
-  /** guessed from lr rather than unwound */
+  /** inferred rather than derived: {@link frameConfidence} of its method */
   heuristic: boolean;
+  /** which layer of the unwinder recovered this frame */
+  method: FrameMethod;
+  /** what the unwinder could not establish about this frame, for the row and for the scopes it qualifies */
+  doubt: string | null;
   virtual: VirtualFrame | null;
+}
+
+/** The call stack, and why it ends where it does. */
+export interface StackTrace {
+  frames: StackFrame[];
+  /** the reason the walk stopped: a root reached, a bound hit, or a layer's refusal */
+  end: string;
 }
 
 export interface Scope {
@@ -45,6 +60,8 @@ export interface Scope {
   kind: 'locals' | 'globals' | 'registers' | 'machine';
   nodes: VarNode[];
   expensive: boolean;
+  /** why the values in this scope are not established, or null when nothing says they are not */
+  doubt: string | null;
 }
 
 export interface DisassembledLine {
@@ -106,33 +123,31 @@ export class Inspector {
    * The call stack, `hiddenInline` innermost inlined layers of frame 0 removed
    * (a step-over that stopped at an inlined call shows the call site instead).
    */
-  callStack(hiddenInline = 0): StackFrame[] {
+  callStack(hiddenInline = 0): StackTrace {
     const di = this.program.debugInfo;
     const cpu = this.machine.gba.armCpu;
     const pc = this.machine.pc;
     if (!di || !this.program.sources) {
-      const frames: StackFrame[] = [this.#plainFrame(0, pc, false)];
+      // With no ELF there is nothing to measure a prologue against, so lr is all
+      // there is, and nothing proves it is a return address rather than the return
+      // of a call this function has already made.
+      const frames: StackFrame[] = [this.#plainFrame(0, pc, 'live')];
       const lr = (cpu.registers[14]! & ~1) >>> 0;
       if (lr !== pc && isCodeAddress(lr)) {
-        frames.push(this.#plainFrame(1, lr, true));
+        frames.push(this.#plainFrame(1, lr, 'guess'));
       }
-      return frames;
+      return { frames, end: 'there is no debug info to unwind with' };
     }
-    const physical = di.scopes.physicalFrames(
-      pc,
-      cpu.registers,
-      this.memory,
-      (a) => isCodeAddress(a) && this.program.isNamedCode(a),
-    );
-    let virtual = di.scopes.virtualFrames(physical, (a) => this.program.symbolName(a));
+    const walk = di.scopes.physicalFrames(pc, cpu.registers, this.#machineFacts());
+    let virtual = di.scopes.virtualFrames(walk.frames, (a) => this.program.symbolName(a));
     if (hiddenInline > 0) {
       let drop = 0;
-      while (drop < hiddenInline && virtual[drop]?.inlined && virtual[drop]?.physical === physical[0]) {
+      while (drop < hiddenInline && virtual[drop]?.inlined && virtual[drop]?.physical === walk.frames[0]) {
         drop++;
       }
       virtual = virtual.slice(drop);
     }
-    return virtual.map((vf, i) => {
+    const frames = virtual.map((vf, i) => {
       let source: StackFrame['source'] = null;
       if ('pc' in vf.location) {
         const loc = this.program.lineAt(vf.physical.lookupPc);
@@ -147,21 +162,55 @@ export class Inspector {
         name: vf.inlined ? `${vf.name} (inlined)` : vf.name,
         source,
         inlined: vf.inlined,
-        heuristic: !vf.physical.exact,
+        heuristic: frameConfidence(vf.physical.method) === 'inferred',
+        method: vf.physical.method,
+        doubt: vf.physical.doubt,
         virtual: vf,
       };
     });
+    return { frames, end: walk.end };
   }
 
-  #plainFrame(index: number, address: number, heuristic: boolean): StackFrame {
+  /**
+   * The machine as the unwinder asks about it: code and data reads through the
+   * side-effect-free peek, what the ELF says about an address, and the banked
+   * state an exception boundary is read from.
+   */
+  #machineFacts(): MachineFacts {
+    const cpu = this.machine.gba.armCpu;
+    return {
+      read16: (address) => this.machine.peekUnsigned(address, 2),
+      read32: (address) => this.machine.peekUnsigned(address, 4),
+      isExecutable: (address) => this.program.isExecutableCode(address),
+      nameable: (address) => this.program.isNamedCode(address),
+      isaAt: (address) => this.program.modeAt(address),
+      functionBounds: (pc) => {
+        const fn = this.program.functionRange(pc);
+        return fn ? { lo: fn.lo, hi: fn.hi } : null;
+      },
+      mode: cpu.getMode(),
+      bankedSp: (mode) => cpu.getBankedSP(mode),
+      bankedLr: (mode) => cpu.getBankedLR(mode),
+      spsr: (mode) => cpu.getBankedSPSR(mode),
+      codeFloor: LOWEST_PROGRAM_ADDRESS,
+      isCodeRegion: isCodeAddress,
+      stackBoundFor,
+      exceptionReturnBias,
+      exceptionStub: BIOS_IRQ_STUB,
+    };
+  }
+
+  #plainFrame(index: number, address: number, method: FrameMethod): StackFrame {
     const loc = this.program.lineAt(address);
     return {
       index,
       address,
-      name: this.program.symbolName(address) + (heuristic ? ' (from lr, unverified)' : ''),
+      name: this.program.symbolName(address),
       source: loc?.path ? { path: loc.path, line: loc.line } : null,
       inlined: false,
-      heuristic,
+      heuristic: frameConfidence(method) === 'inferred',
+      method,
+      doubt: method === 'guess' ? 'nothing confirms lr still holds a return address here' : null,
       virtual: null,
     };
   }
@@ -178,16 +227,24 @@ export class Inspector {
             .scopeVariables(vf.scope, vf.physical.lookupPc)
             .map((v) => di.scopes.variableNode(v, vf.physical, this.memory))
         : [];
-      out.push({ name: 'Locals', kind: 'locals', nodes: locals, expensive: false });
+      out.push({ name: 'Locals', kind: 'locals', nodes: locals, expensive: false, doubt: frame.doubt });
       const unit = vf.scope ? di.scopes.index.unit(vf.scope) : di.scopes.unitContaining(vf.physical.lookupPc);
       const globals = unit
         ? di.scopes.globals(unit).map((g) => di.scopes.variableNode(g, vf.physical, this.memory))
         : [];
       globals.sort((a, b) => a.name.localeCompare(b.name));
-      out.push({ name: 'Globals (this file)', kind: 'globals', nodes: globals, expensive: true });
+      out.push({ name: 'Globals (this file)', kind: 'globals', nodes: globals, expensive: true, doubt: null });
     }
-    out.push({ name: 'Registers', kind: 'registers', nodes: this.registerNodes(frame), expensive: false });
-    out.push({ name: 'Machine', kind: 'machine', nodes: this.machineNodes(), expensive: true });
+    // The frame's doubt qualifies its registers as much as its locals — often it is
+    // about the registers — so it is said on both rather than only where a local is.
+    out.push({
+      name: 'Registers',
+      kind: 'registers',
+      nodes: this.registerNodes(frame),
+      expensive: false,
+      doubt: frame?.doubt ?? null,
+    });
+    out.push({ name: 'Machine', kind: 'machine', nodes: this.machineNodes(), expensive: true, doubt: null });
     return out;
   }
 

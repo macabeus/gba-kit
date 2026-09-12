@@ -122,6 +122,11 @@ export class DebugInfo {
     return this.symbols.pcToFunction(pc);
   }
 
+  /** The extent of the nearest enclosing symbol of any type (see {@link SymbolIndex.symbolRangeAt}). */
+  symbolRangeAt(address: number): FunctionEntry | null {
+    return this.symbols.symbolRangeAt(address);
+  }
+
   /** True for a linked image; false for a relocatable object (which has no addresses to debug). */
   get isLinked(): boolean {
     return this.elf.type === ET_EXEC;
@@ -133,6 +138,11 @@ export class DebugInfo {
    */
   sourceToPcs(file: string, line: number): number[] {
     return this.lines.sourceToPcs(file, line);
+  }
+
+  /** Whether `address` lies in a section the ELF marked executable (see {@link SymbolIndex.isExecutable}). */
+  isExecutable(address: number): boolean {
+    return this.symbols.isExecutable(address);
   }
 
   /** The instruction set at `address` from the ELF's mapping symbols, or null without them. */
