@@ -58,7 +58,9 @@ export {
 } from './unwind/types.js';
 export {
   TypeResolver,
+  formatBitfield,
   formatValue,
+  le32,
   quoteBytes,
   toBigInt,
   toInt,

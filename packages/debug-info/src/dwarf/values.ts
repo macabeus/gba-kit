@@ -314,6 +314,11 @@ export interface ValueReader {
   symbolize?(address: number): string | null;
 }
 
+/** `v` as the four little-endian bytes a 32-bit machine holds it in. */
+export function le32(v: number): Uint8Array {
+  return new Uint8Array([v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff]);
+}
+
 export function toInt(bytes: Uint8Array, signed: boolean): number {
   let v = 0;
   for (let i = bytes.length - 1; i >= 0; i--) {
@@ -584,35 +589,63 @@ function unsizedArray(node: VarNode, type: TypeDesc, address: number | undefined
   return node;
 }
 
+/**
+ * A bitfield of `size` bits sitting `offset` bits into `bytes`, which are the
+ * storage bytes that cover it — the width the tree shows and the width a write
+ * merges back into are the same fact, so both sides read it here.
+ */
+export function formatBitfield(
+  name: string,
+  type: TypeDesc,
+  bytes: Uint8Array | null,
+  address: number | undefined,
+  bits: { offset: number; size: number },
+): VarNode {
+  if (!bytes) {
+    return {
+      name,
+      value: address === undefined ? '<optimized out>' : `<unreadable at ${hex(address, 4)}>`,
+      type: type.name,
+      address,
+    };
+  }
+  const raw = toInt(bytes, false);
+  const value = Math.floor(raw / 2 ** bits.offset) % 2 ** bits.size;
+  const signed = type.kind === 'int' || type.kind === 'char' || (type.kind === 'enum' && type.signed === true);
+  const v = signed && value >= 2 ** (bits.size - 1) ? value - 2 ** bits.size : value;
+  const label =
+    type.kind === 'enum' ? type.enumerators?.get(v) : type.kind === 'bool' ? (v ? 'true' : 'false') : undefined;
+  const node: VarNode = {
+    name,
+    value: `${label ? (type.kind === 'enum' ? `${label} (${v})` : label) : v} (${bits.size} bits)`,
+    type: type.name,
+    address,
+    scalar: { value: v, signed },
+  };
+  if (address !== undefined) {
+    node.writable = {
+      address,
+      size: bytes.length,
+      kind: type.kind,
+      bitOffset: bits.offset,
+      bitSize: bits.size,
+      enumerators: type.kind === 'enum' ? type.enumerators : undefined,
+    };
+  }
+  return node;
+}
+
 function memberNode(m: MemberDesc, bytes: Uint8Array, base: number | undefined, reader: ValueReader): VarNode {
   if (m.bitSize !== undefined && m.bitOffset !== undefined) {
     const firstByte = Math.floor(m.bitOffset / 8);
     const span = Math.ceil(((m.bitOffset % 8) + m.bitSize) / 8);
-    const raw = toInt(bytes.subarray(firstByte, firstByte + span), false);
-    const value = Math.floor(raw / 2 ** (m.bitOffset % 8)) % 2 ** m.bitSize;
-    const signed =
-      m.type.kind === 'int' || m.type.kind === 'char' || (m.type.kind === 'enum' && m.type.signed === true);
-    const v = signed && value >= 2 ** (m.bitSize - 1) ? value - 2 ** m.bitSize : value;
-    const label =
-      m.type.kind === 'enum' ? m.type.enumerators?.get(v) : m.type.kind === 'bool' ? (v ? 'true' : 'false') : undefined;
-    const node: VarNode = {
-      name: m.name,
-      value: `${label ? (m.type.kind === 'enum' ? `${label} (${v})` : label) : v} (${m.bitSize} bits)`,
-      type: m.type.name,
-      address: base === undefined ? undefined : base + firstByte,
-      scalar: { value: v, signed },
-    };
-    if (base !== undefined) {
-      node.writable = {
-        address: base + firstByte,
-        size: span,
-        kind: m.type.kind,
-        bitOffset: m.bitOffset % 8,
-        bitSize: m.bitSize,
-        enumerators: m.type.kind === 'enum' ? m.type.enumerators : undefined,
-      };
-    }
-    return node;
+    return formatBitfield(
+      m.name,
+      m.type,
+      bytes.subarray(firstByte, firstByte + span),
+      base === undefined ? undefined : base + firstByte,
+      { offset: m.bitOffset % 8, size: m.bitSize },
+    );
   }
   const size = m.type.size || (m.type.kind === 'pointer' ? 4 : 0);
   const slice = bytes.subarray(m.offset, m.offset + size);

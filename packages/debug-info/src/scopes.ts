@@ -13,7 +13,15 @@ import { type DwarfSections, EntryIndex, type UnitInfo, attrAddress, attrFlag, a
 import { type EvalContext, type Location, evaluate } from './dwarf/expr.js';
 import { FrameTable } from './dwarf/frame.js';
 import { type Range, describeExpr, entryRanges, isLinkedRange, locationAt, rangesContain } from './dwarf/lists.js';
-import { type TypeDesc, TypeResolver, type ValueReader, type VarNode, formatValue, toInt } from './dwarf/values.js';
+import {
+  type TypeDesc,
+  TypeResolver,
+  type ValueReader,
+  type VarNode,
+  formatValue,
+  le32,
+  toInt,
+} from './dwarf/values.js';
 import type { ElfFile } from './elf.js';
 import { hex8 } from './reader.js';
 import type { DwarfEntry } from './types.js';
@@ -651,8 +659,4 @@ export class DwarfScopes {
     }
     return out;
   }
-}
-
-function le32(v: number): Uint8Array {
-  return new Uint8Array([v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff]);
 }
