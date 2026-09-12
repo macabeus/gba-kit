@@ -54,6 +54,52 @@ export interface WatchpointRead {
   dmaOrigin: WriteOrigin | null;
 }
 
+/** The kinds of battery-backed save a cartridge can declare. */
+export type SaveType = 'eeprom' | 'sram' | 'flash512' | 'flash1m';
+
+/** What a cartridge's ROM says about its save, from the SDK string the build embeds. */
+export interface CartridgeSave {
+  /** null when the ROM declares nothing, as homebrew usually does */
+  type: SaveType | null;
+  /** the string as it stands in the ROM (`EEPROM_V121`, `FLASH1M_V103`), so a message can name it */
+  id: string | null;
+}
+
+/** The SDK's save-type strings, longest prefix first so `SRAM_V` cannot shadow `SRAM_F_V`. */
+const SAVE_TYPE_STRINGS: ReadonlyArray<readonly [string, SaveType]> = [
+  ['EEPROM_V', 'eeprom'],
+  ['SRAM_F_V', 'sram'],
+  ['SRAM_V', 'sram'],
+  ['FLASH1M_V', 'flash1m'],
+  ['FLASH512_V', 'flash512'],
+  ['FLASH_V', 'flash512'],
+];
+
+/** The longest declaration, so the scan stops with room for one at the end of the ROM. */
+const MAX_SAVE_ID = Math.max(...SAVE_TYPE_STRINGS.map(([prefix]) => prefix.length)) + 3;
+
+/** The EEPROM chip's array: 64 Kbit, which a 4 Kbit cartridge uses the first 512 bytes of. */
+const EEPROM_BYTES = 0x2000;
+
+function matchesAt(rom: Uint8Array, at: number, text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    if (rom[at + i] !== text.charCodeAt(i)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function digitsAt(rom: Uint8Array, at: number, count: number): boolean {
+  for (let i = 0; i < count; i++) {
+    const byte = rom[at + i] ?? 0;
+    if (byte < 0x30 || byte > 0x39) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export class GbaSystemBus implements MemoryBus {
   /** BIOS ROM (16 KB) — set via loadBios() */
   #bios = new Uint8Array(0x4000);
@@ -82,7 +128,10 @@ export class GbaSystemBus implements MemoryBus {
   /** Game Pak EEPROM */
   readonly #eeprom = new GbaEeprom();
 
-  /** Whether SRAM is present (auto-detected from ROM save type string) */
+  /** What the cartridge's ROM declares about its save; cartridge identity, like #rom */
+  #save: CartridgeSave = { type: null, id: null };
+
+  /** Whether the 0x0E window is backed by a chip: every save type but EEPROM, which is serial */
   #hasSram = false;
 
   /** WAITCNT register */
@@ -262,38 +311,79 @@ export class GbaSystemBus implements MemoryBus {
     this.#detectSaveType(data);
   }
 
-  /** Auto-detect save type from ROM SDK strings */
+  /**
+   * The save type from the SDK string the build embeds. The string is word-aligned and
+   * ends in three version digits, which is what keeps a chance run of letters elsewhere
+   * in the ROM from being read as a declaration. `SRAM_F_V` comes before `SRAM_V` and
+   * the sized flash strings before bare `FLASH_V`: the shorter one is a prefix of the
+   * longer, so the longer has to be tried first.
+   */
   #detectSaveType(rom: Uint8Array): void {
-    // Search for save type identifier strings in ROM
-    // Games built with the official SDK embed these strings
-    const sramPattern = [0x53, 0x52, 0x41, 0x4d, 0x5f, 0x56]; // "SRAM_V"
-    const flashPattern = [0x46, 0x4c, 0x41, 0x53, 0x48]; // "FLASH"
-
-    this.#hasSram = false;
-    for (let i = 0; i < rom.length - 6; i++) {
-      if (
-        rom[i] === sramPattern[0] &&
-        rom[i + 1] === sramPattern[1] &&
-        rom[i + 2] === sramPattern[2] &&
-        rom[i + 3] === sramPattern[3] &&
-        rom[i + 4] === sramPattern[4] &&
-        rom[i + 5] === sramPattern[5]
-      ) {
-        this.#hasSram = true;
-        return;
-      }
-      if (
-        rom[i] === flashPattern[0] &&
-        rom[i + 1] === flashPattern[1] &&
-        rom[i + 2] === flashPattern[2] &&
-        rom[i + 3] === flashPattern[3] &&
-        rom[i + 4] === flashPattern[4]
-      ) {
-        // Flash-based save also uses SRAM region
-        this.#hasSram = true;
+    this.#save = { type: null, id: null };
+    for (let i = 0; i + MAX_SAVE_ID <= rom.length; i += 4) {
+      for (const [prefix, type] of SAVE_TYPE_STRINGS) {
+        if (!matchesAt(rom, i, prefix) || !digitsAt(rom, i + prefix.length, 3)) {
+          continue;
+        }
+        this.#save = { type, id: String.fromCharCode(...rom.subarray(i, i + prefix.length + 3)) };
+        this.#hasSram = type !== 'eeprom';
         return;
       }
     }
+    this.#hasSram = false;
+  }
+
+  /** What the cartridge's ROM declares about its battery-backed save. */
+  get save(): CartridgeSave {
+    return this.#save;
+  }
+
+  /**
+   * How wide an address the EEPROM takes — 6 bits for 4 Kbit, 14 for 64 Kbit — or 0
+   * while nothing has said: the size of the cartridge's save follows from it.
+   */
+  get eepromAddrBits(): number {
+    return this.#eeprom.addrBits;
+  }
+
+  /**
+   * The cartridge's battery-backed memory, whole, in the byte order a `.sav` file uses:
+   * the EEPROM for an EEPROM cartridge, the SRAM window for every other kind. A copy —
+   * unlike a read through the bus, this clocks no serial protocol. Null when the ROM
+   * declares no save, because then there is no chip to read.
+   */
+  readBackup(): Uint8Array | null {
+    switch (this.#save.type) {
+      case null:
+        return null;
+      case 'eeprom':
+        return this.#eeprom.read8();
+      default:
+        return new Uint8Array(this.sram);
+    }
+  }
+
+  /**
+   * Install a `.sav` as the cartridge's battery-backed memory, filling what `bytes` does
+   * not reach with the value an erased chip holds. An EEPROM also takes the address width
+   * its size implies, which the serial protocol otherwise guesses from the first transfer
+   * and guesses 64 Kbit wrong. Which files belong in which chip is settled before here:
+   * this refuses only what it cannot hold at all.
+   */
+  writeBackup(bytes: Uint8Array): void {
+    if (this.#save.type === null) {
+      throw new Error('this ROM declares no save type');
+    }
+    const target = this.#save.type === 'eeprom' ? EEPROM_BYTES : this.sram.length;
+    if (bytes.length > target) {
+      throw new Error(`${bytes.length} bytes do not fit in ${target}`);
+    }
+    if (this.#save.type === 'eeprom') {
+      this.#eeprom.install(bytes);
+      return;
+    }
+    this.sram.fill(0);
+    this.sram.set(bytes);
   }
 
   // ─── Memory Map Classification ────────────────────────────────────
@@ -1243,7 +1333,7 @@ const enum EepromState {
 
 class GbaEeprom {
   /** EEPROM data — 8KB max (64Kbit). 4Kbit uses only first 512 bytes. */
-  readonly #data = new Uint8Array(0x2000);
+  readonly #data = new Uint8Array(EEPROM_BYTES);
 
   /** Address bit length: 6 for 4Kbit, 14 for 64Kbit. 0 = not yet detected. */
   #addrBits = 0;
@@ -1292,6 +1382,27 @@ class GbaEeprom {
     this.#bitsReceived = snap.bitsReceived;
     this.#sendBuffer = BigInt(snap.sendBuffer);
     this.#sendPos = snap.sendPos;
+  }
+
+  get addrBits(): number {
+    return this.#addrBits;
+  }
+
+  /** The chip's contents, as a `.sav` file holds them. */
+  read8(): Uint8Array {
+    return new Uint8Array(this.#data);
+  }
+
+  /**
+   * Put a `.sav` in the chip, erased past its end, and take the address width its size
+   * implies: 6 bits for 4 Kbit, 14 for 64 Kbit. Auto-detection latches 6 as soon as it
+   * has six address bits and never revises, so a 64 Kbit save that waits for it is
+   * addressed as if it were a 4 Kbit one for the rest of the run.
+   */
+  install(bytes: Uint8Array): void {
+    this.#data.fill(0xff);
+    this.#data.set(bytes);
+    this.#addrBits = bytes.length > 512 ? 14 : 6;
   }
 
   /** Write a single bit to the EEPROM serial interface */
@@ -1401,10 +1512,15 @@ class GbaEeprom {
     }
   }
 
+  /**
+   * The 64-bit word goes out most significant byte first and the GBA is little-endian,
+   * so the byte the game sends first is the last of the eight in memory — which is
+   * where a `.sav` file keeps it too, and why `#data` is one.
+   */
   #loadReadData(): void {
     const byteAddr = this.#address * 8;
     this.#sendBuffer = 0n;
-    for (let i = 0; i < 8; i++) {
+    for (let i = 7; i >= 0; i--) {
       const byte = this.#data[byteAddr + i] ?? 0xff;
       this.#sendBuffer = (this.#sendBuffer << 8n) | BigInt(byte);
     }
@@ -1417,8 +1533,7 @@ class GbaEeprom {
       return;
     }
     for (let i = 0; i < 8; i++) {
-      const shift = BigInt((7 - i) * 8);
-      this.#data[byteAddr + i] = Number((this.#bitBuffer >> shift) & 0xffn);
+      this.#data[byteAddr + i] = Number((this.#bitBuffer >> BigInt(i * 8)) & 0xffn);
     }
     this.#state = EepromState.WriteReady;
   }
