@@ -727,6 +727,23 @@ describe('inspection', () => {
     const samples = mainGlobals.find((v) => v.name === 'g_samples')!;
     const elements = await variables(client, samples.variablesReference);
     expect(elements[1]!.evaluateName).toBe('g_samples[1]');
+    // a pointer's one row is what it points at, and it evaluates back to the same value
+    const counterRef = members.find((m) => m.name === 'counterRef')!;
+    const pointee = (await variables(client, counterRef.variablesReference))[0]!;
+    expect(pointee.evaluateName).toBe('*(g_player.counterRef)');
+    const reread = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: pointee.evaluateName!,
+      frameId: 2,
+    });
+    expect(reread.result).toBe(pointee.value);
+    // every name the tree hands back round-trips through evaluate
+    for (const name of ['g_player.pos.x', 'g_samples[1]', 'g_player']) {
+      const back = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+        expression: name,
+        frameId: 2,
+      });
+      expect(back.result).toBeTypeOf('string');
+    }
     const machine = await variables(client, scopes[3]!.variablesReference);
     expect(machine.find((v) => v.name === 'frame')!.evaluateName).toBe('frame');
     expect(machine.find((v) => v.name === 'function')!.evaluateName).toBeUndefined();
@@ -775,6 +792,19 @@ describe('inspection', () => {
     });
     expect(compared.result.startsWith('1')).toBe(true);
     expect(await num(client, 'g_player.pos.x')).toBe(42);
+
+    // a variable index is a place like any other, in the console and in a hover
+    const indexed = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: 'g_samples[g_frame & 3] = 5',
+      context: 'repl',
+    });
+    expect(indexed.result).toBe('5');
+    const readBack = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: 'g_samples[g_frame & 3]',
+      context: 'hover',
+    });
+    expect(readBack.result).toBe('5');
+    expect(readBack.memoryReference).toMatch(/^0x03/);
 
     // what cannot be written is refused where it was asked, not as a notification
     const refused = await client.request('evaluate', { expression: 'g_player.pos = 1', context: 'repl' });
@@ -1127,9 +1157,9 @@ describe('emulator requests', () => {
       size: 2,
       region: 'iwram',
     });
-    const gKeys = parseInt(
+    // `&g_keys` is a pointer: a hex address, as the variables tree spells one
+    const gKeys = Number(
       (await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression: '&g_keys' })).result,
-      10,
     );
     expect(found.addresses).toContain(gKeys);
     const trace = await client.body<GbaKitRequests['gba-kit/trace']['body']>('gba-kit/trace', { count: 5 });

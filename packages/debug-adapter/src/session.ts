@@ -143,13 +143,17 @@ function isIdentifier(name: string): boolean {
   return /^[A-Za-z_]\w*$/.test(name);
 }
 
-/** `parent.child`, `parent[3]`; null when the child cannot be named in the expression grammar. */
+/** `parent.child`, `parent[3]`, `*(parent)`; null when the child cannot be named in the expression grammar. */
 function childExpression(prefix: string | null, name: string): string | null {
   if (prefix === null) {
     return null;
   }
   if (name.startsWith('[')) {
     return prefix + name;
+  }
+  // the one row a pointer has is what it points at
+  if (name === '*') {
+    return `*(${prefix})`;
   }
   if (isIdentifier(name)) {
     return `${prefix}.${name}`;
