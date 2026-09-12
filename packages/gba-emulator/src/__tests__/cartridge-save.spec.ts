@@ -198,16 +198,59 @@ describe('the EEPROM address width', () => {
     expect(readWord(bus, 1000, 14)).toEqual(bytes.subarray(8000, 8008).slice().reverse());
   });
 
-  it('is why an import says: auto-detection latches 6 bits and never revises', () => {
+  it('takes the width the first read asks with, whatever the file suggested', () => {
+    // a 4 Kbit save padded out to 8 KB, which is the file several emulators write
+    const bus = busFor('EEPROM_V121');
+    const bytes = pattern(512);
+    const padded = new Uint8Array(8192).fill(0xff);
+    padded.set(bytes);
+    bus.writeBackup(padded);
+    expect(bus.eepromAddrBits).toBe(14);
+    expect(readWord(bus, 40, 6)).toEqual(bytes.subarray(320, 328).slice().reverse());
+    expect(bus.eepromAddrBits).toBe(6);
+  });
+
+  it('takes it the other way round too, so a 64 Kbit cartridge reads past its first 512 bytes', () => {
+    const bus = busFor('EEPROM_V121');
+    const bytes = pattern(8192);
+    bus.writeBackup(bytes.subarray(0, 512));
+    expect(bus.eepromAddrBits).toBe(6);
+    bus.writeBackup(bytes);
+    const snap = bus.serialize();
+    snap.eeprom.addrBits = 6;
+    bus.deserialize(snap);
+    expect(readWord(bus, 1000, 14)).toEqual(bytes.subarray(8000, 8008).slice().reverse());
+    expect(bus.eepromAddrBits).toBe(14);
+  });
+
+  it('settles it from the transfer when no file has said, which is how a game boots', () => {
     const bus = busFor('EEPROM_V121');
     const bytes = pattern(8192);
     bus.writeBackup(bytes);
-    bus.reset();
-    bus.writeBackup(bytes);
-    // undo what `writeBackup` settled, leaving the guess to the first transfer
+    // undo what `writeBackup` guessed, leaving the width to the first transfer
     const snap = bus.serialize();
     snap.eeprom.addrBits = 0;
     bus.deserialize(snap);
-    expect(readWord(bus, 1000, 14)).not.toEqual(bytes.subarray(8000, 8008).slice().reverse());
+    expect(readWord(bus, 1000, 14)).toEqual(bytes.subarray(8000, 8008).slice().reverse());
+    expect(bus.eepromAddrBits).toBe(14);
+  });
+
+  it('writes where the read settled, not where the file guessed', () => {
+    const bus = busFor('EEPROM_V121');
+    const padded = new Uint8Array(8192).fill(0xff);
+    bus.writeBackup(padded);
+    readWord(bus, 0, 6);
+    const wire = Uint8Array.of(0x41, 0x4f, 0x4e, 0x4f, 0x4c, 0x4b, 0x5f, 0x4b);
+    writeWord(bus, 2, 6, wire);
+    expect(Buffer.from(bus.readBackup()!.subarray(16, 24)).toString('latin1')).toBe('K_KLONOA');
+  });
+
+  it('leaves nothing of a half-clocked command behind when a file arrives mid-transfer', () => {
+    const bus = busFor('EEPROM_V121');
+    const bytes = pattern(512);
+    // a read request goes in, then the import lands before the game reads the word back
+    sendBits(bus, [1, 1, ...bitsOf(3, 6), 0]);
+    bus.writeBackup(bytes);
+    expect(readWord(bus, 3, 6)).toEqual(bytes.subarray(24, 32).slice().reverse());
   });
 });

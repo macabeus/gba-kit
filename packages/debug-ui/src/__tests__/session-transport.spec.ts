@@ -19,13 +19,16 @@ const FRAME_MS = 1000 / 59.7275;
 /**
  * The fixture ROM with an SDK save-type string appended past the code, so a session
  * has a cartridge that declares a save; `loadRom` only scans the bytes it is handed.
+ * The scan reads word-aligned strings, so the string goes at the next word rather than
+ * wherever the fixture happens to end.
  */
 function romDeclaring(id: string): Uint8Array {
   const base = new Uint8Array(readFileSync(join(fixtures, 'build', 'thumb-O0.gba')));
-  const rom = new Uint8Array(base.length + id.length + 4);
+  const at = (base.length + 3) & ~3;
+  const rom = new Uint8Array(at + id.length + 4);
   rom.set(base);
   for (let i = 0; i < id.length; i++) {
-    rom[base.length + i] = id.charCodeAt(i);
+    rom[at + i] = id.charCodeAt(i);
   }
   return rom;
 }
@@ -419,7 +422,7 @@ describe('a .sav through the session transport', () => {
     await transport.request('gba-kit/loadState', { path: first.path });
     expect(await frameOf(transport)).toBe(0);
     const exported = await transport.request('gba-kit/exportSave');
-    expect(exported).toEqual({ bytes: toBase64(sav(512)), size: 512, declared: 'EEPROM_V121' });
+    expect(exported).toEqual({ bytes: toBase64(sav(512)) });
   });
 
   it('numbers against the store the host gave it too', async () => {

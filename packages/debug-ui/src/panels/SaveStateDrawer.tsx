@@ -28,7 +28,7 @@ export function SaveStateDrawer({ transport, stopped }: { transport: Transport; 
     transport.pickFile && {
       label: 'Import from a .sav file',
       onSelect: () =>
-        void saves.importSave(transport.pickFile!).then((added) => {
+        void saves.importSave().then((added) => {
           if (added) {
             setOpen(true);
           }
@@ -36,7 +36,7 @@ export function SaveStateDrawer({ transport, stopped }: { transport: Transport; 
     },
     transport.saveFile && {
       label: 'Export to a .sav file',
-      onSelect: () => void saves.exportSave(transport.saveFile!),
+      onSelect: () => void saves.exportSave(),
     },
   ].filter((item) => item !== undefined);
 

@@ -65,7 +65,7 @@ export interface CartridgeSave {
   id: string | null;
 }
 
-/** The SDK's save-type strings, longest prefix first so `SRAM_V` cannot shadow `SRAM_F_V`. */
+/** The SDK's save-type strings; no one of them is a prefix of another, so the order is free. */
 const SAVE_TYPE_STRINGS: ReadonlyArray<readonly [string, SaveType]> = [
   ['EEPROM_V', 'eeprom'],
   ['SRAM_F_V', 'sram'],
@@ -313,10 +313,9 @@ export class GbaSystemBus implements MemoryBus {
 
   /**
    * The save type from the SDK string the build embeds. The string is word-aligned and
-   * ends in three version digits, which is what keeps a chance run of letters elsewhere
-   * in the ROM from being read as a declaration. `SRAM_F_V` comes before `SRAM_V` and
-   * the sized flash strings before bare `FLASH_V`: the shorter one is a prefix of the
-   * longer, so the longer has to be tried first.
+   * ends in three version digits, and requiring both is what keeps a chance run of
+   * letters elsewhere in the ROM — inside compressed data, most of all — from being
+   * read as a declaration.
    */
   #detectSaveType(rom: Uint8Array): void {
     this.#save = { type: null, id: null };
@@ -1285,8 +1284,8 @@ export class GbaSystemBus implements MemoryBus {
     this.oam.set(snap.oam);
     this.sram.set(snap.sram);
     this.mmioRegisters.set(snap.mmioRegisters);
-    // whether there is a chip behind the 0x0E window is the cartridge's to say, like #rom:
-    // a state carries the field (the format is unchanged) but never overrules the ROM with it
+    // `snap.hasSram` is passed over: what is behind the 0x0E window is the cartridge's to
+    // say, like #rom, and a state of a cartridge without one must not take this one's away
     this.#waitcnt = snap.waitcnt;
     this.#postflg = snap.postflg;
     this.#lastBiosRead = snap.lastBiosRead;
@@ -1350,6 +1349,11 @@ class GbaEeprom {
   reset(): void {
     this.#data.fill(0xff); // EEPROM defaults to all 1s
     this.#addrBits = 0;
+    this.#idle();
+  }
+
+  /** Nothing in flight on the serial line: no half-clocked command carries over. */
+  #idle(): void {
     this.#state = EepromState.Idle;
     this.#command = 0;
     this.#address = 0;
@@ -1395,15 +1399,17 @@ class GbaEeprom {
   }
 
   /**
-   * Put a `.sav` in the chip, erased past its end, and take the address width its size
-   * implies: 6 bits for 4 Kbit, 14 for 64 Kbit. Auto-detection latches 6 as soon as it
-   * has six address bits and never revises, so a 64 Kbit save that waits for it is
-   * addressed as if it were a 4 Kbit one for the rest of the run.
+   * Put a `.sav` in the chip, erased past its end and with nothing in flight on the
+   * line. The file's size implies an address width — 6 bits for 4 Kbit, 14 for 64 Kbit
+   * — which is all there is to go on before the game runs, and which is only what the
+   * chip reports until the first transfer says how wide the cartridge really addresses:
+   * a 4 Kbit save someone padded out to 8 KB is a file whose size means nothing.
    */
   install(bytes: Uint8Array): void {
     this.#data.fill(0xff);
     this.#data.set(bytes);
     this.#addrBits = bytes.length > 512 ? 14 : 6;
+    this.#idle();
   }
 
   /** Write a single bit to the EEPROM serial interface */
@@ -1428,22 +1434,23 @@ class GbaEeprom {
         this.#address = (this.#address << 1) | bit;
         this.#bitsReceived++;
 
-        // Auto-detect address size: if we've received 6 bits and this is followed
-        // by a stop bit (for read) or data (for write), detect 6-bit addressing.
-        // If more bits come, it's 14-bit addressing.
-        // We detect based on the DMA transfer length:
-        // - 4Kbit read request: 9 bits total (1 start + 1 cmd + 6 addr + 1 stop) = 9 × 16-bit DMA
-        // - 64Kbit read request: 17 bits total (1 start + 1 cmd + 14 addr + 1 stop) = 17 × 16-bit DMA
-        // For auto-detection: use 6-bit if total bits suggests small EEPROM
-        if (this.#addrBits === 0) {
-          // Can't detect yet — assume 6-bit initially, upgrade to 14-bit if we get more
-          if (this.#bitsReceived === 6) {
-            // Could be 6-bit. Will confirm when next state transition happens.
-            // For now, tentatively accept 6 bits.
-            this.#addrBits = 6;
-            this.#finishAddressPhase();
+        // A read's address phase ends when the game turns around and reads, so `read`
+        // closes it and the transfer's own length says how wide the address was. A write
+        // has 64 data bits behind the address and no such turn, so it needs the width up
+        // front: whatever a read or an imported file has settled, or 4 Kbit if neither has.
+        if (this.#command === 1) {
+          // no chip takes an address this long, so what is coming in is not a request: the
+          // line goes idle for the next start bit to resync it, rather than swallowing
+          // everything after a read the game never came back for
+          if (this.#bitsReceived > 15) {
+            this.#idle();
           }
-        } else if (this.#bitsReceived === this.#addrBits) {
+          break;
+        }
+        if (this.#addrBits === 0) {
+          this.#addrBits = 6;
+        }
+        if (this.#bitsReceived === this.#addrBits) {
           this.#finishAddressPhase();
         }
         break;
@@ -1479,6 +1486,9 @@ class GbaEeprom {
 
   /** Read a single bit from the EEPROM serial interface */
   read(): number {
+    if (this.#state === EepromState.ReceivingAddress && this.#command === 1) {
+      this.#settleAddressWidth();
+    }
     if (this.#state === EepromState.SendingData) {
       if (this.#sendPos < 4) {
         // First 4 bits are dummy (always 0)
@@ -1497,6 +1507,23 @@ class GbaEeprom {
 
     // When not in send mode, return 1 (ready)
     return 1;
+  }
+
+  /**
+   * The game is reading back what it just clocked in, so its read request is whole and
+   * its length is what says how wide this cartridge addresses: 9 bits of request for a
+   * 4 Kbit chip, 17 for a 64 Kbit one, the last of them the stop bit. The cartridge has
+   * the final word on the width — a `.sav` file's size is only a guess at it, and a
+   * padded 4 Kbit save is a wrong one.
+   */
+  #settleAddressWidth(): void {
+    const width = this.#bitsReceived - 1;
+    if (width !== 6 && width !== 14) {
+      return;
+    }
+    this.#addrBits = width;
+    this.#address = (this.#address >>> 1) & ((1 << width) - 1);
+    this.#finishAddressPhase();
   }
 
   #finishAddressPhase(): void {

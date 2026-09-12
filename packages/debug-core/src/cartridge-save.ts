@@ -10,26 +10,31 @@
  */
 import type { CartridgeSave, SaveType } from '@gba-kit/gba-emulator';
 
-/** The `.sav` sizes each declared save type has. */
+/** The `.sav` sizes each declared save type has; the flash ones bound what a file could be, since no flash save is taken. */
 export const SAVE_FILE_SIZES: Record<SaveType, readonly number[]> = {
-  eeprom: [512, 8192], // 4 Kbit and 64 Kbit
+  eeprom: [512, 8192], // 4 Kbit and 64 Kbit, which the chip's address width tells apart, not the file
   sram: [32768],
   flash512: [65536],
   flash1m: [131072],
 };
 
+/** No `.sav` of any kind is bigger, so a file past it is one a host handed over by mistake. */
+export const MAX_SAVE_FILE_SIZE = Math.max(...Object.values(SAVE_FILE_SIZES).flat());
+
 /** How many states may share a name before `freeStateName` gives up looking for a free one. */
 const MAX_SAME_NAME = 999;
 
 /**
- * gba-kit has 64 KB of cartridge backup memory and no bank register, so the two banks
- * a 1 Mbit flash chip has cannot both be there. Writing the first of them and calling
- * it done would hand the game half a save.
+ * gba-kit serves the 0x0E window as plain memory and emulates no flash chip: the
+ * identify sequence a flash driver starts with is not answered, so the game reads save
+ * bytes where a chip ID should be, gives up, and never reads the save at all — while
+ * the command bytes it wrote land in the save as data. A 1 Mbit chip is further out of
+ * reach still: two banks of 64 KB, where there is one window and no bank register.
  */
-function refuseFlash1m(save: CartridgeSave): never {
+function refuseFlash(save: CartridgeSave): never {
   throw new Error(
-    `this ROM declares ${save.id}, a 128 KB flash chip in two banks; ` +
-      'gba-kit has 64 KB of cartridge backup memory and no bank switching',
+    `this ROM declares ${save.id}, a flash chip; gba-kit backs the cartridge with plain ` +
+      'memory and emulates no flash chip, so a game cannot read a flash .sav back',
   );
 }
 
@@ -47,8 +52,8 @@ export function checkSaveFile(save: CartridgeSave, byteLength: number): void {
   if (save.type === null) {
     throw new Error('this ROM declares no save type, so there is nowhere to put a .sav');
   }
-  if (save.type === 'flash1m') {
-    refuseFlash1m(save);
+  if (save.type === 'flash512' || save.type === 'flash1m') {
+    refuseFlash(save);
   }
   if (!SAVE_FILE_SIZES[save.type].includes(byteLength)) {
     throw new Error(
@@ -68,8 +73,8 @@ export function saveFileSize(save: CartridgeSave, eepromAddrBits: number): numbe
   if (save.type === null) {
     throw new Error('this ROM declares no save type, so it has no save to export');
   }
-  if (save.type === 'flash1m') {
-    refuseFlash1m(save);
+  if (save.type === 'flash512' || save.type === 'flash1m') {
+    refuseFlash(save);
   }
   if (save.type !== 'eeprom') {
     return SAVE_FILE_SIZES[save.type][0]!;

@@ -237,9 +237,21 @@ function registerIndex(name: string): number {
   return i >= 0 && i <= 15 ? i : -1;
 }
 
-/** A state name as a file name: anything a path could not carry becomes `_`. */
+/** How much of a state's name its file carries. */
+const NAME_LIMIT = 80;
+
+/**
+ * A state name as a file name: anything a path could not carry becomes `_`. A long name
+ * keeps the `(2)`, `(3)`… an import numbers a repeat with — it is what tells the files
+ * apart, so shortening has to take from the middle rather than the end.
+ */
 function safeName(name: string): string {
-  return name.replace(/[^\w.-]+/g, '_').slice(0, 80);
+  const safe = name.replace(/[^\w.-]+/g, '_');
+  if (safe.length <= NAME_LIMIT) {
+    return safe;
+  }
+  const repeat = /_\d+_?$/.exec(safe)?.[0] ?? '';
+  return safe.slice(0, NAME_LIMIT - repeat.length) + repeat;
 }
 
 function fileKind(file: string): 'file' | 'directory' | 'missing' {
@@ -1424,10 +1436,8 @@ export class GbaDebugSession extends DebugSession {
         const a = args as Args<'gba-kit/importSave'>;
         return this.#importSave(s, base64ToBytes(needString(a.bytes, 'bytes')), optionalString(a.name, 'name'));
       }
-      case 'gba-kit/exportSave': {
-        const { bytes, declared } = s.exportSaveFile();
-        return { bytes: bytesToBase64(bytes), size: bytes.length, declared };
-      }
+      case 'gba-kit/exportSave':
+        return { bytes: bytesToBase64(s.exportSaveFile()) };
       case 'gba-kit/ppu':
         return ppuBody(s, args as PpuArguments);
       case 'gba-kit/ioRegisters':

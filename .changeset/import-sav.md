@@ -19,8 +19,10 @@ and in-process the requests are `gba-kit/importSave` and `gba-kit/exportSave`.
 Which chip a file belongs in follows from the save type the ROM declares and the
 file's size together, and a file those two do not account for is refused by a
 message that names both rather than being padded or truncated into the wrong chip.
-A `FLASH1M_V` cartridge is refused in both directions: its 128 KB live in two
-banks, and gba-kit has 64 KB of cartridge backup memory and no bank switching.
+A flash cartridge is refused in both directions: gba-kit backs the cartridge with
+plain memory and emulates no flash chip, so a game's identify sequence goes
+unanswered and it never reads the save — while the command bytes it writes land in
+the save as data.
 
 Three fixes in the emulator come with it:
 
@@ -33,8 +35,11 @@ Three fixes in the emulator come with it:
   but that game's save inside it will not be read. Re-import the `.sav`.
 - **`SRAM_F_V` cartridges get their SRAM.** Detection looked for the literal
   `SRAM_V`, which `SRAM_F_V102` does not contain, so those games had no working
-  save at all. It now reads the SDK string the build embeds — word-aligned, longest
-  prefix first, three version digits — and keeps it, so a message can name it.
-- **A 64 Kbit EEPROM is addressed correctly when a `.sav` says it is one.** Address
-  width was guessed from the first transfer, which latches 6 bits and never
-  revises; an import sets the width its file's size implies.
+  save at all. It now reads the SDK string the build embeds — word-aligned, with
+  three version digits — and keeps it, so a message can name it.
+- **A 64 Kbit EEPROM is addressed correctly.** The address width was latched at 6
+  bits by the first six bits of any address and never revised, so a 64 Kbit
+  cartridge read the wrong words for the rest of the run. The width now comes from
+  the length of the transfer the game makes, which is what carries it: a `.sav` only
+  suggests one until the cartridge says, so a 4 Kbit save padded out to 8 KB — the
+  file some emulators write — is read as the 4 Kbit save it is.

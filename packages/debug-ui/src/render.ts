@@ -15,8 +15,12 @@ export function cssColor(color: number): string {
 }
 
 /**
- * Bytes to base64 a character at a time: a `.sav` is up to 64 KB, and spreading that
- * into `String.fromCharCode` is as many arguments as the call stack will hold.
+ * Base64 the browser's way, which is every debug-ui module's way: `@gba-kit/debug-core`
+ * has a pair of its own, but it exports them from an index that carries the emulator
+ * with it, and `transport.js` is a module an extension host imports on its own.
+ *
+ * Bytes go over a character at a time: a `.sav` is up to 64 KB, and spreading that into
+ * `String.fromCharCode` is as many arguments as the call stack will hold.
  */
 export function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';

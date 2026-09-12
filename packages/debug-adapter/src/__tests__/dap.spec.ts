@@ -7,7 +7,7 @@ import type { DebugProtocol } from '@vscode/debugprotocol';
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { type Server, type Socket, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -1311,14 +1311,19 @@ describe('emulator requests', () => {
   /**
    * A `.sav` is imported against a ROM that declares a save type, which the fixture
    * does not: the string is appended past the code, where `loadRom`'s scan finds it
-   * and nothing executes it.
+   * and nothing executes it. The scan reads word-aligned strings, so the padding is
+   * what puts it where a build would have — the fixture's own length says nothing.
    */
+  function romDeclaring(base: Buffer, id: string): Buffer {
+    return Buffer.concat([base, Buffer.alloc(-base.length & 3), Buffer.from(`${id}\0`)]);
+  }
+
   it('imports a .sav as a state of its own, numbering rather than writing over one', async () => {
     const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
     tempDirs.push(projectDir);
     const base = await readFile(ROM);
     const rom = join(projectDir, 'eeprom.gba');
-    await writeFile(rom, Buffer.concat([base, Buffer.from('EEPROM_V121\0')]));
+    await writeFile(rom, romDeclaring(base, 'EEPROM_V121'));
     const client = await launch({ projectDir, stopOnEntry: true, extra: { rom }, elf: null });
     await client.event('stopped');
 
@@ -1352,12 +1357,19 @@ describe('emulator requests', () => {
       'Klonoa - Empire of Dreams (USA) (2)',
     ]);
 
+    // a name longer than a file name can hold numbers all the same: it is the repeat, not
+    // the start of the name, that tells the two files apart
+    const long = { bytes: args.bytes, name: 'K'.repeat(120) };
+    const firstLong = await client.body<SavedStateInfo>('gba-kit/importSave', long);
+    const secondLong = await client.body<SavedStateInfo>('gba-kit/importSave', long);
+    expect(secondLong.name).toBe(`${'K'.repeat(120)} (2)`);
+    expect(secondLong.path).not.toBe(firstLong.path);
+    expect(basename(firstLong.path).length).toBeLessThanOrEqual(basename(secondLong.path).length);
+
     // it loads like any other state, and the machine then holds the file
     expect((await stopped(client, 'gba-kit/loadState', { path: first.path })).reason).toBe('restart');
     expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(0);
-    const exported = await client.body<{ bytes: string; size: number; declared: string }>('gba-kit/exportSave');
-    expect(exported.declared).toBe('EEPROM_V121');
-    expect(exported.size).toBe(512);
+    const exported = await client.body<GbaKitRequests['gba-kit/exportSave']['body']>('gba-kit/exportSave');
     expect(base64Bytes(exported.bytes)).toBe(512);
     expect(Buffer.from(exported.bytes, 'base64').equals(sav)).toBe(true);
   });
@@ -1367,7 +1379,7 @@ describe('emulator requests', () => {
     tempDirs.push(projectDir);
     const base = await readFile(ROM);
     const rom = join(projectDir, 'eeprom.gba');
-    await writeFile(rom, Buffer.concat([base, Buffer.from('EEPROM_V121\0')]));
+    await writeFile(rom, romDeclaring(base, 'EEPROM_V121'));
     const client = await launch({ projectDir, stopOnEntry: true, extra: { rom }, elf: null });
     await client.event('stopped');
 

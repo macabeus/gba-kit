@@ -244,7 +244,7 @@ export interface TransportBackend {
 }
 
 /** What a host that can open no file answers, rather than leaving the webview waiting. */
-const NO_FILE_DIALOG = 'this host cannot open files';
+export const NO_FILE_DIALOG = 'this host cannot open files';
 
 /** Handle one message from a webview transport on the host side. */
 export async function serveTransport(
@@ -278,7 +278,13 @@ export async function serveTransport(
       backend.openText?.(message.content, message.language, message.title);
       return;
     case 'pickFile':
-      await answer(message.id, backend.pickFile, { title: message.title, filters: message.filters }, reply);
+      await answer(
+        message.id,
+        backend.pickFile,
+        { title: message.title, filters: message.filters },
+        reply,
+        (file) => file && { name: file.name, bytes: bytesToBase64(file.bytes) },
+      );
       return;
     case 'saveFile':
       await answer(
@@ -291,6 +297,7 @@ export async function serveTransport(
           bytes: base64ToBytes(message.bytes),
         },
         reply,
+        (kept) => kept,
       );
       return;
     case 'showPanel':
@@ -301,29 +308,23 @@ export async function serveTransport(
 
 /**
  * Run one of the optional file-dialog capabilities and answer the message that asked
- * for it. A host that has none answers so rather than leaving the webview waiting; a
- * file coming back crosses base64-encoded, the way one going out does.
+ * for it, with `wire` putting what it returned in the shape the message union declares —
+ * a file's bytes cross base64-encoded, the way the ones going out do. A host without
+ * the capability answers so rather than leaving the webview waiting.
  */
 async function answer<A, R>(
   id: number,
   capability: ((options: A) => Promise<R>) | undefined,
   options: A,
   reply: (message: HostToTransport) => void,
+  wire: (answer: R) => unknown,
 ): Promise<void> {
   if (!capability) {
     reply({ type: 'response', id, error: NO_FILE_DIALOG });
     return;
   }
   try {
-    const body = await capability(options);
-    reply({
-      type: 'response',
-      id,
-      body:
-        body && typeof body === 'object' && 'bytes' in body
-          ? { ...body, bytes: bytesToBase64(body.bytes as Uint8Array) }
-          : body,
-    });
+    reply({ type: 'response', id, body: wire(await capability(options)) });
   } catch (err) {
     reply({ type: 'response', id, error: (err as Error).message });
   }

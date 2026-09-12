@@ -5,7 +5,7 @@
 import type { CartridgeSave } from '@gba-kit/gba-emulator';
 import { describe, expect, it } from 'vitest';
 
-import { SAVE_FILE_SIZES, checkSaveFile, freeStateName, saveFileSize } from '../cartridge-save.js';
+import { MAX_SAVE_FILE_SIZE, SAVE_FILE_SIZES, checkSaveFile, freeStateName, saveFileSize } from '../cartridge-save.js';
 
 const EEPROM: CartridgeSave = { type: 'eeprom', id: 'EEPROM_V121' };
 const SRAM: CartridgeSave = { type: 'sram', id: 'SRAM_V113' };
@@ -18,7 +18,6 @@ describe('which .sav belongs in which cartridge', () => {
     [EEPROM, 512],
     [EEPROM, 8192],
     [SRAM, 32768],
-    [FLASH, 65536],
   ])('takes a %o file of %i bytes', (save, size) => {
     expect(() => checkSaveFile(save, size)).not.toThrow();
   });
@@ -26,8 +25,6 @@ describe('which .sav belongs in which cartridge', () => {
   it.each([
     [EEPROM, 32768, 'this ROM declares EEPROM_V121, whose save is 512 or 8192 bytes; this file is 32768 bytes'],
     [SRAM, 65536, 'this ROM declares SRAM_V113, whose save is 32768 bytes; this file is 65536 bytes'],
-    [FLASH, 32768, 'this ROM declares FLASH512_V130, whose save is 65536 bytes; this file is 32768 bytes'],
-    [FLASH, 0, 'this ROM declares FLASH512_V130, whose save is 65536 bytes; this file is 0 bytes'],
     [EEPROM, 0, 'this ROM declares EEPROM_V121, whose save is 512 or 8192 bytes; this file is 0 bytes'],
     [SRAM, 0, 'this ROM declares SRAM_V113, whose save is 32768 bytes; this file is 0 bytes'],
     [NOTHING, 512, 'this ROM declares no save type, so there is nowhere to put a .sav'],
@@ -35,10 +32,16 @@ describe('which .sav belongs in which cartridge', () => {
     expect(() => checkSaveFile(save, size)).toThrow(message);
   });
 
-  it.each([131072, 65536, 0])('refuses a 1 Mbit flash cartridge at %i bytes, both banks or not', (size) => {
-    expect(() => checkSaveFile(FLASH1M, size)).toThrow(
-      'this ROM declares FLASH1M_V103, a 128 KB flash chip in two banks; ' +
-        'gba-kit has 64 KB of cartridge backup memory and no bank switching',
+  it.each([
+    [FLASH, 65536],
+    [FLASH, 32768],
+    [FLASH, 0],
+    [FLASH1M, 131072],
+    [FLASH1M, 65536],
+  ])('refuses %o at %i bytes, because no game could read it back', (save, size) => {
+    expect(() => checkSaveFile(save, size)).toThrow(
+      `this ROM declares ${save.id}, a flash chip; gba-kit backs the cartridge with plain ` +
+        'memory and emulates no flash chip, so a game cannot read a flash .sav back',
     );
   });
 });
@@ -46,7 +49,6 @@ describe('which .sav belongs in which cartridge', () => {
 describe('how big the exported file is', () => {
   it.each([
     [SRAM, 0, 32768],
-    [FLASH, 0, 65536],
     [EEPROM, 6, 512],
     [EEPROM, 14, 8192],
   ])('gives %o at %i address bits %i bytes', (save, addrBits, size) => {
@@ -64,12 +66,16 @@ describe('how big the exported file is', () => {
     expect(() => saveFileSize(NOTHING, 0)).toThrow('this ROM declares no save type, so it has no save to export');
   });
 
-  it('refuses a 1 Mbit flash cartridge, which it could only half read', () => {
-    expect(() => saveFileSize(FLASH1M, 0)).toThrow(/no bank switching/);
+  it.each([FLASH, FLASH1M])('has nothing worth exporting from %o, which the game never wrote', (save) => {
+    expect(() => saveFileSize(save, 0)).toThrow(/emulates no flash chip/);
   });
 
   it('answers with the size the declaration gives, not the array in memory', () => {
     expect(SAVE_FILE_SIZES.sram).toEqual([32768]);
+  });
+
+  it('bounds what a file could be at the biggest .sav there is, for a client checking before it sends one', () => {
+    expect(MAX_SAVE_FILE_SIZE).toBe(131072);
   });
 });
 

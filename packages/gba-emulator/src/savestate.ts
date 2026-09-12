@@ -114,6 +114,7 @@ export interface SystemBusSnapshot {
   oam: Uint8Array;
   sram: Uint8Array;
   mmioRegisters: Uint8Array;
+  /** whether the 0x0E window is backed — the cartridge's to say, so a state carries it for older readers and `deserialize` passes over it */
   hasSram: boolean;
   waitcnt: number;
   postflg: number;

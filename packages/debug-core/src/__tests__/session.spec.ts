@@ -2020,7 +2020,7 @@ describe('a .sav as a save state', () => {
     session.loadState(session.importSaveState(sav, 'Klonoa'));
     expect(session.frame).toBe(0);
     expect(session.machine.gba.bus.readBackup()!.subarray(0, 512)).toEqual(sav);
-    expect(session.exportSaveFile()).toEqual({ bytes: sav, declared: 'EEPROM_V121' });
+    expect(session.exportSaveFile()).toEqual(sav);
   });
 
   it('puts an SRAM file in the SRAM window, at the size the declaration gives', async () => {
@@ -2028,7 +2028,7 @@ describe('a .sav as a save state', () => {
     const sav = savOf(32768);
     session.loadState(session.importSaveState(sav, 'x'));
     expect(session.machine.gba.bus.sram.subarray(0, 32768)).toEqual(sav);
-    expect(session.exportSaveFile().bytes).toEqual(sav);
+    expect(session.exportSaveFile()).toEqual(sav);
   });
 
   it('refuses a file the cartridge cannot account for, and touches nothing doing it', async () => {
@@ -2049,6 +2049,15 @@ describe('a .sav as a save state', () => {
     const session = await sessionFor('EEPROM_V121');
     const sav = savOf(8192);
     session.loadState(session.importSaveState(sav, 'x'));
-    expect(session.exportSaveFile().bytes).toEqual(sav);
+    expect(session.exportSaveFile()).toEqual(sav);
   });
+
+  it.each(['FLASH_V126', 'FLASH512_V130', 'FLASH1M_V103'])(
+    'refuses a %s cartridge in both directions, since no game could read the save back',
+    async (id) => {
+      const session = await sessionFor(id);
+      expect(() => session.importSaveState(savOf(65536), 'x')).toThrow(/emulates no flash chip/);
+      expect(() => session.exportSaveFile()).toThrow(/emulates no flash chip/);
+    },
+  );
 });

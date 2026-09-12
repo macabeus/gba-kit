@@ -10,8 +10,6 @@ import {
   EVENT_BREAKPOINT_KINDS,
   type InputRecording,
   type Session,
-  base64ToBytes,
-  bytesToBase64,
   freeStateName,
   renameSaveState,
   saveStateMeta,
@@ -33,6 +31,7 @@ import {
 } from '@gba-kit/debug-core/protocol';
 
 import type { PanelId } from './panels/DebugPanels.js';
+import { base64ToBytes, bytesToBase64 } from './render.js';
 import type { ControlAction, Transport } from './transport.js';
 
 export interface SessionTransportOptions {
@@ -260,10 +259,8 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         }
         return { ...stateInfoOf(stateName, path, text), createdAt } as never;
       }
-      case 'gba-kit/exportSave': {
-        const { bytes, declared } = session.exportSaveFile();
-        return { bytes: bytesToBase64(bytes), size: bytes.length, declared } as never;
-      }
+      case 'gba-kit/exportSave':
+        return { bytes: bytesToBase64(session.exportSaveFile()) } as never;
       case 'gba-kit/ppu':
         return ppuBody(session, a as PpuArguments) as never;
       case 'gba-kit/ioRegisters':

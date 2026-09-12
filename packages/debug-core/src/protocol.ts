@@ -24,6 +24,9 @@ import type { EventEntry, TraceEntry } from './rings.js';
 import type { HistoryInfo, Position, Session, SessionState, StopReason } from './session.js';
 import { type SaveStateFile, bytesToBase64 } from './snapshot-codec.js';
 
+/** The most a `gba-kit/importSave` payload can carry, so a client can turn a mis-picked file away before encoding it. */
+export { MAX_SAVE_FILE_SIZE } from './cartridge-save.js';
+
 /** What the head of a save-state file says about it. */
 export type SaveStateMeta = Partial<Omit<SaveStateFile, 'snapshot'>>;
 
@@ -189,8 +192,8 @@ export interface GbaKitRequests {
    * written over. The machine being debugged is not touched, and the state is not loaded.
    */
   'gba-kit/importSave': { args: { bytes: string; name?: string }; body: SavedStateInfo };
-  /** The machine's cartridge backup memory as a `.sav`: `bytes` base64-encoded, and the save-type string the ROM declares. */
-  'gba-kit/exportSave': { args?: Record<string, never>; body: { bytes: string; size: number; declared: string } };
+  /** The machine's cartridge backup memory as a `.sav`, base64-encoded and the size its declared save type gives it. */
+  'gba-kit/exportSave': { args?: Record<string, never>; body: { bytes: string } };
 
   /** A PPU view; a `tiles` request answers `TILES.defaultCount` tiles unless told how many, at most `TILES.maxCount`. */
   'gba-kit/ppu': { args: PpuArguments; body: PpuBody };

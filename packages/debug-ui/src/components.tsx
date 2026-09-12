@@ -177,6 +177,12 @@ export function Menu({
         title={label}
         onClick={() => setOpen(!open)}
         onKeyDown={(e) => {
+          // Escape reaches the list's handler only once the focus is in it, so the
+          // trigger closes what it opened
+          if (e.key === 'Escape') {
+            setOpen(false);
+            return;
+          }
           if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') {
             return;
           }

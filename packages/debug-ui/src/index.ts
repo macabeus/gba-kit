@@ -35,7 +35,6 @@ export {
   StampHeader,
   Tabs,
   attempt,
-  menuFocus,
   newest,
   parseNumber,
   tabIds,

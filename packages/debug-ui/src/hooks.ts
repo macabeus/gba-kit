@@ -1,8 +1,8 @@
-import type { SavedStateInfo, StateBody } from '@gba-kit/debug-core/protocol';
+import { MAX_SAVE_FILE_SIZE, type SavedStateInfo, type StateBody } from '@gba-kit/debug-core/protocol';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import { base64ToBytes, bytesToBase64 } from './render.js';
-import type { Transport } from './transport.js';
+import { NO_FILE_DIALOG, type Transport } from './transport.js';
 
 /**
  * The debugger's state, re-read on every change. Null until the host reports one.
@@ -134,8 +134,16 @@ export function useAction(): {
   return { busy, error, run };
 }
 
+/** A host capability the view offered, which only a view that never checked could be without. */
+function need<T>(capability: T | undefined): T {
+  if (!capability) {
+    throw new Error(NO_FILE_DIALOG);
+  }
+  return capability;
+}
+
 /**
- * The save states of this ROM, and the four things a view does with them. Every
+ * The save states of this ROM, and the six things a view does with them. Every
  * action refreshes the list and reports its own failure, so a view renders
  * `error` and needs no error handling of its own.
  */
@@ -146,9 +154,9 @@ export function useSaveStates(transport: Transport): {
   refresh: () => void;
   save: (name?: string) => Promise<SavedStateInfo | undefined>;
   /** A `.sav` the host picks, as a state named after it; false when the user picked nothing. */
-  importSave: (pick: NonNullable<Transport['pickFile']>) => Promise<boolean | undefined>;
+  importSave: () => Promise<boolean | undefined>;
   /** The machine's cartridge backup memory, handed to whatever the host saves files with. */
-  exportSave: (save: NonNullable<Transport['saveFile']>) => Promise<boolean | undefined>;
+  exportSave: () => Promise<boolean | undefined>;
   load: (state: SavedStateInfo) => Promise<void>;
   rename: (state: SavedStateInfo, to: string) => Promise<SavedStateInfo | undefined>;
   remove: (state: SavedStateInfo) => Promise<{ deleted: boolean } | undefined>;
@@ -165,11 +173,19 @@ export function useSaveStates(transport: Transport): {
     busy: action.busy,
     refresh,
     save: (name) => run(() => transport.request('gba-kit/saveState', { name: name?.trim() || undefined }), refresh),
-    importSave: (pick) =>
+    importSave: () =>
       run(async () => {
+        const pick = need(transport.pickFile);
         const file = await pick({ title: 'Import a .sav file', filters: { 'Save files': ['sav'] } });
         if (!file) {
           return false;
+        }
+        // the length is known the moment the file is read: a mis-picked ROM is turned away
+        // here, rather than after megabytes of it have been encoded and sent
+        if (file.bytes.length > MAX_SAVE_FILE_SIZE) {
+          throw new Error(
+            `${file.name} is ${file.bytes.length} bytes; no .sav file is bigger than ${MAX_SAVE_FILE_SIZE}`,
+          );
         }
         await transport.request('gba-kit/importSave', {
           bytes: bytesToBase64(file.bytes),
@@ -177,8 +193,9 @@ export function useSaveStates(transport: Transport): {
         });
         return true;
       }, refresh),
-    exportSave: (save) =>
+    exportSave: () =>
       run(async () => {
+        const save = need(transport.saveFile);
         const body = await transport.request('gba-kit/exportSave');
         return save({
           title: 'Export the cartridge save',
