@@ -36,6 +36,7 @@ import {
   compile,
   compileExpression,
   formatNumber,
+  hex8,
   parseU32Literal,
 } from './expression.js';
 import type { LabelStore } from './labels.js';
@@ -579,7 +580,7 @@ export class Inspector {
             expr,
             address,
             size,
-            `${expr} @ 0x${hex8(address)} (${size} bytes, no type — try (StructName*)${expr})`,
+            `${expr} @ 0x${hex8(address)} (${size} bytes, no type — try (StructName)${expr})`,
           ),
           address,
         };
@@ -589,9 +590,9 @@ export class Inspector {
     const compiled = compile(expr, this.hints(scope));
     const env = this.#env(scope);
     const lvalue = compiled.lvalue;
-    const at = lvalue?.address(env);
-    if (lvalue?.type && at !== undefined) {
-      const type = lvalue.type;
+    const type = lvalue?.type;
+    const at = type ? lvalue.address(env) : undefined;
+    if (type && at !== undefined) {
       const bits = lvalue.bits;
       const node = bits
         ? formatBitfield(expr, type, this.memory.read(at, bits.span), at, bits)
@@ -599,9 +600,9 @@ export class Inspector {
       return { node, address: at };
     }
     const v = compiled.value(env);
-    // An address the user asked for by name is one they can open in a memory view;
-    // any other number is a number, whatever region it happens to fall in.
-    const address = regionOf(v >>> 0) && expr.startsWith('&') ? v >>> 0 : undefined;
+    // A pointer names memory the user can open in a memory view; any other number is
+    // a number, whatever region it happens to fall in.
+    const address = compiled.type?.kind === 'pointer' && regionOf(v >>> 0) !== null ? v >>> 0 : undefined;
     if (compiled.type) {
       const size = Math.min(compiled.type.size || 4, 4);
       return { node: formatValue(expr, compiled.type, le32(v).subarray(0, size), undefined, this.memory), address };
@@ -945,10 +946,6 @@ export class Inspector {
     }
     return true;
   }
-}
-
-export function hex8(v: number): string {
-  return (v >>> 0).toString(16).padStart(8, '0');
 }
 
 function fromBytes(bytes: Uint8Array): bigint {

@@ -368,7 +368,9 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     const word = (expr: string): number => h.session.evaluate(expr).node.scalar!.value;
     expect(word('&g_samples[1]') - word('&g_samples[0]')).toBe(4);
     expect(word('g_samples + 1')).toBe(word('&g_samples[1]'));
-    expect(h.session.evaluate('&g_samples[3] - &g_samples[0]').node.value).toBe('3 (0x3)');
+    // one pointer minus another counts elements, and reads as the int count it is
+    expect(h.session.evaluate('&g_samples[3] - &g_samples[0]').node).toMatchObject({ value: '3', type: 'int' });
+    expect(() => h.session.evaluate('&g_samples[1] - g_player.counterRef')).toThrow(/they point at different types/);
     expect(h.session.evaluate('*(g_samples + 2)').node.value).toBe(h.session.evaluate('g_samples[2]').node.value);
     // one whole struct on, measured against the ELF rather than written down here:
     // the step is constant, and covers every member the tree shows
@@ -1362,7 +1364,8 @@ describe('Session views and tools', () => {
     const address = h.session.program.symbolAddress('add_bonus')!;
     h.session.labels.set({ address, label: 'AddBonus', comment: 'adds the per-frame bonus' });
     expect(h.session.disassemble(address, 1)[0]!.label).toBe('AddBonus');
-    expect(h.session.evaluate('&AddBonus').node.value).toContain(address.toString());
+    // `&` on a label is a pointer to it, and reads as the address it is
+    expect(h.session.evaluate('&AddBonus').node.value).toBe(`0x${address.toString(16).padStart(8, '0')}`);
     const n = h.session.labels.importSymbols('03000010 gMystery\nsome junk line\ngOther = 0x03000020;\n');
     expect(n).toBe(2);
     expect(h.session.labels.byName('gOther')?.address).toBe(0x03000020);
