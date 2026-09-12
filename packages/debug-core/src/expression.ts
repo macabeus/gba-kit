@@ -488,8 +488,7 @@ class Parser {
       }
       this.#pos++;
       const right = this.#binary(level + 1);
-      left = apply(t.value, left, right);
-      left.text = this.#spanFrom(at);
+      left = apply(t.value, left, right, this.#spanFrom(at));
     }
   }
 
@@ -949,56 +948,56 @@ function readOf(text: string, address: (env: ExprEnv) => number, size: 1 | 2 | 4
   };
 }
 
-function apply(op: string, l: Node, r: Node): Node {
+function apply(op: string, l: Node, r: Node, text: string): Node {
   const a = l.eval;
   const b = r.eval;
   // C's usual arithmetic conversions: an operation is signed only when both sides are.
   const signed = l.signed && r.signed;
   if (op === '+' || op === '-') {
-    const scaled = scale(op, l, r);
+    const scaled = scale(op, l, r, text);
     if (scaled) {
       return scaled;
     }
   }
   switch (op) {
     case '||':
-      return unsigned('', (env) => (a(env) !== 0 || b(env) !== 0 ? 1 : 0));
+      return unsigned(text, (env) => (a(env) !== 0 || b(env) !== 0 ? 1 : 0));
     case '&&':
-      return unsigned('', (env) => (a(env) !== 0 && b(env) !== 0 ? 1 : 0));
+      return unsigned(text, (env) => (a(env) !== 0 && b(env) !== 0 ? 1 : 0));
     case '|':
-      return unsigned('', (env) => (a(env) | b(env)) >>> 0);
+      return unsigned(text, (env) => (a(env) | b(env)) >>> 0);
     case '^':
-      return unsigned('', (env) => (a(env) ^ b(env)) >>> 0);
+      return unsigned(text, (env) => (a(env) ^ b(env)) >>> 0);
     case '&':
-      return unsigned('', (env) => (a(env) & b(env)) >>> 0);
+      return unsigned(text, (env) => (a(env) & b(env)) >>> 0);
     case '==':
-      return unsigned('', (env) => (a(env) === b(env) ? 1 : 0));
+      return unsigned(text, (env) => (a(env) === b(env) ? 1 : 0));
     case '!=':
-      return unsigned('', (env) => (a(env) !== b(env) ? 1 : 0));
+      return unsigned(text, (env) => (a(env) !== b(env) ? 1 : 0));
     case '<':
-      return unsignedBool(signed ? (env) => (a(env) | 0) < (b(env) | 0) : (env) => a(env) < b(env));
+      return unsignedBool(text, signed ? (env) => (a(env) | 0) < (b(env) | 0) : (env) => a(env) < b(env));
     case '<=':
-      return unsignedBool(signed ? (env) => (a(env) | 0) <= (b(env) | 0) : (env) => a(env) <= b(env));
+      return unsignedBool(text, signed ? (env) => (a(env) | 0) <= (b(env) | 0) : (env) => a(env) <= b(env));
     case '>':
-      return unsignedBool(signed ? (env) => (a(env) | 0) > (b(env) | 0) : (env) => a(env) > b(env));
+      return unsignedBool(text, signed ? (env) => (a(env) | 0) > (b(env) | 0) : (env) => a(env) > b(env));
     case '>=':
-      return unsignedBool(signed ? (env) => (a(env) | 0) >= (b(env) | 0) : (env) => a(env) >= b(env));
+      return unsignedBool(text, signed ? (env) => (a(env) | 0) >= (b(env) | 0) : (env) => a(env) >= b(env));
     case '<<':
       // A count of 32 or more shifts everything out, as the ARM barrel shifter does
       // (JavaScript would silently use the count modulo 32).
-      return unsigned('', (env) => shiftLeft(a(env), b(env)));
+      return unsigned(text, (env) => shiftLeft(a(env), b(env)));
     case '>>':
-      return unsigned('', (env) => shiftRight(a(env), b(env)));
+      return unsigned(text, (env) => shiftRight(a(env), b(env)));
     case '+':
-      return { text: '', eval: (env) => (a(env) + b(env)) >>> 0, signed };
+      return { text, eval: (env) => (a(env) + b(env)) >>> 0, signed };
     case '-':
-      return { text: '', eval: (env) => (a(env) - b(env)) >>> 0, signed };
+      return { text, eval: (env) => (a(env) - b(env)) >>> 0, signed };
     case '*':
-      return { text: '', eval: (env) => Math.imul(a(env), b(env)) >>> 0, signed };
+      return { text, eval: (env) => Math.imul(a(env), b(env)) >>> 0, signed };
     case '/':
       // Division by zero is 0, never an error: a condition must not abort the run.
       return {
-        text: '',
+        text,
         eval: signed
           ? (env) => {
               const d = b(env) | 0;
@@ -1012,7 +1011,7 @@ function apply(op: string, l: Node, r: Node): Node {
       };
     case '%':
       return {
-        text: '',
+        text,
         eval: signed
           ? (env) => {
               const d = b(env) | 0;
@@ -1036,7 +1035,7 @@ function apply(op: string, l: Node, r: Node): Node {
  * keeps the raw word, so `r3 + 1` and `u32(a) + 1` mean what they always did, and
  * so do `p & 3` and `p * 2`, which are not pointer arithmetic in C either.
  */
-function scale(op: '+' | '-', l: Node, r: Node): Node | null {
+function scale(op: '+' | '-', l: Node, r: Node, text: string): Node | null {
   const le = elementOf(l.type);
   const re = elementOf(r.type);
   const a = l.eval;
@@ -1051,7 +1050,7 @@ function scale(op: '+' | '-', l: Node, r: Node): Node | null {
       );
     }
     const step = le.size;
-    return { text: '', signed: true, eval: (env) => Math.trunc(((a(env) - b(env)) | 0) / step) >>> 0 };
+    return { text, signed: true, eval: (env) => Math.trunc(((a(env) - b(env)) | 0) / step) >>> 0 };
   }
   const elem = le ?? re;
   if (!elem) {
@@ -1065,15 +1064,15 @@ function scale(op: '+' | '-', l: Node, r: Node): Node | null {
   const pointer = le ? a : b;
   const count = le ? b : a;
   const type = pointerTo(elem);
-  const eval_ =
+  const stepped =
     op === '+'
       ? (env: ExprEnv) => (pointer(env) + Math.imul(count(env) | 0, step)) >>> 0
       : (env: ExprEnv) => (pointer(env) - Math.imul(count(env) | 0, step)) >>> 0;
-  return { text: '', signed: false, type, eval: eval_ };
+  return { text, signed: false, type, eval: stepped };
 }
 
-function unsignedBool(p: (env: ExprEnv) => boolean): Node {
-  return unsigned('', (env) => (p(env) ? 1 : 0));
+function unsignedBool(text: string, p: (env: ExprEnv) => boolean): Node {
+  return unsigned(text, (env) => (p(env) ? 1 : 0));
 }
 
 function shiftLeft(v: number, n: number): number {
