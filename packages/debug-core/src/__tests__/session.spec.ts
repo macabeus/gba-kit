@@ -334,6 +334,22 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(h.session.evaluate(`g_samples[${i}]`).node.value).toBe('7');
   });
 
+  it('a computed array reads as the array, not as the address that is its word', async () => {
+    const h = await boot(variant);
+    h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'g_samples[g_frame & 3] = total;') }]);
+    expect(h.run()?.reason).toBe('breakpoint');
+    // a ternary is the one expression with a type that names no storage: both arms
+    // are one type, but which arm ran is not knowable until it runs, so all that is
+    // left is the word — and an array's word is its own address
+    const direct = h.session.evaluate('g_samples');
+    const chosen = h.session.evaluate('1 ? g_samples : g_samples');
+    expect(chosen.node.value).toBe(direct.node.value);
+    expect(chosen.address).toBe(direct.address);
+    expect(h.session.evaluate('g_frame ? g_player.name : g_player.name').node.value).toBe(
+      h.session.evaluate('g_player.name').node.value,
+    );
+  });
+
   it('a pointer parameter reads through ->, * and the members below them', async () => {
     const h = await boot(variant);
     h.session.setSourceBreakpoints(UTIL, [{ line: lineOf('util.c', 'if (p->pos.x > 100)') }]);

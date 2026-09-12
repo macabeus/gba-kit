@@ -600,12 +600,23 @@ export class Inspector {
       return { node, address: at };
     }
     const v = compiled.value(env);
-    // A pointer names memory the user can open in a memory view; any other number is
-    // a number, whatever region it happens to fall in.
-    const address = compiled.type?.kind === 'pointer' && regionOf(v >>> 0) !== null ? v >>> 0 : undefined;
-    if (compiled.type) {
-      const size = Math.min(compiled.type.size || 4, 4);
-      return { node: formatValue(expr, compiled.type, le32(v).subarray(0, size), undefined, this.memory), address };
+    const word = v >>> 0;
+    const computed = compiled.type;
+    // A pointer and an array both name memory the user can open in a memory view;
+    // any other number is a number, whatever region it happens to fall in.
+    const names = computed?.kind === 'pointer' || computed?.kind === 'array';
+    const address = names && regionOf(word) !== null ? word : undefined;
+    // An array's word is its own address, as C's decay makes it, so its contents come
+    // from there. Anything else of a stated type is held in the word itself.
+    if (computed?.kind === 'array') {
+      return {
+        node: formatValue(expr, computed, this.memory.read(word, computed.size), word, this.memory),
+        address,
+      };
+    }
+    if (computed) {
+      const size = Math.min(computed.size || 4, 4);
+      return { node: formatValue(expr, computed, le32(v).subarray(0, size), undefined, this.memory), address };
     }
     return {
       node: { name: expr, value: formatNumber(v), type: 'u32', scalar: { value: v, signed: v < 0 } },
