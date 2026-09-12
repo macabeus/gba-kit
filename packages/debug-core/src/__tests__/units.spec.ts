@@ -365,6 +365,10 @@ describe('expression grammar', () => {
     expect(compile('r0 + 1', hints).type).toBeNull();
     expect(compile('r0 + 1', hints).lvalue).toBeNull();
     expect(compile('(Entity *)0x03000300', hints).type!.kind).toBe('pointer');
+    // a pointer is spelled as C declares one, whatever it points at
+    expect(compile('&gEntityInfo[0]', hints).type!.name).toBe('struct Entity *');
+    expect(compile('&p', hints).type!.name).toBe('struct Entity **');
+    expect(compile('&g_samples', hints).type!.name).toBe('int (*)[4]');
     expect(compile('*(Entity *)0x03000300', hints).lvalue!.address(env)).toBe(ENTITIES_AT);
   });
 

@@ -1366,6 +1366,12 @@ describe('Session views and tools', () => {
     expect(h.session.disassemble(address, 1)[0]!.label).toBe('AddBonus');
     // `&` on a label is a pointer to it, and reads as the address it is
     expect(h.session.evaluate('&AddBonus').node.value).toBe(`0x${address.toString(16).padStart(8, '0')}`);
+    // A label has no type, and the cast its summary names is the one that reads it:
+    // `(T)x` is the T at x's address, where `(T *)x` would be the word held there.
+    const mode = h.session.evaluate('&g_player.mode').node.scalar!.value;
+    h.session.labels.set({ address: mode, label: 'gMystery', size: 4 });
+    expect(h.session.evaluate('gMystery').node.value).toContain('no type — try (StructName)gMystery');
+    expect(h.session.evaluate('(enum Mode)gMystery').node.value).toBe(h.session.evaluate('g_player.mode').node.value);
     const n = h.session.labels.importSymbols('03000010 gMystery\nsome junk line\ngOther = 0x03000020;\n');
     expect(n).toBe(2);
     expect(h.session.labels.byName('gOther')?.address).toBe(0x03000020);

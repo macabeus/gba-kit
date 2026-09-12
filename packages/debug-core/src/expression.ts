@@ -302,14 +302,18 @@ function notScalar(text: string, type: TypeDesc): Error {
 const VOID_POINTER: TypeDesc = { kind: 'pointer', name: 'void *', size: 4 };
 
 /**
- * A pointer to `target`, spelled as C declares one. An array needs the star inside
- * the declarator — `u8 (*)[8]`, not `u8[8] *` — since that is the type a reader of
- * the source is reading.
+ * A pointer to `target`, spelled as C declares one: the star goes inside an array's
+ * declarator (`u8 (*)[8]`, not `u8[8] *`) and beside another star (`Entity **`),
+ * since a reader of the source is reading C declarations.
  */
 function pointerTo(target: TypeDesc): TypeDesc {
   const bracket = target.kind === 'array' ? target.name.indexOf('[') : -1;
   const name =
-    bracket < 0 ? `${target.name} *` : `${target.name.slice(0, bracket).trim()} (*)${target.name.slice(bracket)}`;
+    bracket >= 0
+      ? `${target.name.slice(0, bracket).trim()} (*)${target.name.slice(bracket)}`
+      : target.name.endsWith('*')
+        ? `${target.name}*`
+        : `${target.name} *`;
   return { kind: 'pointer', name, size: 4, target };
 }
 
@@ -800,12 +804,11 @@ function belowUntyped(base: Node, text: string, advice: string): Node {
 /** `x.m` and `x->m`: the member's place, measured from the value or from the pointer. */
 function member(base: Node, name: string, arrow: boolean, text: string): Node {
   const type = base.type;
-  const step = `${arrow ? '->' : '.'}${name}`;
   if (!type) {
     if (base.root === undefined) {
       throw new Error(`cannot read a member of '${base.text}': a plain 32-bit word has no members`);
     }
-    return belowUntyped(base, text, `cast it to reach through it, as in ((struct Foo *)${base.text})${step}`);
+    return belowUntyped(base, text, `cast it to reach through it, as in ((struct Foo *)${base.text})->${name}`);
   }
   const baseSpot = base.spot;
   let owner: TypeDesc | undefined;
