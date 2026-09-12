@@ -39,8 +39,13 @@ What a session does:
   local the compiler kept in a register is shown rather than written.
 - **Evaluates a Mesen-style expression grammar** for conditions, logpoints and
   watches: C operators, `[addr]` / `{addr}` / `u32(addr)` reads, registers,
-  `frame` / `scanline` / `cycle`, symbols and `a.b[3].c` paths (locals of the
-  frame included, signed as their C type), enumerators, `&symbol`, labels.
+  `frame` / `scanline` / `cycle`, enumerators, labels, and C's own paths through
+  the DWARF — `a.b[i].c`, `p->m`, `*p`, `&x`, `(T)x` and `(T *)x` (locals of the
+  frame included, signed as their C type). A pointer or an array steps by its
+  element in `+` and `-`, as in C, so `e + 1` is one `Entity` on and `p - q` is a
+  count; a register, a literal or a `u32()` read has no type and keeps its raw
+  32-bit word. Anything the expression names is writable if the program could
+  write it: `gEntityInfo[i].xPos = 10`, `p->hp = 0`.
 - **Rewinds exactly.** Keyframes (XOR + run-length deltas, a full snapshot every
   N) plus a per-frame input log put the machine back at any earlier position by
   replaying it. `stepBack`, `reverseContinue` (to the previous breakpoint hit) and

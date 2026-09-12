@@ -28,8 +28,10 @@ Standard DAP, as an editor expects it:
   References are dropped whenever the machine moves: a client expands again at
   the new stop.
 - **Evaluate** for hover, Watch and the console: C operators, `[addr]`,
-  `{addr}`, `u32(addr)`, registers, `frame`/`scanline`/`cycle`, symbols,
-  `a.b[3].c` paths, enumerators, `&symbol`, labels.
+  `{addr}`, `u32(addr)`, registers, `frame`/`scanline`/`cycle`, enumerators,
+  labels, and C's paths through the DWARF — `a.b[i].c`, `p->m`, `*p`, `&x`,
+  `(T)x` and `(T *)x`, with pointer arithmetic scaled by the element. A console
+  line writes through any of them.
 - **Disassembly** with symbols, labels and source lines, in the instruction set
   the ELF's mapping symbols state; **memory** read and write; **loaded sources**;
   **restart**, which reads the ROM and ELF from disk again (so an edit, a rebuild

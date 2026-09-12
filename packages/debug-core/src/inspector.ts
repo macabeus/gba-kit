@@ -7,8 +7,10 @@
  * A name is resolved one way everywhere — the variables tree, a hover, a watch,
  * a breakpoint condition: the selected frame's locals (innermost inlined layer
  * outward), its file's globals, any unit's globals, a declaration joined to a
- * linker symbol, then enumerators. A `a.b[3].c` path walks the same typed nodes,
- * so a member reads the same in a watch as in the tree.
+ * linker symbol, then enumerators. Everything below a name — `a.b[i].c`, `p->m`,
+ * `*p` — is the expression grammar's work, and its result is shown through the
+ * same formatter the tree uses, so a member reads the same in a watch as it does
+ * in the tree.
  */
 import { exceptionReturnBias } from '@gba-kit/arm-emulator/arm-cpu';
 import { disassembleArmAt, disassembleThumbAt } from '@gba-kit/arm-emulator/disassembler';
