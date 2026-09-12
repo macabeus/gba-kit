@@ -278,35 +278,53 @@ export async function serveTransport(
       backend.openText?.(message.content, message.language, message.title);
       return;
     case 'pickFile':
-    case 'saveFile': {
-      const serve = message.type === 'pickFile' ? backend.pickFile : backend.saveFile;
-      if (!serve) {
-        reply({ type: 'response', id: message.id, error: NO_FILE_DIALOG });
-        return;
-      }
-      try {
-        const body =
-          message.type === 'pickFile'
-            ? await backend.pickFile!({ title: message.title, filters: message.filters })
-            : await backend.saveFile!({
-                title: message.title,
-                suggestedName: message.suggestedName,
-                filters: message.filters,
-                bytes: base64ToBytes(message.bytes),
-              });
-        reply({ type: 'response', id: message.id, body: encodePicked(body) });
-      } catch (err) {
-        reply({ type: 'response', id: message.id, error: (err as Error).message });
-      }
+      await answer(message.id, backend.pickFile, { title: message.title, filters: message.filters }, reply);
       return;
-    }
+    case 'saveFile':
+      await answer(
+        message.id,
+        backend.saveFile,
+        {
+          title: message.title,
+          suggestedName: message.suggestedName,
+          filters: message.filters,
+          bytes: base64ToBytes(message.bytes),
+        },
+        reply,
+      );
+      return;
     case 'showPanel':
       backend.showPanel?.(message.panel);
       return;
   }
 }
 
-/** A picked file crosses back base64-encoded, the way it crossed out. */
-function encodePicked(body: { name: string; bytes: Uint8Array } | boolean | null): unknown {
-  return body && typeof body === 'object' ? { name: body.name, bytes: bytesToBase64(body.bytes) } : body;
+/**
+ * Run one of the optional file-dialog capabilities and answer the message that asked
+ * for it. A host that has none answers so rather than leaving the webview waiting; a
+ * file coming back crosses base64-encoded, the way one going out does.
+ */
+async function answer<A, R>(
+  id: number,
+  capability: ((options: A) => Promise<R>) | undefined,
+  options: A,
+  reply: (message: HostToTransport) => void,
+): Promise<void> {
+  if (!capability) {
+    reply({ type: 'response', id, error: NO_FILE_DIALOG });
+    return;
+  }
+  try {
+    const body = await capability(options);
+    reply({
+      type: 'response',
+      id,
+      body:
+        body && typeof body === 'object' && 'bytes' in body
+          ? { ...body, bytes: bytesToBase64(body.bytes as Uint8Array) }
+          : body,
+    });
+  } catch (err) {
+    reply({ type: 'response', id, error: (err as Error).message });
+  }
 }

@@ -236,6 +236,17 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         memoryStates.set(target, { ...held, text });
         return { ...stateInfoOf(target, target, text), createdAt: held.createdAt } as never;
       }
+      case 'gba-kit/deleteState': {
+        const { name, path } = a as A<'gba-kit/deleteState'>;
+        const key = stateKey(name, path);
+        if (options.states) {
+          if (!options.states.remove) {
+            throw new Error('this store cannot delete states');
+          }
+          return { deleted: await options.states.remove(key) } as never;
+        }
+        return { deleted: memoryStates.delete(key) } as never;
+      }
       case 'gba-kit/importSave': {
         const { bytes, name } = a as A<'gba-kit/importSave'>;
         const stateName = await freeStateName(name?.trim() || 'imported save', async (candidate) =>
@@ -252,17 +263,6 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       case 'gba-kit/exportSave': {
         const { bytes, declared } = session.exportSaveFile();
         return { bytes: bytesToBase64(bytes), size: bytes.length, declared } as never;
-      }
-      case 'gba-kit/deleteState': {
-        const { name, path } = a as A<'gba-kit/deleteState'>;
-        const key = stateKey(name, path);
-        if (options.states) {
-          if (!options.states.remove) {
-            throw new Error('this store cannot delete states');
-          }
-          return { deleted: await options.states.remove(key) } as never;
-        }
-        return { deleted: memoryStates.delete(key) } as never;
       }
       case 'gba-kit/ppu':
         return ppuBody(session, a as PpuArguments) as never;

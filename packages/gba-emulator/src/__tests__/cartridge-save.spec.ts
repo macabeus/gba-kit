@@ -144,6 +144,16 @@ describe('a .sav in and out', () => {
     expect(bus.readBackup()!.subarray(512, 520)).toEqual(new Uint8Array(8).fill(0xff));
   });
 
+  it('lets the cartridge say whether the 0x0E window is backed, not a state loaded into it', () => {
+    const bus = busFor('SRAM_V113');
+    const blank = new GbaSystemBus();
+    blank.loadRom(romDeclaring(null));
+    // a state taken of a cartridge with no save does not take this one's SRAM away
+    bus.deserialize(blank.serialize());
+    bus.poke(0x0e000000, Uint8Array.of(0x5a));
+    expect(bus.sram[0]).toBe(0x5a);
+  });
+
   it('forgets the save on reset but keeps the cartridge', () => {
     const bus = busFor('EEPROM_V121');
     bus.writeBackup(pattern(512));

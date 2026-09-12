@@ -1285,7 +1285,8 @@ export class GbaSystemBus implements MemoryBus {
     this.oam.set(snap.oam);
     this.sram.set(snap.sram);
     this.mmioRegisters.set(snap.mmioRegisters);
-    this.#hasSram = snap.hasSram;
+    // whether there is a chip behind the 0x0E window is the cartridge's to say, like #rom:
+    // a state carries the field (the format is unchanged) but never overrules the ROM with it
     this.#waitcnt = snap.waitcnt;
     this.#postflg = snap.postflg;
     this.#lastBiosRead = snap.lastBiosRead;
