@@ -314,6 +314,37 @@ export interface ValueReader {
   symbolize?(address: number): string | null;
 }
 
+/**
+ * Whether a value of `type` reads as signed. Every reader of the program's values —
+ * the variables tree, the expression grammar — asks here, so a member cannot be
+ * negative in one pane and enormous in another.
+ */
+export function isSignedType(type: TypeDesc): boolean {
+  return type.kind === 'int' || type.kind === 'char' || (type.kind === 'enum' && type.signed === true);
+}
+
+/**
+ * Where a bitfield member sits: the first byte of the storage that covers it, and
+ * the bits within that storage, LSB-first. Null when the member is not a bitfield.
+ */
+export function bitfieldPlacement(m: MemberDesc): { byteOffset: number; bits: BitPlacement } | null {
+  if (m.bitSize === undefined || m.bitOffset === undefined) {
+    return null;
+  }
+  const offset = m.bitOffset % 8;
+  return {
+    byteOffset: Math.floor(m.bitOffset / 8),
+    bits: { offset, size: m.bitSize, span: Math.ceil((offset + m.bitSize) / 8) },
+  };
+}
+
+/** A bitfield inside the storage bytes that cover it: LSB-first, and how many bytes those are. */
+export interface BitPlacement {
+  offset: number;
+  size: number;
+  span: number;
+}
+
 /** `v` as the four little-endian bytes a 32-bit machine holds it in. */
 export function le32(v: number): Uint8Array {
   return new Uint8Array([v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff]);
@@ -599,7 +630,7 @@ export function formatBitfield(
   type: TypeDesc,
   bytes: Uint8Array | null,
   address: number | undefined,
-  bits: { offset: number; size: number },
+  bits: BitPlacement,
 ): VarNode {
   if (!bytes) {
     return {
@@ -611,7 +642,7 @@ export function formatBitfield(
   }
   const raw = toInt(bytes, false);
   const value = Math.floor(raw / 2 ** bits.offset) % 2 ** bits.size;
-  const signed = type.kind === 'int' || type.kind === 'char' || (type.kind === 'enum' && type.signed === true);
+  const signed = isSignedType(type);
   const v = signed && value >= 2 ** (bits.size - 1) ? value - 2 ** bits.size : value;
   const label =
     type.kind === 'enum' ? type.enumerators?.get(v) : type.kind === 'bool' ? (v ? 'true' : 'false') : undefined;
@@ -636,15 +667,15 @@ export function formatBitfield(
 }
 
 function memberNode(m: MemberDesc, bytes: Uint8Array, base: number | undefined, reader: ValueReader): VarNode {
-  if (m.bitSize !== undefined && m.bitOffset !== undefined) {
-    const firstByte = Math.floor(m.bitOffset / 8);
-    const span = Math.ceil(((m.bitOffset % 8) + m.bitSize) / 8);
+  const placement = bitfieldPlacement(m);
+  if (placement) {
+    const { byteOffset, bits } = placement;
     return formatBitfield(
       m.name,
       m.type,
-      bytes.subarray(firstByte, firstByte + span),
-      base === undefined ? undefined : base + firstByte,
-      { offset: m.bitOffset % 8, size: m.bitSize },
+      bytes.subarray(byteOffset, byteOffset + bits.span),
+      base === undefined ? undefined : base + byteOffset,
+      bits,
     );
   }
   const size = m.type.size || (m.type.kind === 'pointer' ? 4 : 0);
