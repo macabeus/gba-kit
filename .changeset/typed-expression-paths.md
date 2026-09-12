@@ -38,9 +38,14 @@ guessing a width.
 with the pointee as its one expandable child — and `*(T *)x`, `((T *)x)->m` and
 `((T *)x)[i]` are what read through it. `(T)x` is unchanged: the T at x's
 address. This is a behaviour change for `(T *)x`, which used to ignore the star
-and show the T at x. `*(vu16 *)0x4000006` works, and so does `&x` on a typed
-value, which is now a pointer to it rather than a bare number — the same number,
-shown as an address with what it points at underneath.
+and show the T at x. `*(vu16 *)0x4000006` works, and so does `&x`, which is now a
+pointer rather than a bare number — the same number, shown as an address, with
+what it points at underneath. `&` on a bitfield is refused, as in C: a field of
+four bits has no address of its own.
+
+**A pointer is a place, so a pointer result offers a memory view.** `&x`,
+`p + 1` and `(T *)x` all hand back a memory reference now, where before only an
+expression that started with `&` did.
 
 **Everything the new paths name is writable**, wherever a constant path was:
 `gEntityInfo[i].xPosBg2 = 10`, `p->hp = 0`, and a bitfield through a pointer.
@@ -48,7 +53,13 @@ shown as an address with what it points at underneath.
 A constant index outside a sized array is still refused when the expression is
 compiled. A runtime index is not bounds-checked — GDB does not check one either,
 and a pointer has no count — but an unreadable address still says so at the
-moment of the read.
+moment of the read. Subtracting two pointers requires the same pointee type, not
+merely the same pointee size, and answers an `int` count.
+
+A name the debug info does not type is a word and nothing more: `.`, `->` and `[`
+below one are refused, and refused by the name that is actually wrong — `zzz->a`
+says `unknown symbol 'zzz'` exactly where `zzz` does, and only a name that
+resolves is told which cast would reach through it.
 
 Types are resolved once, when the expression compiles, and never reach an
 evaluated closure, which carries an offset, a read width and a signedness flag
@@ -56,14 +67,25 @@ and nothing else: a breakpoint condition is address arithmetic and memory reads.
 Where the root _lives_ is asked per evaluation instead, through the new
 `ExprEnv.place`, because a local moves between a stack slot and a register as the
 pc advances — at `-O2` a pointer parameter often never sees memory at all, and
-reading one through its register is how `p->pos.x` answers there.
+reading one through its register is how `p->pos.x` answers there. It is asked
+once per root per evaluation: a place is one question with one answer, so
+`p->pos.x` costs the same name lookup as `g_player.pos.x`.
 
-New, all additive: `compile` in `@gba-kit/debug-core`, which answers a value, its
-type and the place it names together, with `ExprPlace`, `ExprLvalue`, `ExprBits`
-and the `rootType` / `typeByName` hints; `formatBitfield` and `le32` in
-`@gba-kit/debug-info`, so a bitfield reads identically in a watch and in the
-variables tree. Every new member is optional, so an `ExprEnv` or `ExprHints`
-written against 0.7.0 keeps compiling and keeps answering — a root the debug info
-does not type still resolves as text, which is all a symbol map can offer. In
-`@gba-kit/debug-adapter`, a pointer's pointee row finally carries an
-`evaluateName` (`*(g_player.counterRef)`), so it can be dragged into Watch.
+New exports, all additive: `compile` in `@gba-kit/debug-core`, which answers a
+value, its type and the place it names together, with `Compiled`, `ExprPlace`,
+`ExprLvalue`, `ExprBits` and the `rootType` / `typeByName` hints;
+`bitfieldPlacement`, `isSignedType`, `formatBitfield` and `le32` in
+`@gba-kit/debug-info`, so where a bitfield sits and whether a value is signed are
+each decided in one place, and a member reads identically in a watch and in the
+variables tree.
+
+`ExprEnv.symbol` is now asked for a bare name only. An env written against 0.7.0
+still satisfies the interface, and a root the debug info does not type still
+resolves through it, but a dotted path no longer reaches it — the grammar owns
+everything below a name, and measuring a member needs a type a symbol map does
+not have.
+
+In `@gba-kit/debug-adapter`, every row under a computed value carries an
+`evaluateName` that reads back as the row it came from — a pointee is
+`(*(g_player.counterRef))` and a member below a watch on `p->pos` is `(p->pos).x`
+— so any of them can be dragged into Watch or copied as an expression.
