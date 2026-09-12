@@ -78,7 +78,6 @@ const SYMBOL_ADDRESSES: Record<string, number> = {
 };
 const SYMBOLS: Record<string, number> = {
   gHp: 3,
-  'gState.hp': 9,
   // gSigned is an `int` holding -7, delivered as its 32-bit word
   gSigned: 0xfffffff9,
   g_frame: 2,
@@ -108,7 +107,7 @@ const env: ExprEnv = {
   cycle: () => 1000,
 };
 
-/** What the DWARF would say: `gState` and `gHp` are deliberately untyped, as a symbol map's names are. */
+/** What the DWARF would say: `gHp` is deliberately untyped, as a symbol map's names are. */
 const ROOT_TYPES: Record<string, TypeDesc> = {
   g_samples: samplesType,
   gEntityInfo: entityArray,
@@ -173,7 +172,6 @@ describe('expression grammar', () => {
 
   it('symbols and paths, address-of', () => {
     expect(ev('gHp + 1')).toBe(4);
-    expect(ev('gState.hp == 9')).toBe(1);
     expect(ev('&gHp')).toBe(0x03000000);
     expect(() => ev('gNope')).toThrow(/unknown symbol/);
   });
@@ -290,11 +288,21 @@ describe('expression grammar', () => {
     expect(ev('(gHp) + 1')).toBe(4);
   });
 
-  it('a path on a root the debug info does not type still resolves as text', () => {
-    expect(ev('gState.hp')).toBe(9);
+  it('a root the debug info does not type is a word, and nothing below it can be measured', () => {
+    expect(ev('gHp')).toBe(3);
     expect(ev('&gHp')).toBe(0x03000000);
-    expect(() => ev('gState->hp')).toThrow(/has no type in the debug info/);
-    expect(() => ev('gState[gHp]')).toThrow(/has no type in the debug info/);
+    // A symbol table has no offsets, so every step below one is refused — naming the
+    // root, not a type the ELF was never asked about.
+    expect(() => ev('gHp.a')).toThrow(/'gHp' has no type in the debug info; cast it to reach through it/);
+    expect(() => ev('gHp->a')).toThrow(/'gHp' has no type in the debug info; cast it to reach through it/);
+    expect(() => ev('gHp[1]')).toThrow(/'gHp' has no type in the debug info; cast it to subscript it/);
+    expect(() => ev('*gHp')).toThrow(/'gHp' has no type in the debug info; cast it to read through it/);
+    // and a name that resolves nowhere is a missing name, whatever is written after it
+    expect(() => ev('gNope.a')).toThrow(/unknown symbol 'gNope'/);
+    expect(() => ev('gNope->a')).toThrow(/unknown symbol 'gNope'/);
+    expect(() => ev('gNope[1]')).toThrow(/unknown symbol 'gNope'/);
+    expect(() => ev('*gNope')).toThrow(/unknown symbol 'gNope'/);
+    expect(() => ev('gNope->a->b')).toThrow(/unknown symbol 'gNope'/);
   });
 
   it('names what it cannot do, and what to type instead', () => {

@@ -197,7 +197,7 @@ export class BreakpointStore {
   // ─── data breakpoints ───────────────────────────────────────────────
 
   /** Replace the data breakpoints. One that does not compile is kept, unverified, with its message. */
-  replaceData(specs: DataBreakpointSpec[], hints: ExprHints = {}): DataBreakpoint[] {
+  replaceData(specs: DataBreakpointSpec[], hints: ExprHints): DataBreakpoint[] {
     this.#data = specs.map((spec) => {
       const bp: DataBreakpoint = { ...spec, id: this.#nextId++, verified: false, hits: 0 };
       try {

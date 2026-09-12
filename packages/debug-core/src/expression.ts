@@ -34,7 +34,8 @@
  * time through {@link ExprHints} and the closures left behind carry only numbers —
  * an offset, a read width, a signedness flag.
  */
-import type { TypeDesc } from '@gba-kit/debug-info';
+import type { BitPlacement, MemberDesc, TypeDesc } from '@gba-kit/debug-info';
+import { bitfieldPlacement, isSignedType } from '@gba-kit/debug-info';
 
 /** Where a name keeps its value at this moment, or why it is nowhere. */
 export type ExprPlace = { address: number } | { word: number } | { absent: string };
@@ -45,12 +46,13 @@ export interface ExprEnv {
   /** Little-endian unsigned read; undefined when unmapped. */
   read(address: number, size: number): number | undefined;
   /**
-   * A symbol or `symbol.member[3]` path → its current value as a 32-bit word (a
+   * A name the debug info does not type → its current value as a 32-bit word (a
    * negative value of a narrower signed type sign-extended), or undefined when
-   * unresolvable.
+   * unresolvable. A name it does type is asked for through {@link ExprEnv.place}
+   * instead, and everything below a name is the grammar's own work.
    */
-  symbol(path: string): number | undefined;
-  /** A symbol's address (for `&name`), a member path included. */
+  symbol(name: string): number | undefined;
+  /** A symbol's address, for `&name` and for the cast that reads at one. */
   symbolAddress(name: string): number | undefined;
   frame(): number;
   scanline(): number;
@@ -67,8 +69,8 @@ export interface ExprEnv {
 
 /** What the compiler may ask about the program, so the closure it builds is exact without an env. */
 export interface ExprHints {
-  /** Whether `path` names a value of a signed C type; undefined when unknown (taken as unsigned). */
-  symbolSigned?(path: string): boolean | undefined;
+  /** Whether a name the debug info does not type reads as signed; undefined when unknown (taken as unsigned). */
+  symbolSigned?(name: string): boolean | undefined;
   /** The C type of the root name `name` where this expression is compiled; undefined when it has none. */
   rootType?(name: string): TypeDesc | undefined;
   /** A type by its C spelling — `Entity`, `struct Entity`, `u16` — for a cast. */
@@ -76,16 +78,13 @@ export interface ExprHints {
 }
 
 /** A bitfield inside the bytes a place names: LSB-first, and how many bytes cover it. */
-export interface ExprBits {
-  offset: number;
-  size: number;
-  span: number;
-}
+export type ExprBits = BitPlacement;
 
 /**
  * The storage an expression names. `address` answers undefined when the value is
- * not in memory at this moment — the compiler keeps it in a register — which is a
- * fact only the machine has.
+ * not in memory at this moment — the compiler keeps it in a register — and throws
+ * when the machine cannot say where the name is at all; both are facts only the
+ * machine has, so both are asked per evaluation.
  */
 export interface ExprLvalue {
   address: (env: ExprEnv) => number | undefined;
@@ -252,12 +251,12 @@ interface Node {
   type?: TypeDesc;
   /** where the value sits, when the expression names storage */
   lvalue?: ExprLvalue;
-  /** the low 4 bytes as held, when the value is not in memory (the compiler kept the root in a register) */
-  raw?: (env: ExprEnv) => number;
+  /** where the value is kept right now, asked once per evaluation; absent for a computed word */
+  spot?: (env: ExprEnv) => ExprPlace;
   /** the literal this node is, so a cast can reinterpret memory at `(u16)0x4000006` */
   literal?: number;
-  /** the path text, while every step has been a constant one on a root the DWARF does not type */
-  path?: string;
+  /** the root name this value descends from, while the debug info does not type it */
+  root?: string;
   /** the span of source this node came from, for the messages that quote it */
   text: string;
 }
@@ -266,13 +265,9 @@ function unsigned(text: string, f: (env: ExprEnv) => number): Node {
   return { text, eval: f, signed: false };
 }
 
-function hex8(v: number): string {
+/** A 32-bit address as the debugger writes one: eight hex digits, zero-padded. */
+export function hex8(v: number): string {
   return (v >>> 0).toString(16).padStart(8, '0');
-}
-
-/** Whether a value of `type` is read as signed — the same rule the variables tree formats by. */
-function signedOf(type: TypeDesc): boolean {
-  return type.kind === 'int' || type.kind === 'char' || (type.kind === 'enum' && type.signed === true);
 }
 
 /** The width a scalar of `type` is read at, or 0 when no 32-bit word can hold it. */
@@ -303,13 +298,43 @@ function notScalar(text: string, type: TypeDesc): Error {
   return new Error(`'${text}' is a ${type.name}, not a scalar`);
 }
 
+/** An address with nothing known below it: what `&` on a place the debug info does not type yields. */
+const VOID_POINTER: TypeDesc = { kind: 'pointer', name: 'void *', size: 4 };
+
+/**
+ * A pointer to `target`, spelled as C declares one. An array needs the star inside
+ * the declarator — `u8 (*)[8]`, not `u8[8] *` — since that is the type a reader of
+ * the source is reading.
+ */
 function pointerTo(target: TypeDesc): TypeDesc {
-  return { kind: 'pointer', name: `${target.name} *`, size: 4, target };
+  const bracket = target.kind === 'array' ? target.name.indexOf('[') : -1;
+  const name =
+    bracket < 0 ? `${target.name} *` : `${target.name.slice(0, bracket).trim()} (*)${target.name.slice(bracket)}`;
+  return { kind: 'pointer', name, size: 4, target };
 }
 
 /** The element a pointer or array steps by, or undefined when the type is neither. */
 function elementOf(type: TypeDesc | undefined): TypeDesc | undefined {
   return type && (type.kind === 'pointer' || type.kind === 'array') ? type.target : undefined;
+}
+
+/** What one pointer minus another counts: elements, as C's `ptrdiff_t` does. */
+const PTRDIFF: TypeDesc = { kind: 'int', name: 'int', size: 4 };
+
+/**
+ * Whether two types are the same one. C compares pointees ignoring `const` and
+ * `volatile`, which are part of a type's spelling but not of its shape, and a
+ * {@link TypeDesc} is structural, so the kind and the bare spelling settle it.
+ */
+function sameType(a: TypeDesc, b: TypeDesc): boolean {
+  return a.kind === b.kind && a.size === b.size && unqualified(a.name) === unqualified(b.name);
+}
+
+function unqualified(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter((w) => !QUALIFIERS.has(w))
+    .join(' ');
 }
 
 function readWord(env: ExprEnv, address: number, size: number, signed: boolean): number {
@@ -335,8 +360,8 @@ function maskWord(v: number, size: number, signed: boolean): number {
 interface Located {
   text: string;
   type: TypeDesc;
-  address: (env: ExprEnv) => number | undefined;
-  raw?: (env: ExprEnv) => number;
+  /** where the value is kept right now: one question, so one answer per evaluation */
+  spot: (env: ExprEnv) => ExprPlace;
   bits?: ExprBits;
 }
 
@@ -347,18 +372,28 @@ interface Located {
  * pointer alike.
  */
 function locatedNode(l: Located): Node {
-  const { text, type, address, raw, bits } = l;
+  const { text, type, spot, bits } = l;
+  const address = (env: ExprEnv): number | undefined => {
+    const p = spot(env);
+    if ('address' in p) {
+      return p.address >>> 0;
+    }
+    if ('word' in p) {
+      return undefined;
+    }
+    throw new Error(`'${text}' is not available here: ${p.absent}`);
+  };
   const node: Node = {
     text,
-    signed: signedOf(type),
+    signed: isSignedType(type),
     type,
     lvalue: { address, type, bits },
-    raw,
+    spot,
     eval: () => 0,
   };
   if (bits) {
     const { offset, size, span } = bits;
-    const signed = signedOf(type);
+    const signed = isSignedType(type);
     if (span > 4) {
       const err = new Error(`'${text}' is a ${size}-bit field spanning ${span} bytes, which is not a 32-bit read`);
       node.eval = () => {
@@ -396,16 +431,16 @@ function locatedNode(l: Located): Node {
     };
     return node;
   }
-  const signed = signedOf(type);
+  const signed = isSignedType(type);
   node.eval = (env) => {
-    const a = address(env);
-    if (a !== undefined) {
-      return readWord(env, a, size, signed);
+    const p = spot(env);
+    if ('address' in p) {
+      return readWord(env, p.address, size, signed);
     }
-    if (raw) {
-      return maskWord(raw(env), size, signed);
+    if ('word' in p) {
+      return maskWord(p.word, size, signed);
     }
-    throw new Error(`'${text}' is not available here: the compiler does not keep it in memory`);
+    throw new Error(`'${text}' is not available here: ${p.absent}`);
   };
   return node;
 }
@@ -467,6 +502,10 @@ class Parser {
           text: this.#spanFrom(at),
           eval: (env) => (c(env) !== 0 ? a.eval(env) : b.eval(env)),
           signed: a.signed && b.signed,
+          // Both arms of one type make the result that type, so `(c ? p : q)->m`
+          // reads; which arm the value came from is not knowable until it runs, so
+          // the result is a word and names no storage.
+          type: a.type && b.type && sameType(a.type, b.type) ? a.type : undefined,
         };
       }
       return cond;
@@ -511,10 +550,12 @@ class Parser {
         return unsigned(this.#spanFrom(at), (env) => ~e(env) >>> 0);
       }
       if (this.#takeOp('*')) {
-        return dereference(this.#unary());
+        const operand = this.#unary();
+        return dereference(operand, this.#spanFrom(at));
       }
       if (this.#takeOp('&')) {
-        return addressOf(this.#unary());
+        const operand = this.#unary();
+        return addressOf(operand, this.#spanFrom(at));
       }
       const cast = this.#cast();
       if (cast) {
@@ -560,7 +601,10 @@ class Parser {
     const bare = names.filter((n) => !QUALIFIERS.has(n)).join(' ');
     const found = this.hints.typeByName?.(spelled) ?? (bare === spelled ? undefined : this.hints.typeByName?.(bare));
     if (!found) {
-      if (stars > 0 || names.length > 1) {
+      // A star, a multi-word spelling or an operand right after the `)` can only have
+      // been meant as a cast, so say the type is missing rather than leave the operand
+      // as an unexpected token. A lone unknown name is `(a) * b`, an expression.
+      if (stars > 0 || names.length > 1 || startsPrimary(this.tokens[i + 1]!)) {
         throw new Error(`unknown type '${spelled}' (the ELF has no DWARF for it)`);
       }
       return null;
@@ -577,7 +621,8 @@ class Parser {
       const value = operand.eval;
       return { text: this.#spanFrom(at), eval: (env) => value(env) >>> 0, signed: false, type };
     }
-    return locatedNode({ text: this.#spanFrom(at), type, address: castAddress(operand, `(${spelled})`) });
+    const address = castAddress(operand, `(${spelled})`);
+    return locatedNode({ text: this.#spanFrom(at), type, spot: (env) => ({ address: address(env) }) });
   }
 
   /** `x.m`, `x->m` and `x[i]`, left to right, iteratively so a long chain costs no stack. */
@@ -585,29 +630,21 @@ class Parser {
     const at = this.#peek().at;
     let node = this.#primary();
     for (;;) {
-      const arrow = this.#peek().kind === 'op' && (this.#peek() as { value: string }).value === '->';
-      if (arrow || (this.#peek().kind === 'op' && (this.#peek() as { value: string }).value === '.')) {
+      const arrow = isOp(this.#peek(), '->');
+      if (arrow || isOp(this.#peek(), '.')) {
         this.#pos++;
         const name = this.#peek();
         if (name.kind !== 'ident') {
           throw new Error(`expected a member name after '${arrow ? '->' : '.'}'`);
         }
         this.#pos++;
-        node =
-          !arrow && node.path !== undefined
-            ? this.#textualPath(`${node.path}.${name.value}`)
-            : member(node, name.value, arrow);
-        node.text = this.#spanFrom(at);
+        node = member(node, name.value, arrow, this.#spanFrom(at));
         continue;
       }
       if (this.#takeOp('[')) {
         const index = this.#ternary();
         this.#expectOp(']');
-        node =
-          node.path !== undefined && index.literal !== undefined
-            ? this.#textualPath(`${node.path}[${index.literal}]`)
-            : subscript(node, index);
-        node.text = this.#spanFrom(at);
+        node = subscript(node, index, this.#spanFrom(at));
         continue;
       }
       return node;
@@ -622,15 +659,9 @@ class Parser {
       return { text: this.#spanFrom(t.at), eval: () => v, signed: t.decimal, literal: v };
     }
     if (t.kind === 'op' && t.value === '(') {
-      // `(Foo)x` where the ELF has no `Foo`: the user meant a cast, so say the type is
-      // missing rather than leave `x` as an unexpected token.
-      const only = this.#peek(1).kind === 'ident' && isOp(this.#peek(2), ')') ? this.#peek(1) : null;
       this.#pos++;
       const e = this.#ternary();
       this.#expectOp(')');
-      if (only !== null && startsPrimary(this.#peek())) {
-        throw new Error(`unknown type '${(only as { value: string }).value}' (the ELF has no DWARF for it)`);
-      }
       return e;
     }
     if (t.kind === 'op' && t.value === '[') {
@@ -674,7 +705,7 @@ class Parser {
           return unsigned(name, () => 0);
       }
       const type = this.hints.rootType?.(name);
-      return type ? typedRoot(name, type) : this.#textualPath(name);
+      return type ? typedRoot(name, type) : this.#untypedRoot(name);
     }
     throw new Error(
       t.kind === 'end' ? 'unexpected end of expression' : `unexpected '${(t as { value: string }).value}'`,
@@ -682,27 +713,28 @@ class Parser {
   }
 
   /**
-   * A root the DWARF does not type, and the constant path below it: the env answers
-   * the whole path as text, which is what a symbol table alone can do and what an
-   * env with no type hints relies on.
+   * A root the DWARF does not type — a decomp's `gUnk_*`, a linker symbol, a label:
+   * the env answers its word and its address from the symbol table, which is all a
+   * program without debug info offers. Nothing below it can be measured, so `.`,
+   * `->` and `[` on it say so through {@link belowUntyped}.
    */
-  #textualPath(path: string): Node {
+  #untypedRoot(name: string): Node {
     return {
-      text: path,
-      path,
-      signed: this.hints.symbolSigned?.(path) ?? false,
+      text: name,
+      root: name,
+      signed: this.hints.symbolSigned?.(name) ?? false,
       eval: (env) => {
-        const v = env.symbol(path);
+        const v = env.symbol(name);
         if (v === undefined) {
-          throw new Error(`unknown symbol '${path}'`);
+          throw new Error(`unknown symbol '${name}'`);
         }
         return v >>> 0;
       },
       lvalue: {
         address: (env) => {
-          const a = env.symbolAddress(path);
+          const a = env.symbolAddress(name);
           if (a === undefined || a === null) {
-            throw new Error(`unknown symbol '${path}'`);
+            throw new Error(`unknown symbol '${name}'`);
           }
           return a >>> 0;
         },
@@ -720,74 +752,78 @@ function startsPrimary(t: Token): boolean {
   return t.kind === 'ident' || t.kind === 'num' || isOp(t, '(');
 }
 
-/** A root the DWARF types: its word and its address both come from where the machine keeps it. */
+/**
+ * A root the DWARF types: where the machine keeps it, asked once per evaluation.
+ * An env with no {@link ExprEnv.place} is asked the older pair of questions
+ * instead — the address first, since a name with one is in memory.
+ */
 function typedRoot(name: string, type: TypeDesc): Node {
-  const width = scalarWidth(type) || 4;
-  const signed = signedOf(type);
-  const address = (env: ExprEnv): number | undefined => {
+  const spot = (env: ExprEnv): ExprPlace => {
     const p = env.place?.(name);
-    if (p === undefined) {
-      const a = env.symbolAddress(name);
-      return a === undefined || a === null ? undefined : a >>> 0;
+    if (p !== undefined) {
+      return p;
     }
-    if ('address' in p) {
-      return p.address >>> 0;
+    const a = env.symbolAddress(name);
+    if (a !== undefined && a !== null) {
+      return { address: a >>> 0 };
     }
-    if ('word' in p) {
-      return undefined;
+    const v = env.symbol(name);
+    if (v === undefined) {
+      throw new Error(`unknown symbol '${name}'`);
     }
-    throw new Error(`'${name}' is not available here: ${p.absent}`);
+    return { word: v >>> 0 };
   };
-  const raw = (env: ExprEnv): number => {
-    const p = env.place?.(name);
-    if (p === undefined) {
-      const v = env.symbol(name);
-      if (v === undefined) {
-        throw new Error(`unknown symbol '${name}'`);
-      }
-      return v >>> 0;
-    }
-    if ('word' in p) {
-      return p.word >>> 0;
-    }
-    if ('address' in p) {
-      return readWord(env, p.address, width, signed);
-    }
-    throw new Error(`'${name}' is not available here: ${p.absent}`);
+  return locatedNode({ text: name, type, spot });
+}
+
+/**
+ * A step below a value the debug info does not type. Whether the root is an untyped
+ * symbol or simply not a name here is the env's to settle, and it settles it at
+ * evaluation, so the value is asked for before the missing type is reported: `zzz->a`
+ * says `unknown symbol 'zzz'` exactly where `zzz` does, and only a name that does
+ * resolve is told to cast.
+ */
+function belowUntyped(base: Node, text: string, advice: string): Node {
+  const value = base.eval;
+  const err = new Error(`'${base.text}' has no type in the debug info; ${advice}`);
+  return {
+    text,
+    root: base.root,
+    signed: false,
+    eval: (env) => {
+      value(env);
+      throw err;
+    },
   };
-  return locatedNode({ text: name, type, address, raw });
 }
 
 /** `x.m` and `x->m`: the member's place, measured from the value or from the pointer. */
-function member(base: Node, name: string, arrow: boolean): Node {
+function member(base: Node, name: string, arrow: boolean, text: string): Node {
   const type = base.type;
+  const step = `${arrow ? '->' : '.'}${name}`;
   if (!type) {
-    throw new Error(
-      `'${base.text}' has no type in the debug info; cast it to reach through it, ` +
-        `as in ((struct Foo *)${base.text})->${name}`,
-    );
+    if (base.root === undefined) {
+      throw new Error(`cannot read a member of '${base.text}': a plain 32-bit word has no members`);
+    }
+    return belowUntyped(base, text, `cast it to reach through it, as in ((struct Foo *)${base.text})${step}`);
   }
-  let owner: TypeDesc | undefined = type;
-  let baseAddress: (env: ExprEnv) => number | undefined;
-  let raw: ((env: ExprEnv) => number) | undefined;
+  const baseSpot = base.spot;
+  let owner: TypeDesc | undefined;
   if (arrow) {
     if (type.kind !== 'pointer' && type.kind !== 'array') {
       throw new Error(`'${base.text}' (${type.name}) is not a pointer; use '.' for a member of a value`);
     }
     owner = type.target;
-    const word = base.eval;
-    baseAddress = (env) => word(env) >>> 0;
   } else {
     if (type.kind === 'pointer') {
       throw new Error(
         `'${base.text}' (${type.name}) is a pointer; read a member through it with '${base.text}->${name}'`,
       );
     }
-    if (!base.lvalue) {
+    if (!baseSpot) {
       throw new Error(`'${base.text}' is a value, not a place in memory`);
     }
-    baseAddress = base.lvalue.address;
-    raw = base.raw;
+    owner = type;
   }
   if (!owner || (owner.kind !== 'struct' && owner.kind !== 'union')) {
     throw new Error(`'${base.text}' (${type.name}) has no members`);
@@ -796,39 +832,52 @@ function member(base: Node, name: string, arrow: boolean): Node {
   if (!m) {
     throw new Error(`'${base.text}' (${type.name}) has no member '${name}'`);
   }
-  const bitSize = m.bitSize;
-  const bitOffset = m.bitOffset;
-  const bits: ExprBits | undefined =
-    bitSize !== undefined && bitOffset !== undefined
-      ? { offset: bitOffset % 8, size: bitSize, span: Math.ceil(((bitOffset % 8) + bitSize) / 8) }
-      : undefined;
-  const offset = bitOffset !== undefined && bits ? Math.floor(bitOffset / 8) : m.offset;
+  const { offset, bits } = placeOf(m);
+  if (arrow) {
+    const word = base.eval;
+    return locatedNode({ text, type: m.type, spot: (env) => ({ address: (word(env) + offset) >>> 0 }), bits });
+  }
   const width = bits ? bits.span : scalarWidth(m.type);
+  // A ≤4-byte aggregate the compiler kept in a register has readable members, and
+  // nothing else of it is knowable: past those bytes the value is not available.
+  const inWord = width > 0 && offset + width <= 4;
+  const spot = baseSpot!;
   return locatedNode({
-    text: `${base.text}${arrow ? '->' : '.'}${name}`,
+    text,
     type: m.type,
-    address: (env) => {
-      const b = baseAddress(env);
-      return b === undefined ? undefined : (b + offset) >>> 0;
+    spot: (env) => {
+      const p = spot(env);
+      if ('address' in p) {
+        return { address: (p.address + offset) >>> 0 };
+      }
+      if ('word' in p) {
+        return inWord
+          ? { word: (p.word >>> (offset * 8)) >>> 0 }
+          : { absent: `the compiler keeps '${base.text}' in a register, and '${name}' is past its low 4 bytes` };
+      }
+      return p;
     },
-    // A ≤4-byte aggregate the compiler kept in a register has readable members, and
-    // nothing else of it is knowable: past those bytes the value is not available.
-    raw: raw && width > 0 && offset + width <= 4 ? (env) => (raw!(env) >>> (offset * 8)) >>> 0 : undefined,
     bits,
   });
 }
 
+/** Where a member sits in its struct: a byte offset, and the bits of it when it is a bitfield. */
+function placeOf(m: MemberDesc): { offset: number; bits?: ExprBits } {
+  const placement = bitfieldPlacement(m);
+  return placement ? { offset: placement.byteOffset, bits: placement.bits } : { offset: m.offset };
+}
+
 /** `x[i]`, scaled by the element, on an array or a pointer alike. */
-function subscript(base: Node, index: Node): Node {
+function subscript(base: Node, index: Node, text: string): Node {
   const type = base.type;
   if (!type) {
-    throw new Error(
-      base.path !== undefined
-        ? `'${base.text}' has no type in the debug info; cast it to subscript it, ` +
-            `as in ((struct Foo *)${base.text})[${index.text}]`
-        : `cannot subscript '${base.text}': a plain 32-bit word has no element type — ` +
-            `read the address with u8(${base.text} + n), u16() or u32()`,
-    );
+    if (base.root === undefined) {
+      throw new Error(
+        `cannot subscript '${base.text}': a plain 32-bit word has no element type — ` +
+          `read the address with u8(${base.text} + n), u16() or u32()`,
+      );
+    }
+    return belowUntyped(base, text, `cast it to subscript it, as in ((struct Foo *)${base.text})[${index.text}]`);
   }
   if (type.kind !== 'pointer' && type.kind !== 'array') {
     throw new Error(`'${base.text}' (${type.name}) is not an array or a pointer`);
@@ -848,24 +897,27 @@ function subscript(base: Node, index: Node): Node {
   ) {
     throw new Error(`index ${index.literal} is out of range for '${base.text}' (${type.name})`);
   }
-  const step = elem.size;
+  const stride = elem.size;
   const word = base.eval;
   const at = index.eval;
   return locatedNode({
-    text: `${base.text}[${index.text}]`,
+    text,
     type: elem,
-    address: (env) => (word(env) + Math.imul(at(env) | 0, step)) >>> 0,
+    spot: (env) => ({ address: (word(env) + Math.imul(at(env) | 0, stride)) >>> 0 }),
   });
 }
 
 /** `*x`: the value the pointer points at. */
-function dereference(x: Node): Node {
+function dereference(x: Node, text: string): Node {
   const type = x.type;
   if (!type) {
-    throw new Error(
-      `cannot dereference '${x.text}': a plain 32-bit word is not a typed pointer — ` +
-        `read what is there with u8(${x.text}), u16(${x.text}) or u32(${x.text})`,
-    );
+    if (x.root === undefined) {
+      throw new Error(
+        `cannot dereference '${x.text}': a plain 32-bit word is not a typed pointer — ` +
+          `read what is there with u8(${x.text}), u16(${x.text}) or u32(${x.text})`,
+      );
+    }
+    return belowUntyped(x, text, `cast it to read through it, as in *(struct Foo **)${x.text}`);
   }
   if (type.kind !== 'pointer' && type.kind !== 'array') {
     throw new Error(`cannot dereference '${x.text}': it is a ${type.name}, not a pointer`);
@@ -875,20 +927,30 @@ function dereference(x: Node): Node {
     throw new Error(`cannot dereference '${x.text}': the debug info does not say what a ${type.name} points at`);
   }
   const word = x.eval;
-  return locatedNode({ text: `*${x.text}`, type: target, address: (env) => word(env) >>> 0 });
+  return locatedNode({ text, type: target, spot: (env) => ({ address: word(env) >>> 0 }) });
 }
 
-/** `&x`: the place x names, as a pointer to it. */
-function addressOf(x: Node): Node {
+/**
+ * `&x`: the place x names, as a pointer to it. A place the debug info does not type
+ * is still an address, so it is still shown as one — `void *` is what C calls a
+ * pointer with nothing known below it.
+ */
+function addressOf(x: Node, text: string): Node {
   const lvalue = x.lvalue;
   if (!lvalue) {
     throw new Error(`cannot take the address of '${x.text}': it is a value, not a place in memory`);
   }
+  if (lvalue.bits) {
+    throw new Error(
+      `cannot take the address of '${x.text}': it is a ${lvalue.bits.size}-bit field, ` +
+        `which has no address of its own`,
+    );
+  }
   const address = lvalue.address;
   return {
-    text: `&${x.text}`,
+    text,
     signed: false,
-    type: lvalue.type ? pointerTo(lvalue.type) : undefined,
+    type: lvalue.type ? pointerTo(lvalue.type) : VOID_POINTER,
     eval: (env) => {
       const a = address(env);
       if (a === undefined) {
@@ -1044,13 +1106,13 @@ function scale(op: '+' | '-', l: Node, r: Node, text: string): Node | null {
     if (op === '+') {
       throw new Error(`cannot add two pointers ('${l.text}' and '${r.text}')`);
     }
-    if (le.size !== re.size || !le.size) {
+    if (!le.size || !sameType(le, re)) {
       throw new Error(
         `cannot subtract '${r.text}' (${r.type!.name}) from '${l.text}' (${l.type!.name}): they point at different types`,
       );
     }
     const step = le.size;
-    return { text, signed: true, eval: (env) => Math.trunc(((a(env) - b(env)) | 0) / step) >>> 0 };
+    return { text, signed: true, type: PTRDIFF, eval: (env) => Math.trunc(((a(env) - b(env)) | 0) / step) >>> 0 };
   }
   const elem = le ?? re;
   if (!elem) {
