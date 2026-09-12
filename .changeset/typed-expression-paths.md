@@ -45,21 +45,39 @@ four bits has no address of its own.
 
 **A pointer is a place, so a pointer result offers a memory view.** `&x`,
 `p + 1` and `(T *)x` all hand back a memory reference now, where before only an
-expression that started with `&` did.
+expression that started with `&` did. A value that _names_ storage offers that
+storage instead, and offers nothing while the compiler keeps it in a register, so
+one memory reference cannot mean where `p` lives in one build and where it points
+in the next.
 
 **Everything the new paths name is writable**, wherever a constant path was:
 `gEntityInfo[i].xPosBg2 = 10`, `p->hp = 0`, and a bitfield through a pointer.
 
-A constant index outside a sized array is still refused when the expression is
-compiled. A runtime index is not bounds-checked — GDB does not check one either,
-and a pointer has no count — but an unreadable address still says so at the
-moment of the read. Subtracting two pointers requires the same pointee type, not
-merely the same pointee size, and answers an `int` count.
+A literal index outside a sized array is still refused when the expression is
+compiled. Nothing else is: a runtime index is not bounds-checked — GDB does not
+check one either, and a pointer has no count — and neither is an index the reader
+folds in their head, `a[2 + 3]` being arithmetic here like any other. An
+unreadable address still says so at the moment of the read. Subtracting two
+pointers requires the same pointee type, not merely the same pointee size, and
+answers an `int` count.
+
+Where the debug info gives a pointee no width — a `void`, a struct a header only
+declares — `+` steps by the byte and `-` counts bytes, which is GDB's answer
+under C's own extension. What C refuses, this refuses: there is no value at the
+end of a `void *`, so `*p` on one names `u8()`, `u16()` and `u32()` instead of
+inventing a width, and a pointer to a function is not stepped, since code is not
+an array of values and one byte on is the middle of an instruction.
 
 A name the debug info does not type is a word and nothing more: `.`, `->` and `[`
 below one are refused, and refused by the name that is actually wrong — `zzz->a`
 says `unknown symbol 'zzz'` exactly where `zzz` does, and only a name that
-resolves is told which cast would reach through it.
+resolves is told which cast would reach through it. The refusal says the name has
+no type _here_, because a type is looked up where the expression compiles and a
+local of another function is untyped at this pc however fully the ELF describes
+it elsewhere. A data breakpoint's condition is compiled in the frame the user
+typed it in — a watched address can be written from anywhere, so there is no
+other frame it could belong to — and so reads that frame's locals, as GDB scopes
+a watchpoint to the frame it was set in.
 
 Types are resolved once, when the expression compiles, and never reach an
 evaluated closure, which carries an offset, a read width and a signedness flag
@@ -71,13 +89,19 @@ reading one through its register is how `p->pos.x` answers there. It is asked
 once per root per evaluation: a place is one question with one answer, so
 `p->pos.x` costs the same name lookup as `g_player.pos.x`.
 
-New exports, all additive: `compile` in `@gba-kit/debug-core`, which answers a
-value, its type and the place it names together, with `Compiled`, `ExprPlace`,
-`ExprLvalue`, `ExprBits` and the `rootType` / `typeByName` hints;
-`bitfieldPlacement`, `isSignedType`, `formatBitfield` and `le32` in
-`@gba-kit/debug-info`, so where a bitfield sits and whether a value is signed are
-each decided in one place, and a member reads identically in a watch and in the
+New exports: `compile` in `@gba-kit/debug-core`, which answers a value, its type
+and the place it names together, with `Compiled`, `ExprPlace`, `ExprLvalue` and
+the `rootType` / `typeByName` hints; `bitfieldPlacement`, `isSignedType`,
+`formatBitfield`, `le32` and `scalarSize` in `@gba-kit/debug-info`, so where a
+bitfield sits, whether a value is signed and how wide a scalar is are each
+decided in one place, and a member reads identically in a watch and in the
 variables tree.
+
+`ExprHints.symbolSigned` is gone. It could only ever answer where `rootType` had
+already answered — both are driven by the same root lookup, so a name with a
+signedness has a type — and a symbol table, which is all an untyped root has,
+states no signedness at all. An `ExprHints` written against 0.7.0 keeps working;
+one that spells `symbolSigned` out in an object literal no longer type-checks.
 
 `ExprEnv.symbol` is now asked for a bare name only. An env written against 0.7.0
 still satisfies the interface, and a root the debug info does not type still
