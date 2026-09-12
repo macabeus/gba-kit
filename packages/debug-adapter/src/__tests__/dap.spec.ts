@@ -1366,6 +1366,21 @@ describe('emulator requests', () => {
     expect(secondLong.path).not.toBe(firstLong.path);
     expect(basename(firstLong.path).length).toBeLessThanOrEqual(basename(secondLong.path).length);
 
+    // a tail of digits is part of the name rather than a repeat mark, so shortening keeps
+    // taking from the end: a dated backup must not name a file the filesystem refuses
+    const dated = { bytes: args.bytes, name: `backup_${'9'.repeat(240)}` };
+    const datedState = await client.body<SavedStateInfo>('gba-kit/importSave', dated);
+    expect(basename(datedState.path).length).toBeLessThanOrEqual('.json'.length + 80);
+
+    // two imports of one name, sent without waiting: choosing a free name and writing it are
+    // two steps, and an import landing between them must not be told the same name is free
+    const raced = await Promise.all([
+      client.body<SavedStateInfo>('gba-kit/importSave', { bytes: args.bytes, name: 'race' }),
+      client.body<SavedStateInfo>('gba-kit/importSave', { bytes: args.bytes, name: 'race' }),
+    ]);
+    expect(raced.map((s) => s.name).sort()).toEqual(['race', 'race (2)']);
+    expect(raced[0]!.path).not.toBe(raced[1]!.path);
+
     // it loads like any other state, and the machine then holds the file
     expect((await stopped(client, 'gba-kit/loadState', { path: first.path })).reason).toBe('restart');
     expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(0);

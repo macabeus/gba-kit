@@ -49,13 +49,13 @@ describe('which .sav belongs in which cartridge', () => {
 describe('how big the exported file is', () => {
   it.each([
     [SRAM, 0, 32768],
-    [EEPROM, 6, 512],
-    [EEPROM, 14, 8192],
-  ])('gives %o at %i address bits %i bytes', (save, addrBits, size) => {
-    expect(saveFileSize(save, addrBits)).toBe(size);
+    [EEPROM, 512, 512],
+    [EEPROM, 8192, 8192],
+  ])('gives %o with a %i byte chip %i bytes', (save, eepromBytes, size) => {
+    expect(saveFileSize(save, eepromBytes)).toBe(size);
   });
 
-  it('has no size for an EEPROM nothing has addressed yet', () => {
+  it('has no size for an EEPROM nothing has sized yet', () => {
     expect(() => saveFileSize(EEPROM, 0)).toThrow(
       'this ROM declares EEPROM_V121, and nothing has said yet whether its EEPROM is 4 Kbit or 64 Kbit: ' +
         'run the game until it reads or writes its save, or import a .sav',

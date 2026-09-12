@@ -65,11 +65,10 @@ export function checkSaveFile(save: CartridgeSave, byteLength: number): void {
 /**
  * How many bytes of a cartridge's backup memory belong in its `.sav`: the declared
  * type's size, never the array's — the SRAM window is always 64 KB in memory but an
- * `SRAM_V` cartridge's file is 32 KB. An EEPROM's size is not in the string, so it
- * comes from the address width, and while nothing has settled that there is no answer
- * to give.
+ * `SRAM_V` cartridge's file is 32 KB. An EEPROM's size is not in the string, so the
+ * chip answers for it, and while nothing has told it there is no answer to give.
  */
-export function saveFileSize(save: CartridgeSave, eepromAddrBits: number): number {
+export function saveFileSize(save: CartridgeSave, eepromSaveBytes: number): number {
   if (save.type === null) {
     throw new Error('this ROM declares no save type, so it has no save to export');
   }
@@ -79,13 +78,13 @@ export function saveFileSize(save: CartridgeSave, eepromAddrBits: number): numbe
   if (save.type !== 'eeprom') {
     return SAVE_FILE_SIZES[save.type][0]!;
   }
-  if (eepromAddrBits === 0) {
+  if (eepromSaveBytes === 0) {
     throw new Error(
       `this ROM declares ${save.id}, and nothing has said yet whether its EEPROM is 4 Kbit or 64 Kbit: ` +
         'run the game until it reads or writes its save, or import a .sav',
     );
   }
-  return eepromAddrBits === 6 ? 512 : 8192;
+  return eepromSaveBytes;
 }
 
 /**

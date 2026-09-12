@@ -182,67 +182,70 @@ describe('the EEPROM serial order', () => {
 });
 
 describe('the EEPROM address width', () => {
-  it('takes 6 bits from a 4 Kbit file', () => {
+  it.each([
+    ['4 Kbit', 512, 6, 40],
+    ['64 Kbit', 8192, 14, 1000],
+  ])('reads a %s cartridge at the width its own read asks with', (_size, fileSize, addrBits, word) => {
     const bus = busFor('EEPROM_V121');
-    const bytes = pattern(512);
+    const bytes = pattern(fileSize);
     bus.writeBackup(bytes);
-    expect(bus.eepromAddrBits).toBe(6);
-    expect(readWord(bus, 40, 6)).toEqual(bytes.subarray(320, 328).slice().reverse());
+    expect(readWord(bus, word, addrBits)).toEqual(
+      bytes
+        .subarray(word * 8, word * 8 + 8)
+        .slice()
+        .reverse(),
+    );
+    expect(bus.eepromSaveBytes).toBe(fileSize);
   });
 
-  it('takes 14 bits from a 64 Kbit file', () => {
-    const bus = busFor('EEPROM_V121');
-    const bytes = pattern(8192);
-    bus.writeBackup(bytes);
-    expect(bus.eepromAddrBits).toBe(14);
-    expect(readWord(bus, 1000, 14)).toEqual(bytes.subarray(8000, 8008).slice().reverse());
-  });
-
-  it('takes the width the first read asks with, whatever the file suggested', () => {
+  it('leaves the width to the cartridge, so a padded 4 Kbit file is read as the 4 Kbit save it is', () => {
     // a 4 Kbit save padded out to 8 KB, which is the file several emulators write
     const bus = busFor('EEPROM_V121');
     const bytes = pattern(512);
     const padded = new Uint8Array(8192).fill(0xff);
     padded.set(bytes);
     bus.writeBackup(padded);
-    expect(bus.eepromAddrBits).toBe(14);
     expect(readWord(bus, 40, 6)).toEqual(bytes.subarray(320, 328).slice().reverse());
-    expect(bus.eepromAddrBits).toBe(6);
+    expect(bus.eepromSaveBytes).toBe(512);
   });
 
-  it('takes it the other way round too, so a 64 Kbit cartridge reads past its first 512 bytes', () => {
-    const bus = busFor('EEPROM_V121');
-    const bytes = pattern(8192);
-    bus.writeBackup(bytes.subarray(0, 512));
-    expect(bus.eepromAddrBits).toBe(6);
-    bus.writeBackup(bytes);
-    const snap = bus.serialize();
-    snap.eeprom.addrBits = 6;
-    bus.deserialize(snap);
-    expect(readWord(bus, 1000, 14)).toEqual(bytes.subarray(8000, 8008).slice().reverse());
-    expect(bus.eepromAddrBits).toBe(14);
-  });
-
-  it('settles it from the transfer when no file has said, which is how a game boots', () => {
-    const bus = busFor('EEPROM_V121');
-    const bytes = pattern(8192);
-    bus.writeBackup(bytes);
-    // undo what `writeBackup` guessed, leaving the width to the first transfer
-    const snap = bus.serialize();
-    snap.eeprom.addrBits = 0;
-    bus.deserialize(snap);
-    expect(readWord(bus, 1000, 14)).toEqual(bytes.subarray(8000, 8008).slice().reverse());
-    expect(bus.eepromAddrBits).toBe(14);
-  });
-
-  it('writes where the read settled, not where the file guessed', () => {
+  it('takes a write at the width the cartridge addresses with, even after a padded file', () => {
+    // a game whose first EEPROM access is a write has no read to settle the width for it,
+    // and an imported file must not be what answers instead: its save would go nowhere
     const bus = busFor('EEPROM_V121');
     const padded = new Uint8Array(8192).fill(0xff);
     bus.writeBackup(padded);
-    readWord(bus, 0, 6);
     const wire = Uint8Array.of(0x41, 0x4f, 0x4e, 0x4f, 0x4c, 0x4b, 0x5f, 0x4b);
     writeWord(bus, 2, 6, wire);
     expect(Buffer.from(bus.readBackup()!.subarray(16, 24)).toString('latin1')).toBe('K_KLONOA');
+  });
+
+  it('has no size to give before anything has said, and the file it took stands in until a read does', () => {
+    const bus = busFor('EEPROM_V121');
+    expect(bus.eepromSaveBytes).toBe(0);
+    bus.writeBackup(new Uint8Array(8192).fill(0xff));
+    expect(bus.eepromSaveBytes).toBe(8192);
+    readWord(bus, 40, 6);
+    expect(bus.eepromSaveBytes).toBe(512);
+  });
+
+  it('carries the length of the file it took through a state, so an import can be exported again', () => {
+    const bus = busFor('EEPROM_V121');
+    bus.writeBackup(pattern(512));
+    const loaded = busFor('EEPROM_V121');
+    loaded.deserialize(bus.serialize());
+    expect(loaded.eepromSaveBytes).toBe(512);
+  });
+
+  it('resyncs after the line loses its framing, rather than swallowing the requests that follow', () => {
+    const bus = busFor('EEPROM_V121');
+    const bytes = pattern(512);
+    bus.writeBackup(bytes);
+    // a request the game abandoned two address bits in: the chip is left in an address
+    // phase, and the read that ends the next request turns around at a width no chip has
+    sendBits(bus, [1, 1, 0, 0]);
+    readWord(bus, 40, 6);
+    expect(readWord(bus, 40, 6)).toEqual(bytes.subarray(320, 328).slice().reverse());
   });
 
   it('leaves nothing of a half-clocked command behind when a file arrives mid-transfer', () => {

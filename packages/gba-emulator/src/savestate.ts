@@ -97,6 +97,8 @@ export interface InputSnapshot {
 export interface EepromSnapshot {
   data: Uint8Array;
   addrBits: number;
+  /** how long the `.sav` installed in the chip was; absent in a state written before one could be */
+  installedBytes?: number;
   state: number;
   command: number;
   address: number;

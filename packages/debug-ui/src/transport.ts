@@ -52,9 +52,10 @@ export interface Transport {
   /**
    * Ask the user for a file and read it, when the host has a way to open one. Null
    * when they picked nothing. `filters` is extension lists by description, the way an
-   * editor's open dialog takes them.
+   * editor's open dialog takes them, and `maxBytes` is what the caller can take: a
+   * bigger file is refused where its bytes already are, before anything copies them.
    */
-  pickFile?(options: { title: string; filters: Record<string, string[]> }): Promise<{
+  pickFile?(options: { title: string; filters: Record<string, string[]>; maxBytes: number }): Promise<{
     name: string;
     bytes: Uint8Array;
   } | null>;
@@ -85,7 +86,7 @@ export type TransportToHost =
   /** the last listener of a feed left: the host may stop sending it */
   | { type: 'unsubscribe'; what: Feed }
   | { type: 'openText'; content: string; language: string; title: string }
-  | { type: 'pickFile'; id: number; title: string; filters: Record<string, string[]> }
+  | { type: 'pickFile'; id: number; title: string; filters: Record<string, string[]>; maxBytes: number }
   /** `bytes` is base64: nothing has crossed webview→host as a typed array here, and text always has */
   | {
       type: 'saveFile';
@@ -246,6 +247,17 @@ export interface TransportBackend {
 /** What a host that can open no file answers, rather than leaving the webview waiting. */
 export const NO_FILE_DIALOG = 'this host cannot open files';
 
+/**
+ * What every `pickFile` answers for a file bigger than the caller said it could take.
+ * A mis-picked ROM is turned away by its length alone, before the bytes are copied
+ * anywhere: an extension host that base64-encoded one first would spend a second and a
+ * gigabyte doing it, and on a big enough file would run out of heap and take the whole
+ * extension host down with it.
+ */
+export function fileTooBig(name: string, byteLength: number, maxBytes: number): string {
+  return `${name} is ${byteLength} bytes; at most ${maxBytes} can be read here`;
+}
+
 /** Handle one message from a webview transport on the host side. */
 export async function serveTransport(
   message: TransportToHost,
@@ -281,9 +293,17 @@ export async function serveTransport(
       await answer(
         message.id,
         backend.pickFile,
-        { title: message.title, filters: message.filters },
+        { title: message.title, filters: message.filters, maxBytes: message.maxBytes },
         reply,
-        (file) => file && { name: file.name, bytes: bytesToBase64(file.bytes) },
+        (file) => {
+          if (!file) {
+            return null;
+          }
+          if (file.bytes.length > message.maxBytes) {
+            throw new Error(fileTooBig(file.name, file.bytes.length, message.maxBytes));
+          }
+          return { name: file.name, bytes: bytesToBase64(file.bytes) };
+        },
       );
       return;
     case 'saveFile':
@@ -324,6 +344,8 @@ async function answer<A, R>(
     return;
   }
   try {
+    // `wire` runs inside the try: a file a capability should not have handed over at all
+    // is refused there, and refusing is an answer like any other
     reply({ type: 'response', id, body: wire(await capability(options)) });
   } catch (err) {
     reply({ type: 'response', id, error: (err as Error).message });

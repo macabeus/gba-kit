@@ -37,9 +37,12 @@ Three fixes in the emulator come with it:
   `SRAM_V`, which `SRAM_F_V102` does not contain, so those games had no working
   save at all. It now reads the SDK string the build embeds — word-aligned, with
   three version digits — and keeps it, so a message can name it.
-- **A 64 Kbit EEPROM is addressed correctly.** The address width was latched at 6
-  bits by the first six bits of any address and never revised, so a 64 Kbit
-  cartridge read the wrong words for the rest of the run. The width now comes from
-  the length of the transfer the game makes, which is what carries it: a `.sav` only
-  suggests one until the cartridge says, so a 4 Kbit save padded out to 8 KB — the
-  file some emulators write — is read as the 4 Kbit save it is.
+- **A 64 Kbit EEPROM is read at the right addresses.** The address width was latched
+  at 6 bits by the first six bits of any address and never revised, so a 64 Kbit
+  cartridge read the wrong words for the rest of the run. The width now comes from the
+  length of the read the game makes, which is what carries it. A write carries no
+  length — 64 data bits follow the address with nothing to mark where it ended — so it
+  still needs a width up front and takes 4 Kbit until a read has said otherwise, as
+  before. An imported `.sav` says nothing about the width either: a 4 Kbit save padded
+  out to 8 KB is a file some emulators write, so the cartridge's own first read settles
+  it and the file's length only answers for how big an export is until then.

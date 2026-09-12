@@ -1981,7 +1981,9 @@ describe('a .sav as a save state', () => {
     expect(meta.romHash).toBe(session.romHash);
     expect(snapshot.cpu.registers[15]).toBe(0x08000000);
     expect(snapshot.bus.eeprom.data.subarray(0, 512)).toEqual(sav);
-    expect(snapshot.bus.eeprom.addrBits).toBe(6);
+    // the cartridge settles the address width from its own first read, so nothing has yet
+    expect(snapshot.bus.eeprom.addrBits).toBe(0);
+    expect(snapshot.bus.eeprom.installedBytes).toBe(512);
   });
 
   it('leaves the machine being debugged exactly as it was', async () => {

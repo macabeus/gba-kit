@@ -137,8 +137,8 @@ describe('host bridge', () => {
     });
     const filters = { 'Save files': ['sav'] };
 
-    await bridge.receive({ type: 'pickFile', id: 1, title: 'Import a .sav file', filters });
-    expect(asked[0]).toEqual({ title: 'Import a .sav file', filters });
+    await bridge.receive({ type: 'pickFile', id: 1, title: 'Import a .sav file', filters, maxBytes: 131072 });
+    expect(asked[0]).toEqual({ title: 'Import a .sav file', filters, maxBytes: 131072 });
     // the file crosses back base64-encoded, the way it crossed out
     expect(posted[0]).toEqual({ type: 'response', id: 1, body: { name: 'Klonoa (USA).sav', bytes: 'AQID' } });
 
@@ -155,8 +155,24 @@ describe('host bridge', () => {
 
     // a host with no dialog says so rather than leaving the webview waiting
     const silent = new HostBridge({ post: (m) => posted.push(m) });
-    await silent.receive({ type: 'pickFile', id: 3, title: 'x', filters });
+    await silent.receive({ type: 'pickFile', id: 3, title: 'x', filters, maxBytes: 131072 });
     expect(posted[2]).toEqual({ type: 'response', id: 3, error: 'this host cannot open files' });
+  });
+
+  it('turns a file bigger than the caller can take away rather than encoding it', async () => {
+    // the encoding runs on the extension host, where a mis-picked ROM costs it several
+    // times its own size before the webview it is bound for ever sees the length
+    const posted: HostToTransport[] = [];
+    const bridge = new HostBridge({
+      post: (m) => posted.push(m),
+      pickFile: async () => ({ name: 'kleod.gba', bytes: new Uint8Array(2048) }),
+    });
+    await bridge.receive({ type: 'pickFile', id: 1, title: 'x', filters: { 'Save files': ['sav'] }, maxBytes: 1024 });
+    expect(posted[0]).toEqual({
+      type: 'response',
+      id: 1,
+      error: 'kleod.gba is 2048 bytes; at most 1024 can be read here',
+    });
   });
 
   it('knows the DAP request behind each control', () => {

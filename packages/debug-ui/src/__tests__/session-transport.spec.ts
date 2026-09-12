@@ -442,6 +442,15 @@ describe('a .sav through the session transport', () => {
     expect((await transport.request('gba-kit/importSave', args)).path).toBe('/states/game');
     expect((await transport.request('gba-kit/importSave', args)).name).toBe('game (2)');
     expect([...store.keys()]).toEqual(['game', 'game (2)']);
+
+    // two imports of one name sent without waiting: the store is answered for a candidate
+    // before the state is written, so an import landing between the two must wait its turn
+    const raced = await Promise.all([
+      transport.request('gba-kit/importSave', args),
+      transport.request('gba-kit/importSave', args),
+    ]);
+    expect(raced.map((s) => s.name).sort()).toEqual(['game (3)', 'game (4)']);
+    expect([...store.keys()]).toEqual(['game', 'game (2)', 'game (3)', 'game (4)']);
   });
 
   it("refuses what the cartridge cannot account for, in the adapter's words", async () => {

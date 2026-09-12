@@ -70,6 +70,22 @@ export function createSessionTransport(session: Session, options: SessionTranspo
   const memoryStates = new Map<string, { text: string; frame: number; createdAt: string }>();
   const labelListeners = new Set<() => void>();
   const panelListeners = new Set<(panel: PanelId) => void>();
+  /** imports queue here: two of them looking for a free name at once would both take the same one */
+  let importing: Promise<unknown> = Promise.resolve();
+
+  /** A `.sav` as a state under a name no state already has, written wherever states go. */
+  async function importSave(bytes: Uint8Array, name?: string): Promise<SavedStateInfo> {
+    const stateName = await freeStateName(name?.trim() || 'imported save', async (candidate) =>
+      options.states ? (await options.states.load(candidate)) !== null : memoryStates.has(candidate),
+    );
+    const text = session.importSaveState(bytes, stateName);
+    const createdAt = new Date().toISOString();
+    const path = options.states ? await options.states.save(stateName, text, 0) : stateName;
+    if (!options.states) {
+      memoryStates.set(stateName, { text, frame: 0, createdAt });
+    }
+    return { ...stateInfoOf(stateName, path, text), createdAt };
+  }
 
   const state = (): StateBody => ({
     state: session.state,
@@ -248,16 +264,10 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       }
       case 'gba-kit/importSave': {
         const { bytes, name } = a as A<'gba-kit/importSave'>;
-        const stateName = await freeStateName(name?.trim() || 'imported save', async (candidate) =>
-          options.states ? (await options.states.load(candidate)) !== null : memoryStates.has(candidate),
-        );
-        const text = session.importSaveState(base64ToBytes(bytes), stateName);
-        const createdAt = new Date().toISOString();
-        const path = options.states ? await options.states.save(stateName, text, 0) : stateName;
-        if (!options.states) {
-          memoryStates.set(stateName, { text, frame: 0, createdAt });
-        }
-        return { ...stateInfoOf(stateName, path, text), createdAt } as never;
+        const done = importing.then(() => importSave(base64ToBytes(bytes), name));
+        // one import failing does not free the next of its turn, so the queue keeps a settled promise
+        importing = done.catch(() => undefined);
+        return (await done) as never;
       }
       case 'gba-kit/exportSave':
         return { bytes: bytesToBase64(session.exportSaveFile()) } as never;

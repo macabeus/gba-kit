@@ -6,7 +6,7 @@
  */
 import { GbaDebugSession, newPipePath } from '@gba-kit/debug-adapter';
 import { AUDIO_SAMPLE_RATE, type StateBody } from '@gba-kit/debug-adapter/protocol';
-import type { ControlAction, PanelId } from '@gba-kit/debug-ui/transport';
+import { type ControlAction, type PanelId, fileTooBig } from '@gba-kit/debug-ui/transport';
 import { accessSync, constants } from 'node:fs';
 import path, { basename } from 'node:path';
 import * as vscode from 'vscode';
@@ -122,12 +122,19 @@ class Panels {
           .then((doc) => vscode.window.showTextDocument(doc, vscode.ViewColumn.Active));
       },
       // the editor's own dialogs, the way `gba-kit.importLabels` reaches a file the user picks
-      pickFile: async ({ title, filters }) => {
+      pickFile: async ({ title, filters, maxBytes }) => {
         const files = await vscode.window.showOpenDialog({ canSelectMany: false, title, filters });
         if (!files?.[0]) {
           return null;
         }
-        return { name: basename(files[0].fsPath), bytes: await vscode.workspace.fs.readFile(files[0]) };
+        const name = basename(files[0].fsPath);
+        // the size is on disk before a byte is read, and a mis-picked ROM is megabytes the
+        // extension host would otherwise hold twice over on its way to the webview
+        const { size } = await vscode.workspace.fs.stat(files[0]);
+        if (size > maxBytes) {
+          throw new Error(fileTooBig(name, size, maxBytes));
+        }
+        return { name, bytes: await vscode.workspace.fs.readFile(files[0]) };
       },
       saveFile: async ({ title, suggestedName, filters, bytes }) => {
         const folder = vscode.workspace.workspaceFolders?.[0]?.uri;

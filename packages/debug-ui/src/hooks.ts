@@ -176,16 +176,15 @@ export function useSaveStates(transport: Transport): {
     importSave: () =>
       run(async () => {
         const pick = need(transport.pickFile);
-        const file = await pick({ title: 'Import a .sav file', filters: { 'Save files': ['sav'] } });
+        // a mis-picked ROM is turned away by `maxBytes`, wherever the host read it, rather
+        // than after megabytes of it have been encoded and posted across
+        const file = await pick({
+          title: 'Import a .sav file',
+          filters: { 'Save files': ['sav'] },
+          maxBytes: MAX_SAVE_FILE_SIZE,
+        });
         if (!file) {
           return false;
-        }
-        // the length is known the moment the file is read: a mis-picked ROM is turned away
-        // here, rather than after megabytes of it have been encoded and sent
-        if (file.bytes.length > MAX_SAVE_FILE_SIZE) {
-          throw new Error(
-            `${file.name} is ${file.bytes.length} bytes; no .sav file is bigger than ${MAX_SAVE_FILE_SIZE}`,
-          );
         }
         await transport.request('gba-kit/importSave', {
           bytes: bytesToBase64(file.bytes),

@@ -338,11 +338,11 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   /**
-   * How wide an address the EEPROM takes — 6 bits for 4 Kbit, 14 for 64 Kbit — or 0
-   * while nothing has said: the size of the cartridge's save follows from it.
+   * How many bytes the cartridge's EEPROM holds — 512 for 4 Kbit, 8192 for 64 Kbit —
+   * or 0 while nothing has said which of the two it is.
    */
-  get eepromAddrBits(): number {
-    return this.#eeprom.addrBits;
+  get eepromSaveBytes(): number {
+    return this.#eeprom.saveBytes;
   }
 
   /**
@@ -364,10 +364,8 @@ export class GbaSystemBus implements MemoryBus {
 
   /**
    * Install a `.sav` as the cartridge's battery-backed memory, filling what `bytes` does
-   * not reach with the value an erased chip holds. An EEPROM also takes the address width
-   * its size implies, which the serial protocol otherwise guesses from the first transfer
-   * and guesses 64 Kbit wrong. Which files belong in which chip is settled before here:
-   * this refuses only what it cannot hold at all.
+   * not reach with the value an erased chip holds. Which files belong in which chip is
+   * settled before here: this refuses only what it cannot hold at all.
    */
   writeBackup(bytes: Uint8Array): void {
     if (this.#save.type === null) {
@@ -1338,6 +1336,9 @@ class GbaEeprom {
   /** Address bit length: 6 for 4Kbit, 14 for 64Kbit. 0 = not yet detected. */
   #addrBits = 0;
 
+  /** How long an installed `.sav` was, which stands in for the chip's size until a transfer settles it. */
+  #installedBytes = 0;
+
   #state: EepromState = EepromState.Idle;
   #command = 0; // 0=write, 1=read
   #address = 0;
@@ -1349,6 +1350,7 @@ class GbaEeprom {
   reset(): void {
     this.#data.fill(0xff); // EEPROM defaults to all 1s
     this.#addrBits = 0;
+    this.#installedBytes = 0;
     this.#idle();
   }
 
@@ -1367,6 +1369,7 @@ class GbaEeprom {
     return {
       data: new Uint8Array(this.#data),
       addrBits: this.#addrBits,
+      installedBytes: this.#installedBytes,
       state: this.#state,
       command: this.#command,
       address: this.#address,
@@ -1380,6 +1383,8 @@ class GbaEeprom {
   deserialize(snap: EepromSnapshot): void {
     this.#data.set(snap.data);
     this.#addrBits = snap.addrBits;
+    // a state written before an EEPROM could be installed from a file carries no length
+    this.#installedBytes = snap.installedBytes ?? 0;
     this.#state = snap.state as EepromState;
     this.#command = snap.command;
     this.#address = snap.address;
@@ -1389,8 +1394,17 @@ class GbaEeprom {
     this.#sendPos = snap.sendPos;
   }
 
-  get addrBits(): number {
-    return this.#addrBits;
+  /**
+   * How many bytes this chip holds: 512 for a 4 Kbit cartridge, 8192 for a 64 Kbit one,
+   * 0 while nothing has said which it is. The address width a transfer settles is what
+   * says it; before any transfer there is only the length of the file someone installed,
+   * which a padded `.sav` overstates — but overstating it is better than having no answer.
+   */
+  get saveBytes(): number {
+    if (this.#addrBits !== 0) {
+      return this.#addrBits === 6 ? 512 : EEPROM_BYTES;
+    }
+    return this.#installedBytes;
   }
 
   /** The chip's contents, as a `.sav` file holds them. */
@@ -1400,15 +1414,15 @@ class GbaEeprom {
 
   /**
    * Put a `.sav` in the chip, erased past its end and with nothing in flight on the
-   * line. The file's size implies an address width — 6 bits for 4 Kbit, 14 for 64 Kbit
-   * — which is all there is to go on before the game runs, and which is only what the
-   * chip reports until the first transfer says how wide the cartridge really addresses:
-   * a 4 Kbit save someone padded out to 8 KB is a file whose size means nothing.
+   * line. The address width is left where it was — a file's size is no evidence of it,
+   * since a 4 Kbit save padded out to 8 KB is a file several emulators write, and a
+   * width taken from one is a width the cartridge then has to be wrong about. Only the
+   * length is kept, for `saveBytes` to answer with until a transfer settles the width.
    */
   install(bytes: Uint8Array): void {
     this.#data.fill(0xff);
     this.#data.set(bytes);
-    this.#addrBits = bytes.length > 512 ? 14 : 6;
+    this.#installedBytes = bytes.length;
     this.#idle();
   }
 
@@ -1437,7 +1451,7 @@ class GbaEeprom {
         // A read's address phase ends when the game turns around and reads, so `read`
         // closes it and the transfer's own length says how wide the address was. A write
         // has 64 data bits behind the address and no such turn, so it needs the width up
-        // front: whatever a read or an imported file has settled, or 4 Kbit if neither has.
+        // front: whatever a read has settled, or 4 Kbit while no read has.
         if (this.#command === 1) {
           // no chip takes an address this long, so what is coming in is not a request: the
           // line goes idle for the next start bit to resync it, rather than swallowing
@@ -1513,12 +1527,17 @@ class GbaEeprom {
    * The game is reading back what it just clocked in, so its read request is whole and
    * its length is what says how wide this cartridge addresses: 9 bits of request for a
    * 4 Kbit chip, 17 for a 64 Kbit one, the last of them the stop bit. The cartridge has
-   * the final word on the width — a `.sav` file's size is only a guess at it, and a
-   * padded 4 Kbit save is a wrong one.
+   * the final word on the width, so this is where it is settled.
+   *
+   * A turnaround at any other count is not the end of a request at all — the line is
+   * carrying something it lost the framing of — so the chip goes idle for the next start
+   * bit to pick it up again, rather than staying in an address phase that then eats
+   * every request after it.
    */
   #settleAddressWidth(): void {
     const width = this.#bitsReceived - 1;
     if (width !== 6 && width !== 14) {
+      this.#idle();
       return;
     }
     this.#addrBits = width;

@@ -5,7 +5,7 @@
  * what matters most is that a dialog the user dismissed answers as surely as one they
  * chose a file in.
  */
-import type { StateBody } from '@gba-kit/debug-core/protocol';
+import { MAX_SAVE_FILE_SIZE, type StateBody } from '@gba-kit/debug-core/protocol';
 import { SaveStateDrawer, type Transport } from '@gba-kit/debug-ui';
 import { act, createElement } from 'react';
 import { type Root, createRoot } from 'react-dom/client';
@@ -16,6 +16,28 @@ import { pickFile, saveFile } from '../session/file-dialog';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const FILTERS = { 'Save files': ['sav'] };
+/** What the save-state bar asks with, and what the tests here that do not care about it pass. */
+const OPEN = { title: 'Import a .sav file', filters: FILTERS, maxBytes: MAX_SAVE_FILE_SIZE };
+
+/**
+ * The page as a browser too old for the `cancel` event: `pickFile` falls back to watching
+ * the focus there, and jsdom is modern enough that the fallback would not otherwise arm.
+ */
+function withoutCancelEvent<T>(body: () => T): T {
+  let owner: object | null = document.createElement('input');
+  while (owner && !Object.getOwnPropertyDescriptor(owner, 'oncancel')) {
+    owner = Object.getPrototypeOf(owner) as object | null;
+  }
+  expect(owner, 'jsdom no longer defines `oncancel`, so this fixture pretends nothing').not.toBeNull();
+  const holder = owner as object;
+  const descriptor = Object.getOwnPropertyDescriptor(holder, 'oncancel')!;
+  delete (holder as Record<string, unknown>).oncancel;
+  try {
+    return body();
+  } finally {
+    Object.defineProperty(holder, 'oncancel', descriptor);
+  }
+}
 
 /** The hidden input `pickFile` put in the page, once the dialog it opened is up. */
 function dialogInput(): HTMLInputElement {
@@ -36,14 +58,14 @@ describe('picking a .sav in a browser', () => {
   });
 
   it('answers with the file the dialog chose, and takes the input back out of the page', async () => {
-    const picked = pickFile({ title: 'Import a .sav file', filters: FILTERS });
+    const picked = pickFile(OPEN);
     chose(dialogInput(), new File([Uint8Array.of(1, 2, 3)], 'Klonoa (USA).sav'));
     expect(await picked).toEqual({ name: 'Klonoa (USA).sav', bytes: Uint8Array.of(1, 2, 3) });
     expect(document.querySelector('input[type=file]')).toBeNull();
   });
 
   it('answers a dismissed dialog too, rather than leaving the caller waiting forever', async () => {
-    const picked = pickFile({ title: 'Import a .sav file', filters: FILTERS });
+    const picked = pickFile(OPEN);
     dialogInput().dispatchEvent(new Event('cancel'));
     expect(await picked).toBeNull();
     expect(document.querySelector('input[type=file]')).toBeNull();
@@ -52,7 +74,7 @@ describe('picking a .sav in a browser', () => {
   it('answers when the page takes the focus back with nothing chosen, for a browser without `cancel`', async () => {
     vi.useFakeTimers();
     try {
-      const picked = pickFile({ title: 'Import a .sav file', filters: FILTERS });
+      const picked = withoutCancelEvent(() => pickFile(OPEN));
       window.dispatchEvent(new Event('focus'));
       await vi.advanceTimersByTimeAsync(1000);
       expect(await picked).toBeNull();
@@ -64,7 +86,7 @@ describe('picking a .sav in a browser', () => {
   it('lets a file that arrives with the focus win, since a dialog that chose one is not a dismissal', async () => {
     vi.useFakeTimers();
     try {
-      const picked = pickFile({ title: 'Import a .sav file', filters: FILTERS });
+      const picked = withoutCancelEvent(() => pickFile(OPEN));
       const input = dialogInput();
       Object.defineProperty(input, 'files', { configurable: true, value: [new File([Uint8Array.of(7)], 'a.sav')] });
       window.dispatchEvent(new Event('focus'));
@@ -73,6 +95,54 @@ describe('picking a .sav in a browser', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('keeps waiting when the page takes the focus back with the dialog still open', async () => {
+    // switching to another app and back raises a focus on the page, and the user is still
+    // choosing: a browser with `cancel` says when the dialog really ended, so nothing guesses
+    vi.useFakeTimers();
+    try {
+      const picked = pickFile(OPEN);
+      const input = dialogInput();
+      window.dispatchEvent(new Event('focus'));
+      await vi.advanceTimersByTimeAsync(1000);
+      chose(input, new File([Uint8Array.of(7)], 'a.sav'));
+      expect(await picked).toEqual({ name: 'a.sav', bytes: Uint8Array.of(7) });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('says so when the file cannot be read, rather than never answering at all', async () => {
+    const picked = pickFile(OPEN);
+    const input = dialogInput();
+    const unreadable = {
+      name: 'gone.sav',
+      size: 512,
+      arrayBuffer: () => Promise.reject(new Error('the volume went away')),
+    };
+    Object.defineProperty(input, 'files', { configurable: true, value: [unreadable] });
+    input.dispatchEvent(new Event('change'));
+    await expect(picked).rejects.toThrow('gone.sav could not be read: the volume went away');
+    expect(document.querySelector('input[type=file]')).toBeNull();
+  });
+
+  it('turns a file too big to be a .sav away by its size, before reading a byte of it', async () => {
+    const picked = pickFile({ ...OPEN, maxBytes: 1024 });
+    const input = dialogInput();
+    let read = false;
+    const huge = {
+      name: 'kleod.gba',
+      size: 16 * 1024 * 1024,
+      arrayBuffer: () => {
+        read = true;
+        return Promise.resolve(new ArrayBuffer(0));
+      },
+    };
+    Object.defineProperty(input, 'files', { configurable: true, value: [huge] });
+    input.dispatchEvent(new Event('change'));
+    await expect(picked).rejects.toThrow('kleod.gba is 16777216 bytes; at most 1024 can be read here');
+    expect(read).toBe(false);
   });
 
   it('hands a file out under the name suggested for it', () => {

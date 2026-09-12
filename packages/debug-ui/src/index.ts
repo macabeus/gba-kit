@@ -6,6 +6,7 @@
  */
 export {
   createMessageTransport,
+  fileTooBig,
   serveTransport,
   type ControlAction,
   type Feed,
