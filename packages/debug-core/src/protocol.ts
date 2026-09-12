@@ -181,6 +181,17 @@ export interface GbaKitRequests {
   /** Delete a saved state, by the same `name` or `path` `loadState` takes. */
   'gba-kit/deleteState': { args: { name?: string; path?: string }; body: { deleted: boolean } };
 
+  /**
+   * A `.sav` — a raw cartridge battery-backup dump — as a new save state: a power-on
+   * machine of this ROM with the save already in its cartridge, at frame 0. `bytes` is
+   * the file base64-encoded and `name` what to call the state, which is the file's name
+   * without its extension; a name already taken gets `(2)`, `(3)`… rather than being
+   * written over. The machine being debugged is not touched, and the state is not loaded.
+   */
+  'gba-kit/importSave': { args: { bytes: string; name?: string }; body: SavedStateInfo };
+  /** The machine's cartridge backup memory as a `.sav`: `bytes` base64-encoded, and the save-type string the ROM declares. */
+  'gba-kit/exportSave': { args?: Record<string, never>; body: { bytes: string; size: number; declared: string } };
+
   /** A PPU view; a `tiles` request answers `TILES.defaultCount` tiles unless told how many, at most `TILES.maxCount`. */
   'gba-kit/ppu': { args: PpuArguments; body: PpuBody };
   'gba-kit/ioRegisters': { args?: Record<string, never>; body: { registers: IoRegisterValue[] } };

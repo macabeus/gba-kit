@@ -24,6 +24,7 @@ import {
   type EventBreakpointKind,
   type ResolvedAddresses,
 } from './breakpoints.js';
+import { checkSaveFile, saveFileSize } from './cartridge-save.js';
 import { type PackedSnapshot, packSnapshot, unpackSnapshot } from './delta.js';
 import type { CompiledExpr, ExprEnv } from './expression.js';
 import type { Host } from './host.js';
@@ -1645,6 +1646,36 @@ export class Session {
       frame: this.machine.frame,
       thumbnail: screenToJson(this.screen()),
     });
+  }
+
+  /**
+   * A `.sav` as a save state: a power-on machine of this ROM with the file already in
+   * its cartridge, at frame 0. Loading it and continuing boots the ROM and the game
+   * finds the save — the convention VBA-M's `Import battery file` and mGBA's `Load
+   * alternate save game` follow, and what makes the result independent of wherever
+   * this session happens to be stopped.
+   *
+   * The machine being debugged is never touched: the snapshot is built on a machine of
+   * its own, so no history, hit count, revision or reported state moves. Nothing is
+   * written here either — the state goes wherever the caller keeps its states.
+   */
+  importSaveState(bytes: Uint8Array, name: string): string {
+    const fresh = new Machine(this.machine.rom);
+    checkSaveFile(fresh.gba.bus.save, bytes.length);
+    fresh.gba.bus.writeBackup(bytes);
+    return encodeSaveState(fresh.snapshot(), {
+      romHash: this.romHash,
+      name,
+      frame: fresh.frame,
+      thumbnail: screenToJson(thumbnailRgba(fresh.framebufferRgba())),
+    });
+  }
+
+  /** The machine's cartridge backup memory as a `.sav`, the size its declared save type gives it. */
+  exportSaveFile(): { bytes: Uint8Array; declared: string } {
+    const bus = this.machine.gba.bus;
+    const size = saveFileSize(bus.save, bus.eepromAddrBits);
+    return { bytes: bus.readBackup()!.subarray(0, size), declared: bus.save.id! };
   }
 
   loadState(text: string): void {
