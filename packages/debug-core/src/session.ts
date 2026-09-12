@@ -943,9 +943,21 @@ export class Session {
     return { address, length: size ?? extent ?? 4, name: trimmed };
   }
 
-  /** Replace the data breakpoints. One whose condition does not compile is returned unverified and watches nothing. */
+  /**
+   * Replace the data breakpoints. One whose condition does not compile is returned
+   * unverified and watches nothing.
+   *
+   * A watched address can be written from anywhere, so a condition has no one place
+   * it belongs to; it is compiled where the user typed it — the stopped frame — which
+   * is the frame whose names they had in front of them. A condition naming a local
+   * then answers while that frame is live and says the name is unknown once it is
+   * not, which is what a name out of scope is.
+   */
   setDataBreakpoints(specs: DataBreakpointSpec[]): DataBreakpoint[] {
-    const list = this.breakpoints.replaceData(specs, this.inspector.hintsAt());
+    const list = this.breakpoints.replaceData(
+      specs,
+      this.inspector.hintsAt(this.#state === 'stopped' ? this.machine.pc : undefined),
+    );
     this.#installWatchpoints();
     return list;
   }

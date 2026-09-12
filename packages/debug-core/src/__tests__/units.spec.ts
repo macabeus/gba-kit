@@ -315,10 +315,10 @@ describe('expression grammar', () => {
     expect(ev('&gHp')).toBe(0x03000000);
     // A symbol table has no offsets, so every step below one is refused — naming the
     // root, not a type the ELF was never asked about.
-    expect(() => ev('gHp.a')).toThrow(/'gHp' has no type in the debug info; cast it to reach through it/);
-    expect(() => ev('gHp->a')).toThrow(/'gHp' has no type in the debug info; cast it to reach through it/);
-    expect(() => ev('gHp[1]')).toThrow(/'gHp' has no type in the debug info; cast it to subscript it/);
-    expect(() => ev('*gHp')).toThrow(/'gHp' has no type in the debug info; cast it to read through it/);
+    expect(() => ev('gHp.a')).toThrow(/'gHp' has no type here; cast it to reach through it/);
+    expect(() => ev('gHp->a')).toThrow(/'gHp' has no type here; cast it to reach through it/);
+    expect(() => ev('gHp[1]')).toThrow(/'gHp' has no type here; cast it to subscript it/);
+    expect(() => ev('*gHp')).toThrow(/'gHp' has no type here; cast it to read through it/);
     // and a name that resolves nowhere is a missing name, whatever is written after it
     expect(() => ev('gNope.a')).toThrow(/unknown symbol 'gNope'/);
     expect(() => ev('gNope->a')).toThrow(/unknown symbol 'gNope'/);

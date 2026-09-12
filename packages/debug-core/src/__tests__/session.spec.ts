@@ -518,6 +518,19 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(target.address).toBe(h.session.evaluate('&p->pos.x').address);
     expect(target.length).toBe(4);
     expect(h.session.dataBreakpointTarget('p->stats.hp', undefined, 0)!.length).toBe(1);
+    // a dereference is a place too, on either side of the `=`
+    expect(h.session.assign('*p->counterRef', '77').node.value).toBe(h.session.evaluate('g_vblank_count').node.value);
+    expect(h.session.dataBreakpointTarget('g_samples[g_frame & 3]', undefined, 0)!.address).toBe(
+      h.session.evaluate('&g_samples[g_frame & 3]').address,
+    );
+    // and a data breakpoint's condition is compiled where the user typed it, so it
+    // reads the names of the frame they were looking at, not only the globals
+    h.session.setSourceBreakpoints(UTIL, []);
+    const watched = h.session.dataBreakpointTarget('g_player.pos.x', 4, 0)!;
+    const [data] = h.session.setDataBreakpoints([{ ...watched, access: 'write', condition: 'p->pos.x > 0' }]);
+    expect(data!.verified).toBe(true);
+    expect(h.run(60)?.reason).toBe('data breakpoint');
+    expect(h.output.filter((o) => o.startsWith('[stderr]'))).toEqual([]);
   });
 
   it('every write is an event carrying the fresh revision, and a refused write is not', async () => {

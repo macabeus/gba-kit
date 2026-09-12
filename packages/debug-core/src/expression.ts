@@ -779,10 +779,14 @@ function typedRoot(name: string, type: TypeDesc): Node {
  * evaluation, so the value is asked for before the missing type is reported: `zzz->a`
  * says `unknown symbol 'zzz'` exactly where `zzz` does, and only a name that does
  * resolve is told to cast.
+ *
+ * The refusal says *here* because that is the extent of what was asked: a type is
+ * looked up where the expression compiles, and a local of another function is
+ * untyped at this pc however well the ELF describes it elsewhere.
  */
 function belowUntyped(base: Node, text: string, advice: string): Node {
   const value = base.eval;
-  const err = new Error(`'${base.text}' has no type in the debug info; ${advice}`);
+  const err = new Error(`'${base.text}' has no type here; ${advice}`);
   return {
     text,
     root: base.root,
