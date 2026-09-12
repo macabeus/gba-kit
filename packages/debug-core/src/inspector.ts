@@ -18,15 +18,24 @@ import type {
   MachineFacts,
   Memory,
   PhysicalFrame,
+  TypeDesc,
   UnitInfo,
   VarNode,
   VirtualFrame,
   WritableScalar,
 } from '@gba-kit/debug-info';
-import { formatValue, frameConfidence } from '@gba-kit/debug-info';
+import { formatBitfield, formatValue, frameConfidence, le32, toInt } from '@gba-kit/debug-info';
 import { BIOS_IRQ_STUB } from '@gba-kit/gba-emulator';
 
-import { type ExprEnv, type ExprHints, compileExpression, formatNumber, parseU32Literal } from './expression.js';
+import {
+  type ExprEnv,
+  type ExprHints,
+  type ExprPlace,
+  compile,
+  compileExpression,
+  formatNumber,
+  parseU32Literal,
+} from './expression.js';
 import type { LabelStore } from './labels.js';
 import { LOWEST_PROGRAM_ADDRESS, Machine, REGISTER_NAMES, isCodeAddress, regionOf, stackBoundFor } from './machine.js';
 import type { Program } from './program.js';
@@ -89,13 +98,12 @@ interface NameScope {
   unit: UnitInfo | null;
 }
 
-/** Whether an address came from a literal, a name (a DWARF variable or an ELF symbol), or a computed value. */
-type AddressSource = 'literal' | 'symbol' | 'value';
+/** What a name denotes here: a variable DIE read in a frame, or a declaration the linker placed. */
+type Root =
+  | { kind: 'variable'; entry: DwarfEntry; frame: PhysicalFrame }
+  | { kind: 'declared'; entry: DwarfEntry; typeEntry: DwarfEntry; address: number };
 
 const IDENT = /^[A-Za-z_]\w*$/;
-const PATH = /^[A-Za-z_]\w*(\.\w+|\[\d+\])+$/;
-/** `(Card*)0x0300243c`, `(struct PlayerState)gUnk_03005220`, `(u16)0x04000006`: `(T*)x` and `(T)x` both mean "the T at address x". */
-const CAST = /^\(\s*((?:struct|union|enum)\s+)?([A-Za-z_]\w*)\s*\*?\s*\)\s*(.+)$/;
 /** The largest typed read `memory` answers in one go. */
 const MAX_PEEK = 0x10000;
 /** Row caps of the untyped memory views. */
@@ -376,9 +384,12 @@ export class Inspector {
   /**
    * The variable `name` denotes: a local or parameter of the scope (innermost
    * inlined layer outward), a global of its file, a global of any unit, or a
-   * declaration (`extern`) joined to the linker symbol of the same name.
+   * declaration (`extern`) joined to the linker symbol of the same name. The tree,
+   * the expression compiler's types and the machine's answer for where a value is
+   * all start here, so a watch cannot resolve a name to something else than a
+   * breakpoint condition does.
    */
-  #rootNode(name: string, scope: NameScope | null): VarNode | null {
+  #rootEntry(name: string, scope: NameScope | null): Root | null {
     const di = this.program.debugInfo;
     if (!di) {
       return null;
@@ -387,29 +398,96 @@ export class Inspector {
       for (const s of scope.scopes) {
         for (const v of di.scopes.scopeVariables(s, scope.physical.lookupPc)) {
           if (di.scopes.name(v) === name) {
-            return di.scopes.variableNode(v, scope.physical, this.memory);
+            return { kind: 'variable', entry: v, frame: scope.physical };
           }
         }
       }
       const fileGlobal = scope.unit ? this.#globalsOf(scope.unit).get(name) : undefined;
       if (fileGlobal) {
-        return di.scopes.variableNode(fileGlobal, scope.physical, this.memory);
+        return { kind: 'variable', entry: fileGlobal, frame: scope.physical };
       }
     }
-    const physical = scope?.physical ?? di.scopes.liveFrame(this.machine.pc, this.machine.registers);
+    const frame = scope?.physical ?? di.scopes.liveFrame(this.machine.pc, this.machine.registers);
     const global = di.scopes.globalByName(name);
     if (global) {
-      return di.scopes.variableNode(global, physical, this.memory);
+      return { kind: 'variable', entry: global, frame };
     }
     const decl = di.scopes.declarationByName(name);
     const address = this.program.globalAddress(name);
     const typeEntry = decl ? di.scopes.index.typeOf(decl) : undefined;
-    if (decl && typeEntry && address !== null) {
-      const node = di.scopes.castNode(name, typeEntry, address, this.memory, decl);
-      node.type = `${node.type} (declared in a header, placed by the linker)`;
-      return node;
+    return decl && typeEntry && address !== null ? { kind: 'declared', entry: decl, typeEntry, address } : null;
+  }
+
+  /** The root variable as a tree node. */
+  #rootNode(name: string, scope: NameScope | null): VarNode | null {
+    const di = this.program.debugInfo;
+    const root = di && this.#rootEntry(name, scope);
+    if (!di || !root) {
+      return null;
     }
-    return null;
+    if (root.kind === 'variable') {
+      return di.scopes.variableNode(root.entry, root.frame, this.memory);
+    }
+    const node = di.scopes.castNode(name, root.typeEntry, root.address, this.memory, root.entry);
+    node.type = `${node.type} (declared in a header, placed by the linker)`;
+    return node;
+  }
+
+  /** The C type a root name has here: what a subscript steps by and a member is measured in. */
+  #rootType(name: string, scope: NameScope | null): TypeDesc | undefined {
+    const di = this.program.debugInfo;
+    if (!di) {
+      return undefined;
+    }
+    try {
+      const root = this.#rootEntry(name, scope);
+      if (root) {
+        return di.scopes.types.describeDeclared(root.entry);
+      }
+      const enumerator = di.scopes.enumeratorByName(name);
+      return enumerator ? di.scopes.types.describe(enumerator.type) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Where a root name keeps its value at this pc, or why it is nowhere: the DWARF
+   * location expression alone, with no value formatted from it. An expression asks
+   * this per evaluation because a local moves between a stack slot and a register
+   * as the pc advances, and it is all a compiled expression needs to start from.
+   */
+  #rootPlace(name: string, scope: NameScope | null): ExprPlace | undefined {
+    const di = this.program.debugInfo;
+    const root = di ? this.#rootEntry(name, scope) : null;
+    if (di && root) {
+      if (root.kind === 'declared') {
+        return { address: root.address };
+      }
+      const loc = di.scopes.location(root.entry, root.frame, this.memory);
+      switch (loc.kind) {
+        case 'memory':
+          return { address: loc.address };
+        case 'register': {
+          const v = root.frame.regs[loc.reg];
+          return v === undefined ? { absent: `r${loc.reg} was not recovered in this frame` } : { word: v };
+        }
+        case 'value':
+          return { word: loc.value };
+        case 'implicit':
+          return { word: toInt(loc.bytes.subarray(0, 4), false) };
+        case 'composite':
+          return { absent: 'the compiler split it into pieces' };
+        default:
+          return { absent: loc.reason };
+      }
+    }
+    const enumerator = di?.scopes.enumeratorByName(name);
+    if (enumerator) {
+      return { word: enumerator.value };
+    }
+    const address = this.program.symbolAddress(name) ?? this.labels.byName(name)?.address;
+    return address === null || address === undefined ? undefined : { address };
   }
 
   /** An enumerator constant as a node, or null. */
@@ -428,63 +506,19 @@ export class Inspector {
     };
   }
 
-  /**
-   * `root.member[3].field` walked through the typed tree, so a member reads exactly
-   * as the variables view shows it. Null when the root is unknown; throws when the
-   * root is known and the path is not.
-   */
-  #pathNode(path: string, scope: NameScope | null): VarNode | null {
-    const segments: string[] = [];
-    const re = /\.(\w+)|\[(\d+)\]/g;
-    const rootEnd = path.search(/[.[]/);
-    const root = rootEnd < 0 ? path : path.slice(0, rootEnd);
-    for (const m of path.slice(rootEnd < 0 ? path.length : rootEnd).matchAll(re)) {
-      segments.push(m[1] ?? `[${m[2]}]`);
-    }
-    let node = this.#rootNode(root, scope);
-    if (!node) {
-      return null;
-    }
-    let sofar = root;
-    for (const seg of segments) {
-      const index = /^\[(\d+)\]$/.exec(seg);
-      const current: VarNode = node;
-      let next: VarNode | null | undefined;
-      if (index && current.element) {
-        next = current.element(Number(index[1]));
-        if (!next) {
-          throw new Error(`index ${index[1]} is out of range for '${sofar}' (${current.type})`);
-        }
-      } else {
-        const kids: VarNode[] | undefined = current.children?.();
-        if (!kids) {
-          throw new Error(`'${sofar}' (${current.type}) has no members`);
-        }
-        next = kids.find((k) => k.name === seg);
-        if (!next) {
-          throw new Error(`'${sofar}' (${current.type}) has no member '${seg}'`);
-        }
-      }
-      node = next;
-      sofar += index ? seg : `.${seg}`;
-    }
-    return node;
-  }
-
-  /** A typed node for a bare name or a member path, resolved in `scope`; null when unknown. */
+  /** A typed node for a bare name, resolved in `scope`; null when unknown. A path is the grammar's work. */
   #namedNode(text: string, scope: NameScope | null): VarNode | null {
-    if (IDENT.test(text)) {
-      return this.#rootNode(text, scope) ?? this.#enumeratorNode(text);
-    }
-    return PATH.test(text) ? this.#pathNode(text, scope) : null;
+    return IDENT.test(text) ? (this.#rootNode(text, scope) ?? this.#enumeratorNode(text)) : null;
   }
 
   // ─── evaluation ────────────────────────────────────────────────────
 
   /**
-   * A watch / hover / REPL expression. Typed answers first (a variable, a cast, a
-   * member path, an enumerator, a register, an address, a symbol), then the numeric
-   * expression grammar. Throws with a message the user can act on.
+   * A watch / hover / REPL expression. The answers only a name can give come first
+   * (a variable of the frame, an enumerator, a register, a bare address, a symbol
+   * the ELF names but never typed), then the expression grammar, which types its
+   * own result wherever the program types one. Throws with a message the user can
+   * act on.
    */
   evaluate(expression: string, frames: StackFrame[], frameIndex = 0): EvaluateResult {
     const expr = expression.trim();
@@ -505,26 +539,7 @@ export class Inspector {
         return { node, address: node.address };
       }
     }
-    // 2. A cast: the T at the operand's address.
-    const cast = CAST.exec(expr);
-    if (cast && di) {
-      const typeName = `${cast[1] ?? ''}${cast[2]}`;
-      const typeEntry = di.scopes.typeByName(typeName);
-      if (!typeEntry) {
-        throw new Error(`unknown type '${typeName}' (the ELF has no DWARF for it)`);
-      }
-      const operand = cast[3]!.trim();
-      const { address, from } = this.#addressOf(operand, scope);
-      if (from === 'value' && regionOf(address) === null) {
-        throw new Error(
-          `'${operand}' evaluates to 0x${hex8(address)}, which is not a readable address — a cast reinterprets memory ` +
-            `at the operand; use (${typeName})&${operand} to read the variable, or drop the cast to see its value`,
-        );
-      }
-      const node = di.scopes.castNode(expr, typeEntry, address, this.memory);
-      return { node, address };
-    }
-    // 3. A register.
+    // 2. A register.
     const regIndex = REGISTER_NAMES.indexOf(expr.toLowerCase() as (typeof REGISTER_NAMES)[number]);
     if (regIndex >= 0) {
       const node = this.#registerNode(expr, regIndex, this.#registersOf(frame));
@@ -533,7 +548,7 @@ export class Inspector {
     if (expr.toLowerCase() === 'cpsr') {
       return { node: this.#cpsrNode() };
     }
-    // 4. A bare address: the 64 bytes there, as an untyped tree.
+    // 3. A bare address: the 64 bytes there, as an untyped tree.
     if (/^(0x[0-9a-f]+|\d+)$/i.test(expr)) {
       const address = parseU32Literal(expr);
       if (regionOf(address) === null) {
@@ -541,14 +556,7 @@ export class Inspector {
       }
       return { node: this.rawNode(expr, address, 64, `0x${hex8(address)}`), address };
     }
-    // 5. A `symbol.field[3]` path through the typed tree.
-    if (PATH.test(expr)) {
-      const node = this.#pathNode(expr, scope);
-      if (node) {
-        return { node, address: node.address };
-      }
-    }
-    // 6. A symbol the ELF names but does not type (a decomp's `gUnk_*`), a function, or a user label.
+    // 4. A symbol the ELF names but does not type (a decomp's `gUnk_*`), a function, or a user label.
     if (IDENT.test(expr)) {
       const address = this.program.symbolAddress(expr) ?? this.labels.byName(expr)?.address ?? null;
       if (address !== null) {
@@ -575,36 +583,31 @@ export class Inspector {
         };
       }
     }
-    // 7. The numeric expression grammar.
-    const v = compileExpression(expr, this.hints(scope))(this.#env(scope));
+    // 5. The expression grammar: a path, a cast, a dereference, arithmetic.
+    const compiled = compile(expr, this.hints(scope));
+    const env = this.#env(scope);
+    const lvalue = compiled.lvalue;
+    const at = lvalue?.address(env);
+    if (lvalue?.type && at !== undefined) {
+      const type = lvalue.type;
+      const bits = lvalue.bits;
+      const node = bits
+        ? formatBitfield(expr, type, this.memory.read(at, bits.span), at, bits)
+        : formatValue(expr, type, this.memory.read(at, type.size || 4), at, this.memory);
+      return { node, address: at };
+    }
+    const v = compiled.value(env);
+    // An address the user asked for by name is one they can open in a memory view;
+    // any other number is a number, whatever region it happens to fall in.
+    const address = regionOf(v >>> 0) && expr.startsWith('&') ? v >>> 0 : undefined;
+    if (compiled.type) {
+      const size = Math.min(compiled.type.size || 4, 4);
+      return { node: formatValue(expr, compiled.type, le32(v).subarray(0, size), undefined, this.memory), address };
+    }
     return {
       node: { name: expr, value: formatNumber(v), type: 'u32', scalar: { value: v, signed: v < 0 } },
-      address: regionOf(v >>> 0) && expr.startsWith('&') ? v >>> 0 : undefined,
+      address,
     };
-  }
-
-  /**
-   * The address an expression names: a literal, `&variable`, `&path`, a symbol, a
-   * label, or the value of any numeric expression — and which of those it was.
-   */
-  #addressOf(text: string, scope: NameScope | null): { address: number; from: AddressSource } {
-    const reference = text.startsWith('&');
-    const t = text.replace(/^&/, '').trim();
-    if (/^(0x[0-9a-f]+|\d+)$/i.test(t)) {
-      return { address: parseU32Literal(t), from: 'literal' };
-    }
-    const named = this.#namedNode(t, scope);
-    if (named?.address !== undefined) {
-      return { address: named.address, from: 'symbol' };
-    }
-    const sym = this.program.symbolAddress(t) ?? this.labels.byName(t)?.address;
-    if (sym !== null && sym !== undefined) {
-      return { address: sym, from: 'symbol' };
-    }
-    if (reference) {
-      throw new Error(`unknown symbol '${t}'`);
-    }
-    return { address: compileExpression(t, this.hints(scope))(this.#env(scope)) >>> 0, from: 'value' };
   }
 
   /** The environment a watch evaluates in: the selected frame's registers and scopes. */
@@ -623,6 +626,7 @@ export class Inspector {
   }
 
   hints(scope: NameScope | null): ExprHints {
+    const di = this.program.debugInfo;
     return {
       symbolSigned: (path) => {
         try {
@@ -630,6 +634,11 @@ export class Inspector {
         } catch {
           return undefined;
         }
+      },
+      rootType: (name) => this.#rootType(name, scope),
+      typeByName: (name) => {
+        const entry = di?.scopes.typeByName(name);
+        return entry && di ? di.scopes.types.describe(entry) : undefined;
       },
     };
   }
@@ -660,6 +669,7 @@ export class Inspector {
         const node = this.#namedNode(name, scope);
         return node?.address ?? this.program.symbolAddress(name) ?? this.labels.byName(name)?.address;
       },
+      place: (name) => this.#rootPlace(name, scope),
       frame: () => this.machine.frame,
       scanline: () => this.machine.scanline,
       cycle: () => this.machine.cycle,
@@ -672,14 +682,16 @@ export class Inspector {
    * included): its address and size. Null when it is not, or lives in a register.
    */
   variableTarget(name: string, frames: StackFrame[], frameIndex: number): { address: number; length: number } | null {
-    const node = this.#namedNode(name, this.#scopeOfFrame(frames, frameIndex));
-    if (!node) {
+    const scope = this.#scopeOfFrame(frames, frameIndex);
+    const lvalue = compile(name.trim(), this.hints(scope)).lvalue;
+    if (!lvalue?.type) {
       return null;
     }
-    if (node.writable) {
-      return { address: node.writable.address, length: node.writable.size };
+    const address = lvalue.address(this.#env(scope));
+    if (address === undefined) {
+      return null;
     }
-    return node.address === undefined ? null : { address: node.address, length: 4 };
+    return { address, length: lvalue.bits ? lvalue.bits.span : scalarLength(lvalue.type) };
   }
 
   /**
@@ -943,4 +955,25 @@ function fromBytes(bytes: Uint8Array): bigint {
     v = (v << 8n) | BigInt(bytes[i]!);
   }
   return v;
+}
+
+/**
+ * What a data breakpoint watches for a value of `type`: a scalar's own bytes, and
+ * otherwise the word at its address — an aggregate is watched where it starts
+ * rather than silently across its whole extent.
+ */
+function scalarLength(type: TypeDesc): number {
+  switch (type.kind) {
+    case 'int':
+    case 'uint':
+    case 'bool':
+    case 'char':
+    case 'uchar':
+    case 'float':
+    case 'enum':
+    case 'pointer':
+      return type.size || 4;
+    default:
+      return 4;
+  }
 }
