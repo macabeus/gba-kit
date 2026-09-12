@@ -730,23 +730,50 @@ describe('inspection', () => {
     // a pointer's one row is what it points at, and it evaluates back to the same value
     const counterRef = members.find((m) => m.name === 'counterRef')!;
     const pointee = (await variables(client, counterRef.variablesReference))[0]!;
-    expect(pointee.evaluateName).toBe('*(g_player.counterRef)');
-    const reread = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
-      expression: pointee.evaluateName!,
-      frameId: 2,
-    });
-    expect(reread.result).toBe(pointee.value);
-    // every name the tree hands back round-trips through evaluate
-    for (const name of ['g_player.pos.x', 'g_samples[1]', 'g_player']) {
+    expect(pointee.evaluateName).toBe('(*(g_player.counterRef))');
+    // Every name the tree hands back reads as the row it came from — the value, not
+    // merely a string, since a name that parses differently would still answer.
+    for (const row of [player, samples, ...members, ...elements, pointee]) {
+      if (row.evaluateName === undefined) {
+        continue;
+      }
       const back = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
-        expression: name,
+        expression: row.evaluateName,
         frameId: 2,
       });
-      expect(back.result).toBeTypeOf('string');
+      expect([row.evaluateName, back.result]).toEqual([row.evaluateName, row.value]);
     }
     const machine = await variables(client, scopes[3]!.variablesReference);
     expect(machine.find((v) => v.name === 'frame')!.evaluateName).toBe('frame');
     expect(machine.find((v) => v.name === 'function')!.evaluateName).toBeUndefined();
+  });
+
+  it('a value the console computed hands its rows back as expressions that read the same', async () => {
+    const client = await launch({ breakpoints: [{ path: UTIL, lines: [await lineOf(UTIL, 'if (p->pos.x > 100)')] }] });
+    await stopped(client, 'continue', { threadId: 1 });
+    // A watch on an arrow, a dereference or a cast expands like a variables row, and
+    // every row below it names itself in the grammar that produced it.
+    for (const expression of ['p->pos', '*p', '(struct Player *)p', '&g_player']) {
+      const top = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression, frameId: 0 });
+      expect(top.variablesReference).toBeGreaterThan(0);
+      for (const row of await variables(client, top.variablesReference)) {
+        expect([expression, row.name, row.evaluateName]).not.toEqual([expression, row.name, undefined]);
+        const back = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+          expression: row.evaluateName!,
+          frameId: 0,
+        });
+        expect([row.evaluateName, back.result]).toEqual([row.evaluateName, row.value]);
+        // and one level deeper, where a dereference that did not parenthesise itself
+        // would bind to the pointer instead of to what it points at
+        for (const deeper of row.variablesReference ? await variables(client, row.variablesReference) : []) {
+          const again = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+            expression: deeper.evaluateName!,
+            frameId: 0,
+          });
+          expect([deeper.evaluateName, again.result]).toEqual([deeper.evaluateName, deeper.value]);
+        }
+      }
+    }
   });
 
   it('refuses a frame the stack does not have, and an empty expression', async () => {
@@ -1326,9 +1353,10 @@ describe('emulator requests', () => {
     };
     expect(file.labels.map((l) => l.label).sort()).toEqual(['gMystery', 'gOther']);
     expect((await client.body<{ text: string }>('gba-kit/exportLabels')).text).toContain('03000200 gOther');
+    // `&` on a label is a pointer to it, and reads as the address it is
     expect(
       (await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression: '&gMystery' })).result,
-    ).toContain('50331904');
+    ).toBe('0x03000100');
     const info = await client.body<DebugProtocol.DataBreakpointInfoResponse['body']>('dataBreakpointInfo', {
       name: 'gMystery',
     });
