@@ -143,13 +143,19 @@ function isIdentifier(name: string): boolean {
   return /^[A-Za-z_]\w*$/.test(name);
 }
 
-/** `parent.child`, `parent[3]`; null when the child cannot be named in the expression grammar. */
+/** `parent.child`, `parent[3]`, `(*(parent))`; null when the child cannot be named in the expression grammar. */
 function childExpression(prefix: string | null, name: string): string | null {
   if (prefix === null) {
     return null;
   }
   if (name.startsWith('[')) {
     return prefix + name;
+  }
+  // The one row a pointer has is what it points at. The whole dereference is
+  // parenthesised, since a member or a subscript written after it would otherwise
+  // bind to the pointer rather than to the pointee.
+  if (name === '*') {
+    return `(*(${prefix}))`;
   }
   if (isIdentifier(name)) {
     return `${prefix}.${name}`;
@@ -1142,7 +1148,10 @@ export class GbaDebugSession extends DebugSession {
           this.#invalidateVariables();
         }
         const named = assignment ? assignment.target : expression;
-        const prefix = /^[A-Za-z_][\w.[\]]*$/.test(named) ? named : null;
+        // A child is named by appending to its parent's expression, so anything but a
+        // plain dotted path is parenthesised first: `p->pos` yields `(p->pos).x`, which
+        // reads back as the row it came from.
+        const prefix = /^[A-Za-z_][\w.[\]]*$/.test(named) ? named : `(${named})`;
         response.body = {
           result: node.value,
           type: node.type,

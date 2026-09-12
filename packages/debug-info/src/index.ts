@@ -58,10 +58,16 @@ export {
 } from './unwind/types.js';
 export {
   TypeResolver,
+  bitfieldPlacement,
+  formatBitfield,
   formatValue,
+  isSignedType,
+  le32,
   quoteBytes,
+  scalarSize,
   toBigInt,
   toInt,
+  type BitPlacement,
   type MemberDesc,
   type TypeDesc,
   type TypeKind,

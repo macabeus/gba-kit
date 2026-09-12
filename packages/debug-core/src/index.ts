@@ -25,7 +25,6 @@ export { Machine, REGISTER_NAMES, isCodeAddress, regionOf, romHash } from './mac
 export { Program, type FunctionRange, type SourceLocation } from './program.js';
 export { SourceMapper, type SourceMapperOptions } from './source-map.js';
 export {
-  hex8,
   type DisassembledLine,
   type EvaluateResult,
   type Scope,
@@ -42,7 +41,17 @@ export {
   type DataBreakpointSpec,
   type EventBreakpointKind,
 } from './breakpoints.js';
-export { splitAssignment, type CompiledExpr, type ExprEnv, type ExprHints } from './expression.js';
+export {
+  compile,
+  hex8,
+  splitAssignment,
+  type Compiled,
+  type CompiledExpr,
+  type ExprEnv,
+  type ExprHints,
+  type ExprLvalue,
+  type ExprPlace,
+} from './expression.js';
 export { type RewindOptions } from './rewind.js';
 export { type SnapshotDelta } from './delta.js';
 export { type EventEntry, type TimeStamp, type TraceEntry } from './rings.js';

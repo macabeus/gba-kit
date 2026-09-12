@@ -1,10 +1,14 @@
 import { MODE_IRQ, MODE_SYS } from '@gba-kit/arm-emulator/arm-cpu';
+import type { TypeDesc } from '@gba-kit/debug-info';
 import { describe, expect, it } from 'vitest';
 
 import { applySnapshotDelta, decodeDelta, deltaSnapshot, encodeDelta } from '../delta.js';
 import { packSnapshot, unpackSnapshot } from '../delta.js';
 import {
   type ExprEnv,
+  type ExprHints,
+  type ExprPlace,
+  compile,
   compileExpression,
   compileHitCondition,
   compileLogMessage,
@@ -20,6 +24,78 @@ import { Ring } from '../rings.js';
 import { base64ToBytes, bytesToBase64, encodeSaveState } from '../snapshot-codec.js';
 import { SourceMapper } from '../source-map.js';
 
+/**
+ * A program the tests can state in full: two Entities, four ints and a frame
+ * counter, with the types the DWARF would give them. Types are plain data, so
+ * nothing here needs an ELF.
+ */
+const int32: TypeDesc = { kind: 'int', name: 'int', size: 4 };
+const u16Type: TypeDesc = { kind: 'uint', name: 'u16', size: 2 };
+const u32Type: TypeDesc = { kind: 'uint', name: 'u32', size: 4 };
+const entity: TypeDesc = { kind: 'struct', name: 'struct Entity', size: 8, members: [] };
+const entityPtr: TypeDesc = { kind: 'pointer', name: 'struct Entity *', size: 4, target: entity };
+entity.members = [
+  { name: 'id', offset: 0, type: int32 },
+  { name: 'next', offset: 4, type: entityPtr },
+];
+const samplesType: TypeDesc = { kind: 'array', name: 'int[4]', size: 16, count: 4, target: int32 };
+/** `extern struct Entity gEntityInfo[];`: a decomp's header declaration, with no count. */
+const entityArray: TypeDesc = { kind: 'array', name: 'struct Entity[]', size: 0, count: null, target: entity };
+/** The two pointees a decomp's tables are full of and the DWARF gives no width: a void, and code. */
+const voidPtr: TypeDesc = { kind: 'pointer', name: 'void *', size: 4, target: { kind: 'void', name: 'void', size: 0 } };
+const handler: TypeDesc = {
+  kind: 'pointer',
+  name: 'Handler',
+  size: 4,
+  target: { kind: 'function', name: 'void (void)', size: 0 },
+};
+
+const SAMPLES_AT = 0x03000200;
+const ENTITIES_AT = 0x03000300;
+const FRAME_AT = 0x03000400;
+
+const bytes = new Map<number, number>();
+const store = (at: number, width: number, value: number): void => {
+  for (let i = 0; i < width; i++) {
+    bytes.set(at + i, (value >>> (i * 8)) & 0xff);
+  }
+};
+[3, 5, 8, 13].forEach((v, i) => store(SAMPLES_AT + i * 4, 4, v));
+store(ENTITIES_AT, 4, 100);
+store(ENTITIES_AT + 4, 4, ENTITIES_AT + 8);
+store(ENTITIES_AT + 8, 4, 101);
+store(ENTITIES_AT + 12, 4, 0);
+store(FRAME_AT, 4, 2);
+const peek = (a: number, size: number): number | undefined => {
+  let v = 0;
+  for (let i = size - 1; i >= 0; i--) {
+    const b = bytes.get(a + i);
+    if (b === undefined) {
+      return undefined;
+    }
+    v = v * 256 + b;
+  }
+  return v >>> 0;
+};
+
+const SYMBOL_ADDRESSES: Record<string, number> = {
+  gHp: 0x03000000,
+  g_samples: SAMPLES_AT,
+  gEntityInfo: ENTITIES_AT,
+  g_frame: FRAME_AT,
+};
+const SYMBOLS: Record<string, number> = {
+  gHp: 3,
+  // gSigned is an `int` holding -7, delivered as its 32-bit word
+  gSigned: 0xfffffff9,
+  g_frame: 2,
+  // a pointer the compiler keeps in a register: no address, only a value
+  p: ENTITIES_AT,
+  gRaw: ENTITIES_AT,
+  gRaw2: ENTITIES_AT + 8,
+  gHandler: 0x08001235,
+};
+
 const env: ExprEnv = {
   reg: (i) => (i === 0 ? 10 : i === 13 ? 0x03007f00 : 0),
   cpsr: () => 0x1f,
@@ -34,15 +110,36 @@ const env: ExprEnv = {
         ? size === 1
           ? 0xf0
           : 0xfff0
-        : undefined,
-  // gSigned is an `int` holding -7, delivered as its 32-bit word
-  symbol: (path) => (path === 'gHp' ? 3 : path === 'gState.hp' ? 9 : path === 'gSigned' ? 0xfffffff9 : undefined),
-  symbolAddress: (name) => (name === 'gHp' ? 0x03000000 : undefined),
+        : peek(a, size),
+  symbol: (path) => SYMBOLS[path],
+  symbolAddress: (name) => SYMBOL_ADDRESSES[name],
   frame: () => 42,
   scanline: () => 7,
   cycle: () => 1000,
 };
-const hints = { symbolSigned: (path: string) => (path === 'gSigned' ? true : undefined) };
+
+/** What the DWARF would say: `gHp` is deliberately untyped, as a symbol map's names are. */
+const ROOT_TYPES: Record<string, TypeDesc> = {
+  gSigned: int32,
+  g_samples: samplesType,
+  gEntityInfo: entityArray,
+  p: entityPtr,
+  g_frame: u32Type,
+  gRaw: voidPtr,
+  gRaw2: voidPtr,
+  gHandler: handler,
+};
+const NAMED_TYPES: Record<string, TypeDesc> = {
+  Entity: entity,
+  'struct Entity': entity,
+  u16: u16Type,
+  vu16: u16Type,
+  int: int32,
+};
+const hints: ExprHints = {
+  rootType: (name) => ROOT_TYPES[name],
+  typeByName: (name) => NAMED_TYPES[name],
+};
 
 describe('expression grammar', () => {
   const ev = (s: string): number => compileExpression(s, hints)(env);
@@ -89,7 +186,6 @@ describe('expression grammar', () => {
 
   it('symbols and paths, address-of', () => {
     expect(ev('gHp + 1')).toBe(4);
-    expect(ev('gState.hp == 9')).toBe(1);
     expect(ev('&gHp')).toBe(0x03000000);
     expect(() => ev('gNope')).toThrow(/unknown symbol/);
   });
@@ -120,7 +216,19 @@ describe('expression grammar', () => {
     expect(splitAssignment('gEntityInfo[3].id=2')).toEqual({ target: 'gEntityInfo[3].id', value: '2' });
     expect(splitAssignment('x = y == 3')).toEqual({ target: 'x', value: 'y == 3' });
     expect(splitAssignment("c = '='")).toEqual({ target: 'c', value: "'='" });
-    for (const read of ['g_frame == 3', 'a != b', 'a <= b', 'a >= b', 'g_player.pos.x', '[0x03000000]']) {
+    expect(splitAssignment('p->hp = 0')).toEqual({ target: 'p->hp', value: '0' });
+    expect(splitAssignment('*p = 3')).toEqual({ target: '*p', value: '3' });
+    expect(splitAssignment('a[i] = 3')).toEqual({ target: 'a[i]', value: '3' });
+    for (const read of [
+      'g_frame == 3',
+      'a != b',
+      'a <= b',
+      'a >= b',
+      'g_player.pos.x',
+      '[0x03000000]',
+      'p->x >= 3',
+      '*p == 3',
+    ]) {
       expect(splitAssignment(read)).toBeNull();
     }
     expect(() => splitAssignment('x += 1')).toThrow(/'\+=' is not supported/);
@@ -134,13 +242,195 @@ describe('expression grammar', () => {
     expect(() => compileExpression('1 $ 2')).toThrow(/unexpected/);
   });
 
-  it('says what it does not support instead of "unexpected token"', () => {
-    expect(() => compileExpression('gEntityInfo[var_sb].id == 5')).toThrow(/constant subscripts/);
-    expect(() => compileExpression('g_samples[g_frame & 3]')).toThrow(/constant subscripts/);
-    expect(() => compileExpression('p->x')).toThrow(/constant subscripts/);
-    expect(() => compileExpression('*p')).toThrow(/dereference is not supported/);
-    expect(() => compileExpression('g_player . pos')).toThrow(/constant subscripts/);
-    expect(compileExpression('gEntityInfo[3].id == 5')).toBeTypeOf('function');
+  it('a variable index, an arrow and a dereference read what C says they read', () => {
+    expect(ev('gEntityInfo[g_frame - 2].id')).toBe(100);
+    expect(ev('g_samples[g_frame & 3]')).toBe(8);
+    expect(ev('p->id')).toBe(100);
+    expect(ev('(*p).id')).toBe(100);
+    expect(ev('p->next->id')).toBe(101);
+    expect(ev('gEntityInfo[g_frame - 2].next->id')).toBe(101);
+    expect(ev('g_samples [ 1 ]')).toBe(5);
+    // a variable index lands exactly where the same constant index does
+    for (const i of [0, 1, 2, 3]) {
+      expect(ev(`g_samples[g_frame + ${i - 2}]`)).toBe(ev(`g_samples[${i}]`));
+    }
+    expect(ev('g_samples[g_samples[0] - 2]')).toBe(5); // an expression as the index
+    expect(ev('g_samples[1 + 1]')).toBe(8);
+    expect(ev('g_samples[4 - 3]')).toBe(5);
+    // an index steps backwards as readily as forwards
+    expect(ev('(&g_samples[3])[-1]')).toBe(8);
+  });
+
+  it('pointer arithmetic steps by the element, and untyped words do not', () => {
+    expect(ev('(p + 1) - p')).toBe(1);
+    expect(ev('(*(p + 1)).id')).toBe(ev('p[1].id'));
+    expect(ev('p[1].id')).toBe(101);
+    expect(ev('&g_samples[1] - &g_samples[0]')).toBe(1);
+    expect(ev('gEntityInfo + 1')).toBe(ev('&gEntityInfo[1]'));
+    expect(ev('(p + 1) - 1')).toBe(ev('p'));
+    expect(ev('&g_samples[2] - g_samples')).toBe(2);
+    // nothing without a type is ever scaled, whatever address it happens to hold
+    expect(ev('r0 + 1')).toBe(11);
+    expect(ev('u32(0x03000000) + 1')).toBe(0x78563413);
+    expect(ev('[0x03000000] + 1')).toBe(0x13);
+    expect(ev('{0x03000000} + 1')).toBe(0x3413);
+    expect(ev('0x10 + 1')).toBe(0x11);
+    expect(ev('frame + 1')).toBe(43);
+    expect(ev('gHp + 1')).toBe(4);
+    expect(ev('&gHp + 1')).toBe(0x03000001);
+    // and a pointer in an operator that is not pointer arithmetic keeps its word
+    expect(ev('p & 0xff')).toBe(ENTITIES_AT & 0xff);
+    expect(ev('p == &gEntityInfo[0]')).toBe(1);
+  });
+
+  it('a pointee with no width steps by the byte, and counts bytes', () => {
+    expect(ev('gRaw + 4')).toBe(ENTITIES_AT + 4);
+    // two pointers of one type are one type whether or not that type has a size
+    expect(ev('gRaw2 - gRaw')).toBe(8);
+    expect(ev('gRaw - gRaw')).toBe(0);
+    expect(() => ev('gRaw - p')).toThrow(/they point at different types/);
+  });
+
+  it('casts compose: a pointer value, and the T at an address', () => {
+    expect(ev('(Entity *)0x03000300')).toBe(ENTITIES_AT);
+    expect(ev('(*(Entity *)0x03000300).id')).toBe(100);
+    expect(ev('((Entity *)0x03000300)->id')).toBe(100);
+    expect(ev('((Entity *)0x03000300)[1].id')).toBe(101);
+    expect(ev('((struct Entity *)0x03000300)->next->id')).toBe(101);
+    expect(ev('*(vu16 *)0x03000000')).toBe(0x3412);
+    expect(ev('(u16)0x03000000')).toBe(0x3412); // (T)x is the T at x's address, where (T *)x is the pointer
+    expect(ev('(u16)(0x03000000)')).toBe(0x3412);
+    expect(ev('(int)&g_samples[1]')).toBe(5);
+    expect(ev('1 + (u16)0x03000000')).toBe(0x3413);
+    // a parenthesised expression is not a cast, whatever it looks like
+    expect(ev('(1 + 2) * 3')).toBe(9);
+    expect(ev('(gHp) * 2')).toBe(6);
+    expect(ev('(gHp)')).toBe(3);
+    expect(ev('-(gHp)')).toBe(-3);
+    expect(ev('(gHp) + 1')).toBe(4);
+  });
+
+  it('a root the debug info does not type is a word, and nothing below it can be measured', () => {
+    expect(ev('gHp')).toBe(3);
+    expect(ev('&gHp')).toBe(0x03000000);
+    // A symbol table has no offsets, so every step below one is refused — naming the
+    // root, not a type the ELF was never asked about.
+    expect(() => ev('gHp.a')).toThrow(/'gHp' has no type here; cast it to reach through it/);
+    expect(() => ev('gHp->a')).toThrow(/'gHp' has no type here; cast it to reach through it/);
+    expect(() => ev('gHp[1]')).toThrow(/'gHp' has no type here; cast it to subscript it/);
+    expect(() => ev('*gHp')).toThrow(/'gHp' has no type here; cast it to read through it/);
+    // and a name that resolves nowhere is a missing name, whatever is written after it
+    expect(() => ev('gNope.a')).toThrow(/unknown symbol 'gNope'/);
+    expect(() => ev('gNope->a')).toThrow(/unknown symbol 'gNope'/);
+    expect(() => ev('gNope[1]')).toThrow(/unknown symbol 'gNope'/);
+    expect(() => ev('*gNope')).toThrow(/unknown symbol 'gNope'/);
+    expect(() => ev('gNope->a->b')).toThrow(/unknown symbol 'gNope'/);
+  });
+
+  it('names what it cannot do, and what to type instead', () => {
+    expect(() => ev('*5')).toThrow(/not a typed pointer — read what is there with u8\(5\)/);
+    expect(() => ev('*r0')).toThrow(/not a typed pointer/);
+    expect(() => ev('*g_frame')).toThrow(/cannot dereference 'g_frame': it is a u32, not a pointer/);
+    expect(() => ev('p->nope')).toThrow(/'p' \(struct Entity \*\) has no member 'nope'/);
+    expect(() => ev('g_samples[0].id')).toThrow(/'g_samples\[0\]' \(int\) has no members/);
+    expect(() => ev('g_samples[4]')).toThrow(/index 4 is out of range for 'g_samples' \(int\[4\]\)/);
+    expect(() => ev('p.id')).toThrow(/is a pointer; read a member through it with 'p->id'/);
+    expect(() => ev('gEntityInfo[0]->id')).toThrow(/is not a pointer; use '\.' for a member of a value/);
+    expect(() => ev('r0[1]')).toThrow(/cannot subscript 'r0': a plain 32-bit word has no element type/);
+    expect(() => ev('r0.x')).toThrow(
+      /cannot read a member of 'r0': a plain 32-bit word has no members — cast it first, as in \(\(struct Foo \*\)r0\)->x/,
+    );
+    expect(() => ev('r0->x')).toThrow(/cast it first, as in \(\(struct Foo \*\)r0\)->x/);
+    expect(() => ev('g_frame[1]')).toThrow(/'g_frame' \(u32\) is not an array or a pointer/);
+    expect(() => ev('&5')).toThrow(/cannot take the address of '5': it is a value, not a place in memory/);
+    expect(() => ev('p + p')).toThrow(/cannot add two pointers \('p' and 'p'\)/);
+    expect(() => ev('*gRaw')).toThrow(/a void \* points at no type — read what is there with u8\(gRaw\)/);
+    expect(() => ev('gHandler + 1')).toThrow(
+      /cannot do arithmetic on 'gHandler' \(Handler\): it points at code, not at values/,
+    );
+    expect(() => ev('gHandler - gHandler')).toThrow(/it points at code, not at values/);
+    expect(() => ev('p - &g_samples[0]')).toThrow(/they point at different types/);
+    expect(() => ev('gEntityInfo[0]')).toThrow(/'gEntityInfo\[0\]' is a struct Entity, not a scalar/);
+    expect(() => ev('(Nope *)0x03000300')).toThrow(/unknown type 'Nope' \(the ELF has no DWARF for it\)/);
+    expect(() => ev('(Nope)0x03000300')).toThrow(/unknown type 'Nope' \(the ELF has no DWARF for it\)/);
+    expect(() => ev('(u16)(g_frame + 1)')).toThrow(
+      /'g_frame \+ 1' evaluates to 0x00000003, which is not a readable address/,
+    );
+    expect(() => ev('(u16)(g_frame + 1)')).toThrow(/use \(u16\)&g_frame \+ 1 to read the variable/);
+    expect(() => ev('((Entity *)0x09000000)->id')).toThrow(/unreadable address 0x9000000/);
+    expect(() => ev('1.5')).toThrow(/floating-point values are not supported/);
+    expect(() => ev('p->')).toThrow(/expected a member name after '->'/);
+    expect(() => compileExpression('-'.repeat(600) + '1')).toThrow(/nested too deeply/);
+  });
+
+  it('a root the compiler keeps in a register, and one it kept nowhere', () => {
+    /** a struct small enough to live in a register, holding another struct at its start */
+    const pair: TypeDesc = {
+      kind: 'struct',
+      name: 'struct Pair',
+      size: 4,
+      members: [
+        { name: 'lo', offset: 0, type: u16Type },
+        { name: 'hi', offset: 2, type: u16Type },
+      ],
+    };
+    const boxedType: TypeDesc = {
+      kind: 'struct',
+      name: 'struct Boxed',
+      size: 4,
+      members: [{ name: 'pair', offset: 0, type: pair }],
+    };
+    const places: Record<string, ExprPlace> = {
+      p: { word: ENTITIES_AT },
+      arg0: { word: 0xffffff01 },
+      wide: { word: 0x11223344 },
+      boxed: { word: 0x11223344 },
+      gone: { absent: 'r4 was not recovered in this frame' },
+    };
+    const live: ExprEnv = { ...env, place: (name) => places[name] };
+    const withPlaces: ExprHints = {
+      ...hints,
+      rootType: (name) =>
+        name === 'arg0'
+          ? ({ kind: 'uchar', name: 'u8', size: 1 } as TypeDesc)
+          : name === 'gone'
+            ? int32
+            : name === 'wide'
+              ? entity
+              : name === 'boxed'
+                ? boxedType
+                : ROOT_TYPES[name],
+    };
+    const run = (s: string): number => compileExpression(s, withPlaces)(live);
+    expect(run('p->id')).toBe(100);
+    expect(run('p->next->id')).toBe(101);
+    expect(run('gEntityInfo[arg0].id')).toBe(101); // a u8 register holding 1, its junk high bytes ignored
+    expect(() => run('&p')).toThrow(/cannot take the address of 'p': the compiler keeps it in a register here/);
+    expect(() => run('gone')).toThrow(/'gone' is not available here: r4 was not recovered in this frame/);
+    // the low bytes of a register-held struct are readable; what is not says which reason it is
+    expect(run('wide.id')).toBe(0x11223344);
+    expect(() => run('wide.next')).toThrow(
+      /'wide.next' is not available here: the compiler keeps 'wide' in a register, and 'next' is past its low 4 bytes/,
+    );
+    expect(() => run('boxed.pair.lo')).toThrow(
+      /the compiler keeps 'boxed' in a register, which gives 'pair' \(struct Pair\) no address to read/,
+    );
+  });
+
+  it('reports the type and the place it compiled, for the panes that need them', () => {
+    expect(compile('&g_samples[1]', hints).lvalue).toBeNull();
+    expect(compile('&g_samples[1]', hints).type!.name).toBe('int *');
+    expect(compile('g_samples[1]', hints).type!.name).toBe('int');
+    expect(compile('g_samples[1]', hints).lvalue!.address(env)).toBe(SAMPLES_AT + 4);
+    expect(compile('p->next', hints).lvalue!.address(env)).toBe(ENTITIES_AT + 4);
+    expect(compile('r0 + 1', hints).type).toBeNull();
+    expect(compile('r0 + 1', hints).lvalue).toBeNull();
+    expect(compile('(Entity *)0x03000300', hints).type!.kind).toBe('pointer');
+    // a pointer is spelled as C declares one, whatever it points at
+    expect(compile('&gEntityInfo[0]', hints).type!.name).toBe('struct Entity *');
+    expect(compile('&p', hints).type!.name).toBe('struct Entity **');
+    expect(compile('&g_samples', hints).type!.name).toBe('int (*)[4]');
+    expect(compile('*(Entity *)0x03000300', hints).lvalue!.address(env)).toBe(ENTITIES_AT);
   });
 
   it('bounds literals, length and nesting instead of wrapping or overflowing', () => {
@@ -172,6 +462,7 @@ describe('expression grammar', () => {
     expect(compileLogMessage('v={{0x03000000}} n={[0x03000000]}')(env)).toBe('v=13330 (0x3412) n=18 (0x12)');
     expect(compileLogMessage('open {gHp')(env)).toBe('open {gHp');
     expect(compileLogMessage('signed {gSigned}', hints)(env)).toBe('signed -7 (0xfffffff9)');
+    expect(compileLogMessage('{p->id} {g_samples[g_frame & 3]}', hints)(env)).toBe('100 (0x64) 8 (0x8)');
   });
 });
 

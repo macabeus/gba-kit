@@ -288,21 +288,121 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'draw();') }]);
     h.run();
     const mode = h.session.evaluate('g_player.mode');
-    expect(h.session.evaluate('&g_player.mode').node.value).toContain(String(mode.address));
+    // `&x` is a pointer to x: its own hex word, with x itself as its one child
+    const reference = h.session.evaluate('&g_player.mode');
+    expect(reference.node.scalar!.value).toBe(mode.address);
+    expect(reference.address).toBe(mode.address);
+    expect(reference.node.type).toBe('enum Mode *');
+    expect(reference.node.children!()[0]!.value).toBe(mode.node.value);
     expect(h.session.evaluate('&g_player.pos.y').address).toBe(h.session.evaluate('g_player.pos.y').address);
     expect(h.session.evaluate('&g_samples[1]').address).toBe(h.session.program.symbolAddress('g_samples')! + 4);
     const cast = h.session.evaluate('(enum Mode)&g_player.mode');
     expect(cast.address).toBe(mode.address);
     expect(cast.node.value).toBe('MODE_PLAY (1)');
-    expect(h.session.evaluate('(Point*)&g_player').node.type).toBe('Point');
+    // (T *)x is the pointer, (T)x is the T at x
+    const pointerCast = h.session.evaluate('(Point *)&g_player');
+    expect(pointerCast.node.type).toBe('Point *');
+    expect(pointerCast.node.children!()).toHaveLength(1);
     expect(h.session.evaluate('(Point)&g_player').node.children!().map((c) => c.value)).toEqual([
       h.session.evaluate('g_player.pos.x').node.value,
       '-7',
     ]);
+    expect(h.session.evaluate('((struct Player *)&g_player)->pos.y').node.value).toBe('-7');
+    expect(h.session.evaluate('(*(Point *)&g_player).y').node.value).toBe('-7');
     expect(h.session.evaluate('s32(&g_player.pos.y)').node.value).toBe('-7 (0xfffffff9)');
     expect(h.session.evaluate('(int)g_player.pos.y').node.value).toBe('-7'); // a cast's operand names a place
-    expect(() => h.session.evaluate('(int)(g_player.pos.y)')).toThrow(/not a readable address/);
+    expect(h.session.evaluate('(int)(g_player.pos.y)').node.value).toBe('-7'); // parentheses name the same place
+    // an arithmetic result is a number, not a place: -7 is no address to reinterpret
+    expect(() => h.session.evaluate('(int)(g_player.pos.y + 0)')).toThrow(/not a readable address/);
+    expect(() => h.session.evaluate('(Nope *)&g_player')).toThrow(/unknown type 'Nope'/);
     expect(() => h.session.evaluate('&g_nope')).toThrow(/unknown symbol/);
+  });
+
+  it('a variable index reads the element the same constant index reads', async () => {
+    const h = await boot(variant);
+    h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'g_samples[g_frame & 3] = total;') }]);
+    expect(h.run()?.reason).toBe('breakpoint');
+    const i = h.session.evaluate('g_frame & 3').node.scalar!.value;
+    const dynamic = h.session.evaluate('g_samples[g_frame & 3]');
+    expect(dynamic.node.value).toBe(h.session.evaluate(`g_samples[${i}]`).node.value);
+    // and lands on the element the variables tree shows at that index
+    const elements = h.session.evaluate('g_samples').node.children!();
+    expect(dynamic.node.value).toBe(elements[i]!.value);
+    expect(dynamic.address).toBe(elements[i]!.address);
+    expect(h.session.evaluate('g_samples[g_frame & 3] == g_samples[g_frame & 3]').node.value).toBe('1 (0x1)');
+    expect(h.session.assign('g_samples[g_frame & 3]', '7').node.value).toBe('7');
+    expect(h.session.evaluate(`g_samples[${i}]`).node.value).toBe('7');
+  });
+
+  it('a computed array reads as the array, not as the address that is its word', async () => {
+    const h = await boot(variant);
+    h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'g_samples[g_frame & 3] = total;') }]);
+    expect(h.run()?.reason).toBe('breakpoint');
+    // a ternary is the one expression with a type that names no storage: both arms
+    // are one type, but which arm ran is not knowable until it runs, so all that is
+    // left is the word — and an array's word is its own address
+    const direct = h.session.evaluate('g_samples');
+    const chosen = h.session.evaluate('1 ? g_samples : g_samples');
+    expect(chosen.node.value).toBe(direct.node.value);
+    expect(chosen.address).toBe(direct.address);
+    expect(h.session.evaluate('g_frame ? g_player.name : g_player.name').node.value).toBe(
+      h.session.evaluate('g_player.name').node.value,
+    );
+  });
+
+  it('a pointer parameter reads through ->, * and the members below them', async () => {
+    const h = await boot(variant);
+    h.session.setSourceBreakpoints(UTIL, [{ line: lineOf('util.c', 'if (p->pos.x > 100)') }]);
+    expect(h.run()?.reason).toBe('breakpoint');
+    expect(h.session.callStack()[0]!.name).toBe('move_player');
+    expect(h.session.evaluate('p->pos.y').node.value).toBe('-7');
+    expect(h.session.evaluate('(*p).pos.y').node.value).toBe('-7');
+    expect(h.session.evaluate('p->pos.x').node.value).toBe(h.session.evaluate('g_player.pos.x').node.value);
+    expect(h.session.evaluate('p->mode').node.value).toBe('MODE_PLAY (1)');
+    expect(h.session.evaluate('p->stats.hp').node.value).toBe('9 (4 bits)');
+    expect(h.session.evaluate('p->name[1]').node.value).toBe(h.session.evaluate('g_player.name[1]').node.value);
+    expect(h.session.evaluate('p->pos.y < 0').node.value).toBe('1 (0x1)');
+    // the pointee is the whole struct, as the variables tree shows it
+    const pointee = h.session.evaluate('*p');
+    expect(pointee.node.type).toBe('struct Player');
+    expect(pointee.address).toBe(h.session.evaluate('g_player').address);
+    expect(pointee.node.children!().map((m) => m.name)).toEqual(
+      h.session.evaluate('g_player').node.children!().map((m) => m.name),
+    );
+    // a pointer member, dereferenced: `->` binds tighter than `*`, as in C
+    expect(h.session.evaluate('*p->counterRef').node.value).toBe(h.session.evaluate('g_vblank_count').node.value);
+    expect(h.session.evaluate('&p->pos.y').address).toBe(h.session.evaluate('&g_player.pos.y').address);
+    // a memory reference means one thing: where the value lives, for a value that
+    // lives somewhere — so parenthesising the name cannot change what it points the
+    // memory view at, whichever build keeps `p` in a register
+    expect(h.session.evaluate('(p)').address).toBe(h.session.evaluate('p').address);
+    expect(h.session.evaluate('(p)').node.value).toBe(h.session.evaluate('p').node.value);
+    expect(() => h.session.evaluate('p->nope')).toThrow(/has no member 'nope'/);
+    expect(() => h.session.evaluate('*g_frame')).toThrow(/not a pointer/);
+    expect(() => h.session.evaluate('*0x03000000')).toThrow(/not a typed pointer/);
+  });
+
+  it('pointer arithmetic steps by the element the ELF describes', async () => {
+    const h = await boot(variant);
+    h.session.setSourceBreakpoints(MAIN, [{ line: lineOf('main.c', 'draw();') }]);
+    h.run();
+    const word = (expr: string): number => h.session.evaluate(expr).node.scalar!.value;
+    expect(word('&g_samples[1]') - word('&g_samples[0]')).toBe(4);
+    expect(word('g_samples + 1')).toBe(word('&g_samples[1]'));
+    // one pointer minus another counts elements, and reads as the int count it is
+    expect(h.session.evaluate('&g_samples[3] - &g_samples[0]').node).toMatchObject({ value: '3', type: 'int' });
+    expect(() => h.session.evaluate('&g_samples[1] - g_player.counterRef')).toThrow(/they point at different types/);
+    expect(h.session.evaluate('*(g_samples + 2)').node.value).toBe(h.session.evaluate('g_samples[2]').node.value);
+    // one whole struct on, measured against the ELF rather than written down here:
+    // the step is constant, and covers every member the tree shows
+    const step = word('&g_player + 1') - word('&g_player');
+    expect(word('&g_player + 2') - word('&g_player + 1')).toBe(step);
+    const last = h.session.evaluate('g_player').node.children!().at(-1)!;
+    expect(step).toBeGreaterThanOrEqual(last.address! + 4 - word('&g_player'));
+    // a pointer in anything that is not pointer arithmetic keeps its raw word
+    expect(h.session.evaluate('g_frame + 1').node.value).toBe(
+      `${h.session.frame + 2} (0x${(h.session.frame + 2).toString(16)})`,
+    );
   });
 
   it('enumerators evaluate by name and work in conditions and writes', async () => {
@@ -410,6 +510,48 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(() => h.session.assign('g_player.pos', '1')).toThrow(/cannot write 'g_player.pos'/);
     expect(() => h.session.assign('g_nope', '1')).toThrow(/g_nope/);
     expect(() => h.session.assign('g_player.stats.hp', '99')).toThrow(/out of range for a 4-bit/);
+  });
+
+  it('writes reach through a pointer, and a condition, a logpoint and a data breakpoint read through one', async () => {
+    const h = await boot(variant);
+    const line = lineOf('util.c', 'if (p->pos.x > 100)');
+    h.session.setSourceBreakpoints(UTIL, [{ line, condition: 'p->pos.x > 100' }]);
+    expect(h.run(5)?.reason).toBe('pause'); // x starts at 12 and climbs by at most one a frame
+    expect(h.output.filter((o) => o.startsWith('[stderr]'))).toEqual([]);
+    h.session.setSourceBreakpoints(UTIL, [{ line, logMessage: 'x={p->pos.x} mode={p->mode}' }]);
+    h.run(2);
+    const logs = h.output.filter((o) => o.startsWith('[log]'));
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.every((l) => /^\[log\] x=\d+ \(0x[0-9a-f]+\) mode=1 \(0x1\)$/.test(l))).toBe(true);
+    // the same condition, once the value it names holds
+    h.session.assign('g_player.pos.x', '200');
+    h.session.setSourceBreakpoints(UTIL, [{ line, condition: 'p->pos.x > 100' }]);
+    expect(h.run()?.reason).toBe('breakpoint');
+    expect(h.session.callStack()[0]!.name).toBe('move_player');
+    // writes through the pointer land in the struct the caller owns
+    expect(h.session.assign('p->pos.x', '10').node.value).toBe('10 (0x0000000a)');
+    expect(h.session.evaluate('g_player.pos.x').node.value).toBe('10 (0x0000000a)');
+    expect(h.session.assign('p->stats.hp', '5').node.value).toBe('5 (4 bits)');
+    expect(h.session.evaluate('g_player.stats.hp').node.value).toBe('5 (4 bits)');
+    expect(() => h.session.assign('*p', '1')).toThrow(/cannot write '\*p'/);
+    // and a data breakpoint watches the four bytes the member occupies
+    const target = h.session.dataBreakpointTarget('p->pos.x', undefined, 0)!;
+    expect(target.address).toBe(h.session.evaluate('&p->pos.x').address);
+    expect(target.length).toBe(4);
+    expect(h.session.dataBreakpointTarget('p->stats.hp', undefined, 0)!.length).toBe(1);
+    // a dereference is a place too, on either side of the `=`
+    expect(h.session.assign('*p->counterRef', '77').node.value).toBe(h.session.evaluate('g_vblank_count').node.value);
+    expect(h.session.dataBreakpointTarget('g_samples[g_frame & 3]', undefined, 0)!.address).toBe(
+      h.session.evaluate('&g_samples[g_frame & 3]').address,
+    );
+    // and a data breakpoint's condition is compiled where the user typed it, so it
+    // reads the names of the frame they were looking at, not only the globals
+    h.session.setSourceBreakpoints(UTIL, []);
+    const watched = h.session.dataBreakpointTarget('g_player.pos.x', 4, 0)!;
+    const [data] = h.session.setDataBreakpoints([{ ...watched, access: 'write', condition: 'p->pos.x > 0' }]);
+    expect(data!.verified).toBe(true);
+    expect(h.run(60)?.reason).toBe('data breakpoint');
+    expect(h.output.filter((o) => o.startsWith('[stderr]'))).toEqual([]);
   });
 
   it('every write is an event carrying the fresh revision, and a refused write is not', async () => {
@@ -1256,7 +1398,14 @@ describe('Session views and tools', () => {
     const address = h.session.program.symbolAddress('add_bonus')!;
     h.session.labels.set({ address, label: 'AddBonus', comment: 'adds the per-frame bonus' });
     expect(h.session.disassemble(address, 1)[0]!.label).toBe('AddBonus');
-    expect(h.session.evaluate('&AddBonus').node.value).toContain(address.toString());
+    // `&` on a label is a pointer to it, and reads as the address it is
+    expect(h.session.evaluate('&AddBonus').node.value).toBe(`0x${address.toString(16).padStart(8, '0')}`);
+    // A label has no type, and the cast its summary names is the one that reads it:
+    // `(T)x` is the T at x's address, where `(T *)x` would be the word held there.
+    const mode = h.session.evaluate('&g_player.mode').node.scalar!.value;
+    h.session.labels.set({ address: mode, label: 'gMystery', size: 4 });
+    expect(h.session.evaluate('gMystery').node.value).toContain('no type — try (StructName)gMystery');
+    expect(h.session.evaluate('(enum Mode)gMystery').node.value).toBe(h.session.evaluate('g_player.mode').node.value);
     const n = h.session.labels.importSymbols('03000010 gMystery\nsome junk line\ngOther = 0x03000020;\n');
     expect(n).toBe(2);
     expect(h.session.labels.byName('gOther')?.address).toBe(0x03000020);

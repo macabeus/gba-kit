@@ -727,9 +727,53 @@ describe('inspection', () => {
     const samples = mainGlobals.find((v) => v.name === 'g_samples')!;
     const elements = await variables(client, samples.variablesReference);
     expect(elements[1]!.evaluateName).toBe('g_samples[1]');
+    // a pointer's one row is what it points at, and it evaluates back to the same value
+    const counterRef = members.find((m) => m.name === 'counterRef')!;
+    const pointee = (await variables(client, counterRef.variablesReference))[0]!;
+    expect(pointee.evaluateName).toBe('(*(g_player.counterRef))');
+    // Every name the tree hands back reads as the row it came from — the value, not
+    // merely a string, since a name that parses differently would still answer.
+    for (const row of [player, samples, ...members, ...elements, pointee]) {
+      if (row.evaluateName === undefined) {
+        continue;
+      }
+      const back = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+        expression: row.evaluateName,
+        frameId: 2,
+      });
+      expect([row.evaluateName, back.result]).toEqual([row.evaluateName, row.value]);
+    }
     const machine = await variables(client, scopes[3]!.variablesReference);
     expect(machine.find((v) => v.name === 'frame')!.evaluateName).toBe('frame');
     expect(machine.find((v) => v.name === 'function')!.evaluateName).toBeUndefined();
+  });
+
+  it('a value the console computed hands its rows back as expressions that read the same', async () => {
+    const client = await launch({ breakpoints: [{ path: UTIL, lines: [await lineOf(UTIL, 'if (p->pos.x > 100)')] }] });
+    await stopped(client, 'continue', { threadId: 1 });
+    // A watch on an arrow, a dereference or a cast expands like a variables row, and
+    // every row below it names itself in the grammar that produced it.
+    for (const expression of ['p->pos', '*p', '(struct Player *)p', '&g_player']) {
+      const top = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression, frameId: 0 });
+      expect(top.variablesReference).toBeGreaterThan(0);
+      for (const row of await variables(client, top.variablesReference)) {
+        expect([expression, row.name, row.evaluateName]).not.toEqual([expression, row.name, undefined]);
+        const back = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+          expression: row.evaluateName!,
+          frameId: 0,
+        });
+        expect([row.evaluateName, back.result]).toEqual([row.evaluateName, row.value]);
+        // and one level deeper, where a dereference that did not parenthesise itself
+        // would bind to the pointer instead of to what it points at
+        for (const deeper of row.variablesReference ? await variables(client, row.variablesReference) : []) {
+          const again = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+            expression: deeper.evaluateName!,
+            frameId: 0,
+          });
+          expect([deeper.evaluateName, again.result]).toEqual([deeper.evaluateName, deeper.value]);
+        }
+      }
+    }
   });
 
   it('refuses a frame the stack does not have, and an empty expression', async () => {
@@ -775,6 +819,19 @@ describe('inspection', () => {
     });
     expect(compared.result.startsWith('1')).toBe(true);
     expect(await num(client, 'g_player.pos.x')).toBe(42);
+
+    // a variable index is a place like any other, in the console and in a hover
+    const indexed = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: 'g_samples[g_frame & 3] = 5',
+      context: 'repl',
+    });
+    expect(indexed.result).toBe('5');
+    const readBack = await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', {
+      expression: 'g_samples[g_frame & 3]',
+      context: 'hover',
+    });
+    expect(readBack.result).toBe('5');
+    expect(readBack.memoryReference).toMatch(/^0x03/);
 
     // what cannot be written is refused where it was asked, not as a notification
     const refused = await client.request('evaluate', { expression: 'g_player.pos = 1', context: 'repl' });
@@ -1127,9 +1184,9 @@ describe('emulator requests', () => {
       size: 2,
       region: 'iwram',
     });
-    const gKeys = parseInt(
+    // `&g_keys` is a pointer: a hex address, as the variables tree spells one
+    const gKeys = Number(
       (await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression: '&g_keys' })).result,
-      10,
     );
     expect(found.addresses).toContain(gKeys);
     const trace = await client.body<GbaKitRequests['gba-kit/trace']['body']>('gba-kit/trace', { count: 5 });
@@ -1296,9 +1353,10 @@ describe('emulator requests', () => {
     };
     expect(file.labels.map((l) => l.label).sort()).toEqual(['gMystery', 'gOther']);
     expect((await client.body<{ text: string }>('gba-kit/exportLabels')).text).toContain('03000200 gOther');
+    // `&` on a label is a pointer to it, and reads as the address it is
     expect(
       (await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression: '&gMystery' })).result,
-    ).toContain('50331904');
+    ).toBe('0x03000100');
     const info = await client.body<DebugProtocol.DataBreakpointInfoResponse['body']>('dataBreakpointInfo', {
       name: 'gMystery',
     });
