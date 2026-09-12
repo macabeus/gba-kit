@@ -25,8 +25,11 @@ import {
   type StackFrame,
   type StopInfo,
   type VarNode,
+  base64ToBytes,
+  bytesToBase64,
   decodeTake,
   encodeTake,
+  freeStateName,
   hex8,
   regionOf,
   renameSaveState,
@@ -1417,6 +1420,14 @@ export class GbaDebugSession extends DebugSession {
         return this.#renameState(s, args as Args<'gba-kit/renameState'>);
       case 'gba-kit/deleteState':
         return { deleted: await this.#deleteState(s, args as Args<'gba-kit/deleteState'>) };
+      case 'gba-kit/importSave': {
+        const a = args as Args<'gba-kit/importSave'>;
+        return this.#importSave(s, base64ToBytes(needString(a.bytes, 'bytes')), optionalString(a.name, 'name'));
+      }
+      case 'gba-kit/exportSave': {
+        const { bytes, declared } = s.exportSaveFile();
+        return { bytes: bytesToBase64(bytes), size: bytes.length, declared };
+      }
       case 'gba-kit/ppu':
         return ppuBody(s, args as PpuArguments);
       case 'gba-kit/ioRegisters':
@@ -1576,6 +1587,27 @@ export class GbaDebugSession extends DebugSession {
     const text = session.saveState(stateName);
     await this.#files(session).writeText(file, text);
     this.#log(`gba-kit: state '${stateName}' saved to ${file}\n`);
+    return savedStateInfo(stateName, file, saveStateMeta(text));
+  }
+
+  /**
+   * A `.sav` as a state file, under a name no state already has: importing the same
+   * file twice keeps both rather than writing over the first. Nothing about the
+   * session's execution moves, so no client sees a stop it did not cause.
+   */
+  async #importSave(session: Session, bytes: Uint8Array, name?: string): Promise<SavedStateInfo> {
+    const files = this.#files(session);
+    const stateName = await freeStateName(
+      name?.trim() || 'imported save',
+      async (candidate) =>
+        (await files
+          .readText(this.#statePath(session, candidate))
+          .catch(() => null)) !== null,
+    );
+    const file = this.#statePath(session, stateName);
+    const text = session.importSaveState(bytes, stateName);
+    await files.writeText(file, text);
+    this.#log(`gba-kit: ${bytes.length} bytes imported as state '${stateName}' in ${file}\n`);
     return savedStateInfo(stateName, file, saveStateMeta(text));
   }
 

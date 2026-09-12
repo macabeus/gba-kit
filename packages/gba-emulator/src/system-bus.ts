@@ -75,8 +75,8 @@ const SAVE_TYPE_STRINGS: ReadonlyArray<readonly [string, SaveType]> = [
   ['FLASH_V', 'flash512'],
 ];
 
-/** The longest declaration, so the scan stops with room for one at the end of the ROM. */
-const MAX_SAVE_ID = Math.max(...SAVE_TYPE_STRINGS.map(([prefix]) => prefix.length)) + 3;
+/** The shortest declaration there could be, so the scan stops once no room is left for one. */
+const MIN_SAVE_ID = Math.min(...SAVE_TYPE_STRINGS.map(([prefix]) => prefix.length)) + 3;
 
 /** The EEPROM chip's array: 64 Kbit, which a 4 Kbit cartridge uses the first 512 bytes of. */
 const EEPROM_BYTES = 0x2000;
@@ -320,7 +320,7 @@ export class GbaSystemBus implements MemoryBus {
    */
   #detectSaveType(rom: Uint8Array): void {
     this.#save = { type: null, id: null };
-    for (let i = 0; i + MAX_SAVE_ID <= rom.length; i += 4) {
+    for (let i = 0; i + MIN_SAVE_ID <= rom.length; i += 4) {
       for (const [prefix, type] of SAVE_TYPE_STRINGS) {
         if (!matchesAt(rom, i, prefix) || !digitsAt(rom, i + prefix.length, 3)) {
           continue;

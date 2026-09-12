@@ -1242,6 +1242,9 @@ describe('emulator requests', () => {
       ['gba-kit/stream', { path: '' }, /'path' is empty/],
       ['gba-kit/loadState', {}, /give a state name or path/],
       ['gba-kit/loadState', { name: '' }, /'name' is empty/],
+      ['gba-kit/importSave', {}, /missing 'bytes'/],
+      ['gba-kit/importSave', { bytes: 7 }, /'bytes' must be a string/],
+      ['gba-kit/importSave', { bytes: 'AAAA', name: 42 }, /'name' must be a string/],
     ];
     for (const [command, args, message] of cases) {
       const r = await client.request(command, args);
@@ -1303,6 +1306,85 @@ describe('emulator requests', () => {
     expect(saved.height).toBe(80);
     expect(base64Bytes(saved.thumbnail!)).toBe(120 * 80 * 4);
     expect(states[0]!.thumbnail).toBe(saved.thumbnail);
+  });
+
+  /**
+   * A `.sav` is imported against a ROM that declares a save type, which the fixture
+   * does not: the string is appended past the code, where `loadRom`'s scan finds it
+   * and nothing executes it.
+   */
+  it('imports a .sav as a state of its own, numbering rather than writing over one', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(projectDir);
+    const base = await readFile(ROM);
+    const rom = join(projectDir, 'eeprom.gba');
+    await writeFile(rom, Buffer.concat([base, Buffer.from('EEPROM_V121\0')]));
+    const client = await launch({ projectDir, stopOnEntry: true, extra: { rom }, elf: null });
+    await client.event('stopped');
+
+    const sav = Buffer.alloc(512).map((_, i) => (i * 11 + 5) & 0xff);
+    const args = { bytes: sav.toString('base64'), name: 'Klonoa - Empire of Dreams (USA)' };
+    const before = await client.body<StateBody>('gba-kit/state');
+
+    const first = await client.body<SavedStateInfo>('gba-kit/importSave', args);
+    expect(first.name).toBe('Klonoa - Empire of Dreams (USA)');
+    expect(first.path).toBe(join(projectDir, '.gba-kit', 'states', 'Klonoa_-_Empire_of_Dreams_USA_.json'));
+    expect(first.frame).toBe(0);
+    expect(base64Bytes(first.thumbnail!)).toBe(120 * 80 * 4);
+
+    // nothing about the machine being debugged moved, and no state event said otherwise
+    const after = await client.body<StateBody>('gba-kit/state');
+    expect({ revision: after.revision, epoch: after.epoch, frame: after.frame }).toEqual({
+      revision: before.revision,
+      epoch: before.epoch,
+      frame: before.frame,
+    });
+
+    const held = await readFile(first.path, 'utf8');
+    const second = await client.body<SavedStateInfo>('gba-kit/importSave', args);
+    expect(second.name).toBe('Klonoa - Empire of Dreams (USA) (2)');
+    expect(second.path).not.toBe(first.path);
+    expect(await readFile(first.path, 'utf8')).toBe(held);
+
+    const { states } = await client.body<{ states: SavedStateInfo[] }>('gba-kit/listStates');
+    expect(states.map((s) => s.name).sort()).toEqual([
+      'Klonoa - Empire of Dreams (USA)',
+      'Klonoa - Empire of Dreams (USA) (2)',
+    ]);
+
+    // it loads like any other state, and the machine then holds the file
+    expect((await stopped(client, 'gba-kit/loadState', { path: first.path })).reason).toBe('restart');
+    expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(0);
+    const exported = await client.body<{ bytes: string; size: number; declared: string }>('gba-kit/exportSave');
+    expect(exported.declared).toBe('EEPROM_V121');
+    expect(exported.size).toBe(512);
+    expect(base64Bytes(exported.bytes)).toBe(512);
+    expect(Buffer.from(exported.bytes, 'base64').equals(sav)).toBe(true);
+  });
+
+  it('refuses a .sav the cartridge cannot account for, saying what it saw', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(projectDir);
+    const base = await readFile(ROM);
+    const rom = join(projectDir, 'eeprom.gba');
+    await writeFile(rom, Buffer.concat([base, Buffer.from('EEPROM_V121\0')]));
+    const client = await launch({ projectDir, stopOnEntry: true, extra: { rom }, elf: null });
+    await client.event('stopped');
+
+    const wrong = await client.request('gba-kit/importSave', { bytes: Buffer.alloc(32768).toString('base64') });
+    expect(wrong.success).toBe(false);
+    expect(wrong.message).toMatch(
+      /this ROM declares EEPROM_V121, whose save is 512 or 8192 bytes; this file is 32768 bytes/,
+    );
+    expect(wrong.body?.error?.showUser).toBeFalsy();
+
+    // and nothing was written for it
+    await expect(readdir(join(projectDir, '.gba-kit', 'states'))).rejects.toThrow();
+
+    // an EEPROM nothing has addressed yet has no size to export, rather than a guessed one
+    const early = await client.request('gba-kit/exportSave');
+    expect(early.success).toBe(false);
+    expect(early.message).toMatch(/4 Kbit or 64 Kbit/);
   });
 
   it('renames and deletes save states, and refuses a name already taken', async () => {

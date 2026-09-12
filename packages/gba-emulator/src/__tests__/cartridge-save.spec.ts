@@ -92,6 +92,17 @@ describe('declared save type', () => {
     expect(bus.save.type).toBeNull();
   });
 
+  it('finds a declaration that ends the ROM, where a build often leaves it', () => {
+    const id = 'EEPROM_V121';
+    const rom = new Uint8Array(0x400 + id.length);
+    for (let i = 0; i < id.length; i++) {
+      rom[0x400 + i] = id.charCodeAt(i);
+    }
+    const bus = new GbaSystemBus();
+    bus.loadRom(rom);
+    expect(bus.save.id).toBe(id);
+  });
+
   it('backs the 0x0E window for every type but EEPROM, which is serial', () => {
     for (const id of ['SRAM_V113', 'SRAM_F_V102', 'FLASH_V126', 'FLASH1M_V103']) {
       const bus = busFor(id);
