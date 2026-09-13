@@ -1312,7 +1312,9 @@ export class GbaSystemBus implements MemoryBus {
  * GBA EEPROM — Serial EEPROM accessed via DMA at address region 0x0D.
  *
  * Supports both 4Kbit (512 bytes, 6-bit address) and 64Kbit (8KB, 14-bit address).
- * Auto-detects size based on address length in the first write command.
+ * Which of the two a cartridge is, only the cartridge says: the length of the read
+ * request it makes carries the address width, and a write takes 4Kbit until a read
+ * has said otherwise.
  *
  * Protocol:
  * - Write command: 1,0, <address>, <64 data bits>, 0 (stop)
@@ -1383,7 +1385,6 @@ class GbaEeprom {
   deserialize(snap: EepromSnapshot): void {
     this.#data.set(snap.data);
     this.#addrBits = snap.addrBits;
-    // a state written before an EEPROM could be installed from a file carries no length
     this.#installedBytes = snap.installedBytes ?? 0;
     this.#state = snap.state as EepromState;
     this.#command = snap.command;
@@ -1579,6 +1580,8 @@ class GbaEeprom {
       this.#state = EepromState.WriteReady;
       return;
     }
+    // the first byte the game clocked in is the last of the eight, the order
+    // `#loadReadData` sends them back in and a `.sav` file keeps them
     for (let i = 0; i < 8; i++) {
       this.#data[byteAddr + i] = Number((this.#bitBuffer >> BigInt(i * 8)) & 0xffn);
     }

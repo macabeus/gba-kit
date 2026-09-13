@@ -134,7 +134,7 @@ export function useAction(): {
   return { busy, error, run };
 }
 
-/** A host capability the view offered, which only a view that never checked could be without. */
+/** The host capability an action needs: a view offers only what its transport carries, so reaching this means it never looked. */
 function need<T>(capability: T | undefined): T {
   if (!capability) {
     throw new Error(NO_FILE_DIALOG);
@@ -144,8 +144,8 @@ function need<T>(capability: T | undefined): T {
 
 /**
  * The save states of this ROM, and the six things a view does with them. Every
- * action refreshes the list and reports its own failure, so a view renders
- * `error` and needs no error handling of its own.
+ * action reports its own failure, so a view renders `error` and needs no error
+ * handling of its own, and the ones that change the list refresh it.
  */
 export function useSaveStates(transport: Transport): {
   states: SavedStateInfo[];

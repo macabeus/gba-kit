@@ -23,8 +23,9 @@ export interface BridgeSession {
 export interface BridgeSink {
   post(message: HostToTransport): void;
   openText?(content: string, language: string, title: string): void;
-  /** the webview asked for a file to read, or for one to write; the host opens the editor's dialog */
+  /** the webview asked for a file to read; the host opens the editor's open dialog */
   pickFile?: TransportBackend['pickFile'];
+  /** the webview asked for bytes to be written to a file; the host opens the editor's save dialog */
   saveFile?: TransportBackend['saveFile'];
   /** the webview asked for a tool panel to be shown; the host brings up the view that holds it */
   showPanel?(panel: PanelId): void;

@@ -1636,8 +1636,8 @@ export class GbaDebugSession extends DebugSession {
   }
 
   /**
-   * The file a saved state names, by name or by a path `saveState` / `listStates`
-   * gave out. Only the states directory is reached: a state name is the request's
+   * The file a saved state names, by name or by a path `saveState`, `importSave` or
+   * `listStates` gave out. Only the states directory is reached: a state name is the request's
    * whole reach into the file system.
    */
   #stateFile(session: Session, args: { name?: unknown; path?: unknown }): string {

@@ -1674,8 +1674,8 @@ export class Session {
   /** The machine's cartridge backup memory as a `.sav`, the size its declared save type gives it. */
   exportSaveFile(): Uint8Array {
     const bus = this.machine.gba.bus;
-    // `saveFileSize` has thrown already unless the cartridge declares a save, so there is one to read
     const size = saveFileSize(bus.save, bus.eepromSaveBytes);
+    // `saveFileSize` has thrown unless the cartridge declares a save, so there is a chip to read
     return bus.readBackup()!.subarray(0, size);
   }
 

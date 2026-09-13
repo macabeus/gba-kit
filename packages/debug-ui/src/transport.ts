@@ -162,6 +162,7 @@ export function createMessageTransport(port: MessagePort): Transport {
     }
   });
 
+  // a message carrying an `id` is one the host answers; the rest are told, not asked
   const send = (message: TransportToHost): Promise<unknown> => {
     if (!('id' in message)) {
       port.post(message);

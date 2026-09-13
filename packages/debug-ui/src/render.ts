@@ -1,6 +1,7 @@
 /**
  * Pixel helpers for the PPU views, pure so a test can check them without a canvas:
- * palette indices → RGBA for tiles, a tilemap, and a sprite.
+ * palette indices → RGBA for tiles, a tilemap, and a sprite. The base64 pair every
+ * other module here converts bytes with lives alongside them.
  */
 import type { SpriteInfo, TilemapEntry } from '@gba-kit/debug-core';
 
