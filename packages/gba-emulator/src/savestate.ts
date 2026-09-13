@@ -97,6 +97,8 @@ export interface InputSnapshot {
 export interface EepromSnapshot {
   data: Uint8Array;
   addrBits: number;
+  /** How long the `.sav` installed in the chip was. Older snapshots omit it and restore as 0. */
+  installedBytes?: number;
   state: number;
   command: number;
   address: number;
@@ -114,6 +116,7 @@ export interface SystemBusSnapshot {
   oam: Uint8Array;
   sram: Uint8Array;
   mmioRegisters: Uint8Array;
+  /** Whether the 0x0E window is backed. The cartridge answers for it, so `deserialize` passes over this; it stays in the snapshot for readers that take it from there. */
   hasSram: boolean;
   waitcnt: number;
   postflg: number;

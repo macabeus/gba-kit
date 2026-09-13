@@ -7,6 +7,7 @@
 import type { GbaKitCommand, GbaKitRequests, StateBody } from '@gba-kit/debug-core/protocol';
 
 import type { PanelId } from './panels/DebugPanels.js';
+import { base64ToBytes, bytesToBase64 } from './render.js';
 
 // A host that only serves the transport (an extension host bundling no React) imports this module alone.
 export type { PanelId };
@@ -49,6 +50,23 @@ export interface Transport {
   /** Show text to the user in an editor (a recording's script, an exported symbol file), when the host has one. */
   openText?(content: string, language: string, title: string): void;
   /**
+   * Ask the user for a file and read it, when the host has a way to open one. Null
+   * when they picked nothing. `filters` is extension lists by description, the way an
+   * editor's open dialog takes them, and `maxBytes` is what the caller can take: a
+   * bigger file is refused where its bytes already are, before anything copies them.
+   */
+  pickFile?(options: { title: string; filters: Record<string, string[]>; maxBytes: number }): Promise<{
+    name: string;
+    bytes: Uint8Array;
+  } | null>;
+  /** Write bytes to a file the user names, when the host has a way to save one. False when they cancelled. */
+  saveFile?(options: {
+    title: string;
+    suggestedName: string;
+    filters: Record<string, string[]>;
+    bytes: Uint8Array;
+  }): Promise<boolean>;
+  /**
    * Bring one of the tool panels into view (a stopped recording, in the Recording
    * tab), when the host has somewhere to show it. Whoever renders `DebugPanels`
    * hears it through `onShowPanel`; a host with several views routes it between them.
@@ -68,6 +86,16 @@ export type TransportToHost =
   /** the last listener of a feed left: the host may stop sending it */
   | { type: 'unsubscribe'; what: Feed }
   | { type: 'openText'; content: string; language: string; title: string }
+  | { type: 'pickFile'; id: number; title: string; filters: Record<string, string[]>; maxBytes: number }
+  /** `bytes` is base64: nothing has crossed webview→host as a typed array here, and text always has */
+  | {
+      type: 'saveFile';
+      id: number;
+      title: string;
+      suggestedName: string;
+      filters: Record<string, string[]>;
+      bytes: string;
+    }
   | { type: 'showPanel'; panel: PanelId };
 
 /** Messages a host sends to a webview transport. */
@@ -134,8 +162,9 @@ export function createMessageTransport(port: MessagePort): Transport {
     }
   });
 
+  // a message carrying an `id` is one the host answers; the rest are told, not asked
   const send = (message: TransportToHost): Promise<unknown> => {
-    if (message.type !== 'request' && message.type !== 'control') {
+    if (!('id' in message)) {
       port.post(message);
       return Promise.resolve(undefined);
     }
@@ -187,6 +216,15 @@ export function createMessageTransport(port: MessagePort): Transport {
     onAudio: (listener) => listen('audio', listeners.audio, listener),
     onLabels: (listener) => listen('labels', listeners.labels, listener),
     openText: (content, language, title) => port.post({ type: 'openText', content, language, title }),
+    async pickFile(options) {
+      const picked = (await send({ type: 'pickFile', id: nextId++, ...options })) as {
+        name: string;
+        bytes: string;
+      } | null;
+      return picked && { name: picked.name, bytes: base64ToBytes(picked.bytes) };
+    },
+    saveFile: ({ bytes, ...rest }) =>
+      send({ type: 'saveFile', id: nextId++, ...rest, bytes: bytesToBase64(bytes) }) as Promise<boolean>,
     showPanel: (panel) => port.post({ type: 'showPanel', panel }),
     // the subscription tells the host this view can show a panel: one asked for before it loaded arrives now
     onShowPanel: (listener) => listen('showPanel', listeners.showPanel, listener),
@@ -201,8 +239,24 @@ export interface TransportBackend {
   /** the webview's last listener of the feed left */
   unsubscribe(what: Feed): void;
   openText?(content: string, language: string, title: string): void;
+  pickFile?: Transport['pickFile'];
+  saveFile?: Transport['saveFile'];
   /** a webview asked for a tool panel; the host brings the view that holds it up and tells it which */
   showPanel?(panel: PanelId): void;
+}
+
+/** What a host that can open no file answers, rather than leaving the webview waiting. */
+export const NO_FILE_DIALOG = 'this host cannot open files';
+
+/**
+ * What every `pickFile` answers for a file bigger than the caller said it could take.
+ * A mis-picked ROM is turned away by its length alone, before the bytes are copied
+ * anywhere: an extension host that base64-encoded one first would spend a second and a
+ * gigabyte doing it, and on a big enough file would run out of heap and take the whole
+ * extension host down with it.
+ */
+export function fileTooBig(name: string, byteLength: number, maxBytes: number): string {
+  return `${name} is ${byteLength} bytes; at most ${maxBytes} can be read here`;
 }
 
 /** Handle one message from a webview transport on the host side. */
@@ -236,8 +290,65 @@ export async function serveTransport(
     case 'openText':
       backend.openText?.(message.content, message.language, message.title);
       return;
+    case 'pickFile':
+      await answer(
+        message.id,
+        backend.pickFile,
+        { title: message.title, filters: message.filters, maxBytes: message.maxBytes },
+        reply,
+        (file) => {
+          if (!file) {
+            return null;
+          }
+          if (file.bytes.length > message.maxBytes) {
+            throw new Error(fileTooBig(file.name, file.bytes.length, message.maxBytes));
+          }
+          return { name: file.name, bytes: bytesToBase64(file.bytes) };
+        },
+      );
+      return;
+    case 'saveFile':
+      await answer(
+        message.id,
+        backend.saveFile,
+        {
+          title: message.title,
+          suggestedName: message.suggestedName,
+          filters: message.filters,
+          bytes: base64ToBytes(message.bytes),
+        },
+        reply,
+        (kept) => kept,
+      );
+      return;
     case 'showPanel':
       backend.showPanel?.(message.panel);
       return;
+  }
+}
+
+/**
+ * Run one of the optional file-dialog capabilities and answer the message that asked
+ * for it, with `wire` putting what it returned in the shape the message union declares —
+ * a file's bytes cross base64-encoded, the way the ones going out do. A host without
+ * the capability answers so rather than leaving the webview waiting.
+ */
+async function answer<A, R>(
+  id: number,
+  capability: ((options: A) => Promise<R>) | undefined,
+  options: A,
+  reply: (message: HostToTransport) => void,
+  wire: (answer: R) => unknown,
+): Promise<void> {
+  if (!capability) {
+    reply({ type: 'response', id, error: NO_FILE_DIALOG });
+    return;
+  }
+  try {
+    // `wire` runs inside the try: a file a capability should not have handed over at all
+    // is refused there, and refusing is an answer like any other
+    reply({ type: 'response', id, body: wire(await capability(options)) });
+  } catch (err) {
+    reply({ type: 'response', id, error: (err as Error).message });
   }
 }

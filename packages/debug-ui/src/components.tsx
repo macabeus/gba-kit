@@ -1,6 +1,6 @@
 /** Small building blocks the panels share. */
 import type { TimeStamp } from '@gba-kit/debug-core';
-import { type ReactNode, useMemo, useRef } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 
 import { usePixels } from './hooks.js';
 import { base64ToBytes } from './render.js';
@@ -45,6 +45,7 @@ export type IconName =
   | 'debug-step-over'
   | 'debug-stop'
   | 'edit'
+  | 'ellipsis'
   | 'go-to-file'
   | 'mute'
   | 'play'
@@ -103,6 +104,130 @@ export function Button({
     >
       {children}
     </button>
+  );
+}
+
+/** Where a key moves the focus in a menu of `count` items: an index, or -1 when it does not move it. */
+export function menuFocus(key: string, from: number, count: number): number {
+  if (count === 0) {
+    return -1;
+  }
+  switch (key) {
+    case 'ArrowDown':
+      return (from + 1) % count;
+    case 'ArrowUp':
+      return (from + count - 1) % count;
+    case 'Home':
+      return 0;
+    case 'End':
+      return count - 1;
+    default:
+      return -1;
+  }
+}
+
+/**
+ * A button that opens a short list of actions under itself. The trigger is the editor's
+ * own toolbar button, so it sits beside one; the list closes as soon as focus leaves it,
+ * which covers a click elsewhere, Tab and Escape alike without listening to the whole
+ * document. It is `hidden` rather than unmounted while shut, so the items are there to
+ * be focused the moment it opens — and nothing hidden can be focused or read out.
+ */
+export function Menu({
+  label,
+  items,
+  disabled,
+}: {
+  label: string;
+  items: Array<{ label: string; onSelect: () => void; disabled?: boolean }>;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  /** the item to put the focus on once the list is open, since a hidden one takes none */
+  const [focusAt, setFocusAt] = useState<number | null>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+
+  const buttons = (): HTMLButtonElement[] => [...(list.current?.querySelectorAll('button') ?? [])];
+
+  useEffect(() => {
+    if (focusAt !== null) {
+      buttons()[focusAt]?.focus();
+      setFocusAt(null);
+    }
+  }, [focusAt]);
+
+  return (
+    <div
+      className="gk-menu"
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget)) {
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        type="button"
+        ref={trigger}
+        className="gk-button gk-icon-button"
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={label}
+        title={label}
+        onClick={() => setOpen(!open)}
+        onKeyDown={(e) => {
+          // Escape reaches the list's handler only once the focus is in it, so the
+          // trigger closes what it opened
+          if (e.key === 'Escape') {
+            setOpen(false);
+            return;
+          }
+          if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') {
+            return;
+          }
+          e.preventDefault();
+          setOpen(true);
+          setFocusAt(e.key === 'ArrowDown' ? 0 : items.length - 1);
+        }}
+      >
+        <Icon name="ellipsis" />
+      </button>
+      <div
+        className="gk-menu-list"
+        role="menu"
+        ref={list}
+        hidden={!open}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            setOpen(false);
+            trigger.current?.focus();
+            return;
+          }
+          const to = menuFocus(e.key, buttons().indexOf(e.target as HTMLButtonElement), items.length);
+          if (to >= 0) {
+            e.preventDefault();
+            buttons()[to]?.focus();
+          }
+        }}
+      >
+        {items.map((item) => (
+          <button
+            type="button"
+            role="menuitem"
+            key={item.label}
+            className="gk-menu-item"
+            disabled={item.disabled}
+            onClick={() => {
+              setOpen(false);
+              item.onSelect();
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

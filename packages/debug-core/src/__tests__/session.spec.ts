@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { type Host, type HostFiles, ManualHost } from '../host.js';
 import { Machine } from '../machine.js';
 import { Session, type SessionState, type StopInfo } from '../session.js';
+import { decodeSaveState, encodeTypedArrays } from '../snapshot-codec.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = join(here, '..', '..', 'test-fixtures');
@@ -1927,4 +1928,138 @@ describe.each(VARIANTS)('the call stack on %s', (variant) => {
     expect(h.session.callStack().map((f) => f.name)).toEqual(['main']);
     expect(h.session.stack().end).toMatch(/saved return address reads 0/);
   });
+});
+
+/**
+ * Importing a `.sav` as a state, on ROMs that declare a save. The fixture declares
+ * none, so each test appends the SDK string a build would have embedded — `loadRom`
+ * only scans the bytes it is handed, and the string sits past the code.
+ */
+describe('a .sav as a save state', () => {
+  /** The fixture ROM with `id` appended, word-aligned the way a build leaves it. */
+  function romDeclaring(id: string): Uint8Array {
+    const base = fixture('thumb-O0').rom;
+    const at = (base.length + 3) & ~3;
+    const rom = new Uint8Array(at + id.length + 4);
+    rom.set(base);
+    for (let i = 0; i < id.length; i++) {
+      rom[at + i] = id.charCodeAt(i);
+    }
+    return rom;
+  }
+
+  async function sessionFor(id: string): Promise<Session> {
+    return Session.create(new ManualHost(), {
+      rom: romDeclaring(id),
+      elf: fixture('thumb-O0').elf,
+      cwd: fixtures,
+      exists: () => true,
+    });
+  }
+
+  function savOf(length: number): Uint8Array {
+    return Uint8Array.from({ length }, (_, i) => (i * 11 + 5) & 0xff);
+  }
+
+  it('declares what was appended, and the appendix changes nothing about the run', async () => {
+    const plain = await boot('thumb-O0');
+    plain.run(20);
+    const declared = await sessionFor('EEPROM_V121');
+    expect(declared.machine.gba.bus.save).toEqual({ type: 'eeprom', id: 'EEPROM_V121' });
+    for (let i = 0; i < 20; i++) {
+      declared.machine.runFrame();
+    }
+    expect(declared.pc).toBe(plain.session.pc);
+  });
+
+  it('is a power-on machine with the save installed, at frame 0', async () => {
+    const session = await sessionFor('EEPROM_V121');
+    const sav = savOf(512);
+    const { snapshot, meta } = decodeSaveState(session.importSaveState(sav, 'Klonoa'));
+    expect(meta.frame).toBe(0);
+    expect(meta.name).toBe('Klonoa');
+    expect(meta.romHash).toBe(session.romHash);
+    expect(snapshot.cpu.registers[15]).toBe(0x08000000);
+    expect(snapshot.bus.eeprom.data.subarray(0, 512)).toEqual(sav);
+    // the cartridge settles the address width from its own first read, so nothing has yet
+    expect(snapshot.bus.eeprom.addrBits).toBe(0);
+    expect(snapshot.bus.eeprom.installedBytes).toBe(512);
+  });
+
+  it('leaves the machine being debugged exactly as it was', async () => {
+    const session = await sessionFor('EEPROM_V121');
+    for (let i = 0; i < 12; i++) {
+      session.machine.runFrame();
+    }
+    session.resync();
+    const before = JSON.stringify(encodeTypedArrays(session.machine.snapshot()));
+    const seen: string[] = [];
+    session.on({ stopped: () => seen.push('stopped'), continued: () => seen.push('continued') });
+    const was = {
+      revision: session.revision,
+      epoch: session.epoch,
+      state: session.state,
+      frame: session.frame,
+      history: JSON.stringify(session.historyInfo()),
+    };
+
+    session.importSaveState(savOf(512), 'x');
+
+    expect(JSON.stringify(encodeTypedArrays(session.machine.snapshot()))).toBe(before);
+    expect({
+      revision: session.revision,
+      epoch: session.epoch,
+      state: session.state,
+      frame: session.frame,
+      history: JSON.stringify(session.historyInfo()),
+    }).toEqual(was);
+    expect(seen).toEqual([]);
+  });
+
+  it('loads into a machine whose cartridge holds the file', async () => {
+    const session = await sessionFor('EEPROM_V121');
+    const sav = savOf(512);
+    session.loadState(session.importSaveState(sav, 'Klonoa'));
+    expect(session.frame).toBe(0);
+    expect(session.machine.gba.bus.readBackup()!.subarray(0, 512)).toEqual(sav);
+    expect(session.exportSaveFile()).toEqual(sav);
+  });
+
+  it('puts an SRAM file in the SRAM window, at the size the declaration gives', async () => {
+    const session = await sessionFor('SRAM_V113');
+    const sav = savOf(32768);
+    session.loadState(session.importSaveState(sav, 'x'));
+    expect(session.machine.gba.bus.sram.subarray(0, 32768)).toEqual(sav);
+    expect(session.exportSaveFile()).toEqual(sav);
+  });
+
+  it('refuses a file the cartridge cannot account for, and touches nothing doing it', async () => {
+    const session = await sessionFor('EEPROM_V121');
+    const before = JSON.stringify(encodeTypedArrays(session.machine.snapshot()));
+    expect(() => session.importSaveState(savOf(32768), 'x')).toThrow(
+      'this ROM declares EEPROM_V121, whose save is 512 or 8192 bytes; this file is 32768 bytes',
+    );
+    expect(JSON.stringify(encodeTypedArrays(session.machine.snapshot()))).toBe(before);
+  });
+
+  it('has no size for an EEPROM cartridge nothing has addressed yet', async () => {
+    const session = await sessionFor('EEPROM_V121');
+    expect(() => session.exportSaveFile()).toThrow(/4 Kbit or 64 Kbit/);
+  });
+
+  it('exports 8192 bytes of a 64 Kbit EEPROM', async () => {
+    const session = await sessionFor('EEPROM_V121');
+    const sav = savOf(8192);
+    session.loadState(session.importSaveState(sav, 'x'));
+    expect(session.exportSaveFile()).toEqual(sav);
+  });
+
+  it.each(['FLASH_V126', 'FLASH512_V130', 'FLASH1M_V103'])(
+    'refuses a %s cartridge in both directions, since no game could read the save back',
+    async (id) => {
+      const session = await sessionFor(id);
+      expect(() => session.importSaveState(savOf(65536), 'x')).toThrow(/emulates no flash chip/);
+      expect(() => session.exportSaveFile()).toThrow(/emulates no flash chip/);
+    },
+  );
 });

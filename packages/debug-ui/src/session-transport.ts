@@ -10,6 +10,7 @@ import {
   EVENT_BREAKPOINT_KINDS,
   type InputRecording,
   type Session,
+  freeStateName,
   renameSaveState,
   saveStateMeta,
 } from '@gba-kit/debug-core';
@@ -30,6 +31,7 @@ import {
 } from '@gba-kit/debug-core/protocol';
 
 import type { PanelId } from './panels/DebugPanels.js';
+import { base64ToBytes, bytesToBase64 } from './render.js';
 import type { ControlAction, Transport } from './transport.js';
 
 export interface SessionTransportOptions {
@@ -46,6 +48,8 @@ export interface SessionTransportOptions {
     remove?(nameOrPath: string): Promise<boolean>;
   };
   openText?: Transport['openText'];
+  pickFile?: Transport['pickFile'];
+  saveFile?: Transport['saveFile'];
 }
 
 /** What a client is told about a saved state, read back from the state itself. */
@@ -66,6 +70,22 @@ export function createSessionTransport(session: Session, options: SessionTranspo
   const memoryStates = new Map<string, { text: string; frame: number; createdAt: string }>();
   const labelListeners = new Set<() => void>();
   const panelListeners = new Set<(panel: PanelId) => void>();
+  /** imports queue here: two of them looking for a free name at once would both take the same one */
+  let importing: Promise<unknown> = Promise.resolve();
+
+  /** A `.sav` as a state under a name no state already has, written wherever states go. */
+  async function importSave(bytes: Uint8Array, name?: string): Promise<SavedStateInfo> {
+    const stateName = await freeStateName(name?.trim() || 'imported save', async (candidate) =>
+      options.states ? (await options.states.load(candidate)) !== null : memoryStates.has(candidate),
+    );
+    const text = session.importSaveState(bytes, stateName);
+    const createdAt = new Date().toISOString();
+    const path = options.states ? await options.states.save(stateName, text, 0) : stateName;
+    if (!options.states) {
+      memoryStates.set(stateName, { text, frame: 0, createdAt });
+    }
+    return { ...stateInfoOf(stateName, path, text), createdAt };
+  }
 
   const state = (): StateBody => ({
     state: session.state,
@@ -242,6 +262,15 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         }
         return { deleted: memoryStates.delete(key) } as never;
       }
+      case 'gba-kit/importSave': {
+        const { bytes, name } = a as A<'gba-kit/importSave'>;
+        const done = importing.then(() => importSave(base64ToBytes(bytes), name));
+        // one import failing does not free the next of its turn, so the queue keeps a settled promise
+        importing = done.catch(() => undefined);
+        return (await done) as never;
+      }
+      case 'gba-kit/exportSave':
+        return { bytes: bytesToBase64(session.exportSaveFile()) } as never;
       case 'gba-kit/ppu':
         return ppuBody(session, a as PpuArguments) as never;
       case 'gba-kit/ioRegisters':
@@ -336,6 +365,8 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       return () => labelListeners.delete(listener);
     },
     openText: options.openText,
+    pickFile: options.pickFile,
+    saveFile: options.saveFile,
     showPanel(panel) {
       panelListeners.forEach((l) => l(panel));
     },
