@@ -1,5 +1,6 @@
 ---
 '@gba-kit/gba-emulator': minor
+'@gba-kit/gba-node': minor
 '@gba-kit/debug-core': minor
 '@gba-kit/debug-adapter': minor
 '@gba-kit/debug-ui': minor
@@ -22,7 +23,14 @@ message that names both rather than being padded or truncated into the wrong chi
 A flash cartridge is refused in both directions: gba-kit backs the cartridge with
 plain memory and emulates no flash chip, so a game's identify sequence goes
 unanswered and it never reads the save — while the command bytes it writes land in
-the save as data.
+the save as data. That covers 1 Mbit flash too, which would also need bank
+switching the single 64 KB window has no room for.
+
+An export is the size the cartridge really has: 32768 bytes for SRAM, and 512 or
+8192 for EEPROM according to the width the game addressed with, not the 8 KB the
+array always occupies. An EEPROM the game has not read or written yet has told
+nobody which of the two it is, so exporting one is refused rather than guessed —
+run the game until it touches its save, or import a `.sav` first.
 
 Three fixes in the emulator come with it:
 
