@@ -1,5 +1,14 @@
 # @gba-kit/gba-browser
 
+## 0.8.0
+
+### Patch Changes
+
+- Updated dependencies [b61449b]
+- Updated dependencies [e4b0be4]
+  - @gba-kit/arm-emulator@0.8.0
+  - @gba-kit/gba-emulator@0.8.0
+
 ## 0.7.0
 
 ### Patch Changes
