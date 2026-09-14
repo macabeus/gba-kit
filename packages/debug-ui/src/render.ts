@@ -1,6 +1,7 @@
 /**
  * Pixel helpers for the PPU views, pure so a test can check them without a canvas:
- * palette indices → RGBA for tiles, a tilemap, and a sprite.
+ * palette indices → RGBA for tiles, a tilemap, and a sprite. The base64 pair every
+ * other module here converts bytes with lives alongside them.
  */
 import type { SpriteInfo, TilemapEntry } from '@gba-kit/debug-core';
 
@@ -12,6 +13,22 @@ export function unpackRgb(color: number): [number, number, number] {
 /** 0xRRGGBB → CSS. */
 export function cssColor(color: number): string {
   return `#${(color & 0xffffff).toString(16).padStart(6, '0')}`;
+}
+
+/**
+ * Base64 the browser's way, which is every debug-ui module's way: `@gba-kit/debug-core`
+ * has a pair of its own, but it exports them from an index that carries the emulator
+ * with it, and `transport.js` is a module an extension host imports on its own.
+ *
+ * Bytes go over a character at a time: a `.sav` runs to six figures of bytes, and
+ * spreading that into `String.fromCharCode` is as many arguments as the call stack holds.
+ */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
 }
 
 export function base64ToBytes(text: string): Uint8Array {

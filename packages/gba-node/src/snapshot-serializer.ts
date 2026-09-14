@@ -65,6 +65,7 @@ export function serializeSnapshot(snap: GbaSnapshot): any {
       eeprom: {
         data: typedArrayToBase64(snap.bus.eeprom.data),
         addrBits: snap.bus.eeprom.addrBits,
+        installedBytes: snap.bus.eeprom.installedBytes,
         state: snap.bus.eeprom.state,
         command: snap.bus.eeprom.command,
         address: snap.bus.eeprom.address,
@@ -138,6 +139,7 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
       eeprom: {
         data: base64ToUint8Array(data.bus.eeprom.data),
         addrBits: data.bus.eeprom.addrBits,
+        installedBytes: data.bus.eeprom.installedBytes,
         state: data.bus.eeprom.state,
         command: data.bus.eeprom.command,
         address: data.bus.eeprom.address,

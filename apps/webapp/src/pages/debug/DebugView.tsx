@@ -9,6 +9,7 @@ import { DebugPanels, ScreenPanel, createSessionTransport } from '@gba-kit/debug
 import clsx from 'clsx';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
+import { pickFile, saveFile } from '../../session/file-dialog';
 import { BreakpointPanel } from './BreakpointPanel';
 import { DisassemblyView } from './DisassemblyView';
 import { MemoryViewer } from './MemoryViewer';
@@ -37,7 +38,10 @@ function openText(content: string, language: string): void {
 
 export function DebugView({ session, revision, error, onElfLoad }: DebugViewProps) {
   const [centerPanel, setCenterPanel] = useState<CenterPanel>('disassembly');
-  const transport = useMemo(() => (session ? createSessionTransport(session, { openText }) : null), [session]);
+  const transport = useMemo(
+    () => (session ? createSessionTransport(session, { openText, pickFile, saveFile }) : null),
+    [session],
+  );
 
   // Instruction breakpoints live in the session, which outlives this view: the list
   // is read from it, never kept here, so a remount shows what was set before.

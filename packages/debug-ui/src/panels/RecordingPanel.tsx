@@ -30,13 +30,13 @@ export function RecordingPanel({ transport }: { transport: Transport }) {
   );
   const takes = listed.data?.takes ?? [];
 
-  const toggle = (): Promise<void> =>
+  const toggle = (): Promise<unknown> =>
     run(() => transport.request(recording ? 'gba-kit/recordStop' : 'gba-kit/recordStart'));
 
-  const remove = (take: TakeBody): Promise<void> =>
+  const remove = (take: TakeBody): Promise<unknown> =>
     run(() => transport.request('gba-kit/deleteRecording', { id: take.id }), listed.refresh);
 
-  const replay = (take: TakeBody, from: 'start' | 'here'): Promise<void> =>
+  const replay = (take: TakeBody, from: 'start' | 'here'): Promise<unknown> =>
     run(async () => {
       const { replayed } = await transport.request('gba-kit/replay', { id: take.id, recording: take.recording, from });
       if (!replayed) {

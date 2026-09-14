@@ -54,6 +54,52 @@ export interface WatchpointRead {
   dmaOrigin: WriteOrigin | null;
 }
 
+/** The kinds of battery-backed save a cartridge can declare. */
+export type SaveType = 'eeprom' | 'sram' | 'flash512' | 'flash1m';
+
+/** What a cartridge's ROM says about its save, from the SDK string the build embeds. */
+export interface CartridgeSave {
+  /** null when the ROM declares nothing, as homebrew usually does */
+  type: SaveType | null;
+  /** the string as it stands in the ROM (`EEPROM_V121`, `FLASH1M_V103`), so a message can name it */
+  id: string | null;
+}
+
+/** The SDK's save-type strings; no one of them is a prefix of another, so the order is free. */
+const SAVE_TYPE_STRINGS: ReadonlyArray<readonly [string, SaveType]> = [
+  ['EEPROM_V', 'eeprom'],
+  ['SRAM_F_V', 'sram'],
+  ['SRAM_V', 'sram'],
+  ['FLASH1M_V', 'flash1m'],
+  ['FLASH512_V', 'flash512'],
+  ['FLASH_V', 'flash512'],
+];
+
+/** The shortest declaration there could be, so the scan stops once no room is left for one. */
+const MIN_SAVE_ID = Math.min(...SAVE_TYPE_STRINGS.map(([prefix]) => prefix.length)) + 3;
+
+/** The EEPROM chip's array: 64 Kbit, which a 4 Kbit cartridge uses the first 512 bytes of. */
+const EEPROM_BYTES = 0x2000;
+
+function matchesAt(rom: Uint8Array, at: number, text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    if (rom[at + i] !== text.charCodeAt(i)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function digitsAt(rom: Uint8Array, at: number, count: number): boolean {
+  for (let i = 0; i < count; i++) {
+    const byte = rom[at + i] ?? 0;
+    if (byte < 0x30 || byte > 0x39) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export class GbaSystemBus implements MemoryBus {
   /** BIOS ROM (16 KB) — set via loadBios() */
   #bios = new Uint8Array(0x4000);
@@ -82,7 +128,10 @@ export class GbaSystemBus implements MemoryBus {
   /** Game Pak EEPROM */
   readonly #eeprom = new GbaEeprom();
 
-  /** Whether SRAM is present (auto-detected from ROM save type string) */
+  /** What the cartridge's ROM declares about its save; cartridge identity, like #rom */
+  #save: CartridgeSave = { type: null, id: null };
+
+  /** Whether the 0x0E window is backed by a chip: every save type but EEPROM, which is serial */
   #hasSram = false;
 
   /** WAITCNT register */
@@ -262,38 +311,76 @@ export class GbaSystemBus implements MemoryBus {
     this.#detectSaveType(data);
   }
 
-  /** Auto-detect save type from ROM SDK strings */
+  /**
+   * The save type from the SDK string the build embeds. The string is word-aligned and
+   * ends in three version digits, and requiring both is what keeps a chance run of
+   * letters elsewhere in the ROM — inside compressed data, most of all — from being
+   * read as a declaration.
+   */
   #detectSaveType(rom: Uint8Array): void {
-    // Search for save type identifier strings in ROM
-    // Games built with the official SDK embed these strings
-    const sramPattern = [0x53, 0x52, 0x41, 0x4d, 0x5f, 0x56]; // "SRAM_V"
-    const flashPattern = [0x46, 0x4c, 0x41, 0x53, 0x48]; // "FLASH"
-
-    this.#hasSram = false;
-    for (let i = 0; i < rom.length - 6; i++) {
-      if (
-        rom[i] === sramPattern[0] &&
-        rom[i + 1] === sramPattern[1] &&
-        rom[i + 2] === sramPattern[2] &&
-        rom[i + 3] === sramPattern[3] &&
-        rom[i + 4] === sramPattern[4] &&
-        rom[i + 5] === sramPattern[5]
-      ) {
-        this.#hasSram = true;
-        return;
-      }
-      if (
-        rom[i] === flashPattern[0] &&
-        rom[i + 1] === flashPattern[1] &&
-        rom[i + 2] === flashPattern[2] &&
-        rom[i + 3] === flashPattern[3] &&
-        rom[i + 4] === flashPattern[4]
-      ) {
-        // Flash-based save also uses SRAM region
-        this.#hasSram = true;
+    this.#save = { type: null, id: null };
+    for (let i = 0; i + MIN_SAVE_ID <= rom.length; i += 4) {
+      for (const [prefix, type] of SAVE_TYPE_STRINGS) {
+        if (!matchesAt(rom, i, prefix) || !digitsAt(rom, i + prefix.length, 3)) {
+          continue;
+        }
+        this.#save = { type, id: String.fromCharCode(...rom.subarray(i, i + prefix.length + 3)) };
+        this.#hasSram = type !== 'eeprom';
         return;
       }
     }
+    this.#hasSram = false;
+  }
+
+  /** What the cartridge's ROM declares about its battery-backed save. */
+  get save(): CartridgeSave {
+    return this.#save;
+  }
+
+  /**
+   * How many bytes the cartridge's EEPROM holds — 512 for 4 Kbit, 8192 for 64 Kbit —
+   * or 0 while nothing has said which of the two it is.
+   */
+  get eepromSaveBytes(): number {
+    return this.#eeprom.saveBytes;
+  }
+
+  /**
+   * The cartridge's battery-backed memory, whole, in the byte order a `.sav` file uses:
+   * the EEPROM for an EEPROM cartridge, the SRAM window for every other kind. A copy —
+   * unlike a read through the bus, this clocks no serial protocol. Null when the ROM
+   * declares no save, because then there is no chip to read.
+   */
+  readBackup(): Uint8Array | null {
+    switch (this.#save.type) {
+      case null:
+        return null;
+      case 'eeprom':
+        return this.#eeprom.read8();
+      default:
+        return new Uint8Array(this.sram);
+    }
+  }
+
+  /**
+   * Install a `.sav` as the cartridge's battery-backed memory, filling what `bytes` does
+   * not reach with the value an erased chip holds. Which files belong in which chip is
+   * settled before here: this refuses only what it cannot hold at all.
+   */
+  writeBackup(bytes: Uint8Array): void {
+    if (this.#save.type === null) {
+      throw new Error('this ROM declares no save type');
+    }
+    const target = this.#save.type === 'eeprom' ? EEPROM_BYTES : this.sram.length;
+    if (bytes.length > target) {
+      throw new Error(`${bytes.length} bytes do not fit in ${target}`);
+    }
+    if (this.#save.type === 'eeprom') {
+      this.#eeprom.install(bytes);
+      return;
+    }
+    this.sram.fill(0);
+    this.sram.set(bytes);
   }
 
   // ─── Memory Map Classification ────────────────────────────────────
@@ -1195,7 +1282,8 @@ export class GbaSystemBus implements MemoryBus {
     this.oam.set(snap.oam);
     this.sram.set(snap.sram);
     this.mmioRegisters.set(snap.mmioRegisters);
-    this.#hasSram = snap.hasSram;
+    // `snap.hasSram` is passed over: what is behind the 0x0E window is the cartridge's to
+    // say, like #rom, and a state of a cartridge without one must not take this one's away
     this.#waitcnt = snap.waitcnt;
     this.#postflg = snap.postflg;
     this.#lastBiosRead = snap.lastBiosRead;
@@ -1224,7 +1312,9 @@ export class GbaSystemBus implements MemoryBus {
  * GBA EEPROM — Serial EEPROM accessed via DMA at address region 0x0D.
  *
  * Supports both 4Kbit (512 bytes, 6-bit address) and 64Kbit (8KB, 14-bit address).
- * Auto-detects size based on address length in the first write command.
+ * Which of the two a cartridge is, only the cartridge says: the length of the read
+ * request it makes carries the address width, and a write takes 4Kbit until a read
+ * has said otherwise.
  *
  * Protocol:
  * - Write command: 1,0, <address>, <64 data bits>, 0 (stop)
@@ -1243,10 +1333,13 @@ const enum EepromState {
 
 class GbaEeprom {
   /** EEPROM data — 8KB max (64Kbit). 4Kbit uses only first 512 bytes. */
-  readonly #data = new Uint8Array(0x2000);
+  readonly #data = new Uint8Array(EEPROM_BYTES);
 
   /** Address bit length: 6 for 4Kbit, 14 for 64Kbit. 0 = not yet detected. */
   #addrBits = 0;
+
+  /** How long an installed `.sav` was, which stands in for the chip's size until a transfer settles it. */
+  #installedBytes = 0;
 
   #state: EepromState = EepromState.Idle;
   #command = 0; // 0=write, 1=read
@@ -1259,6 +1352,12 @@ class GbaEeprom {
   reset(): void {
     this.#data.fill(0xff); // EEPROM defaults to all 1s
     this.#addrBits = 0;
+    this.#installedBytes = 0;
+    this.#idle();
+  }
+
+  /** Nothing in flight on the serial line: no half-clocked command carries over. */
+  #idle(): void {
     this.#state = EepromState.Idle;
     this.#command = 0;
     this.#address = 0;
@@ -1272,6 +1371,7 @@ class GbaEeprom {
     return {
       data: new Uint8Array(this.#data),
       addrBits: this.#addrBits,
+      installedBytes: this.#installedBytes,
       state: this.#state,
       command: this.#command,
       address: this.#address,
@@ -1285,6 +1385,7 @@ class GbaEeprom {
   deserialize(snap: EepromSnapshot): void {
     this.#data.set(snap.data);
     this.#addrBits = snap.addrBits;
+    this.#installedBytes = snap.installedBytes ?? 0;
     this.#state = snap.state as EepromState;
     this.#command = snap.command;
     this.#address = snap.address;
@@ -1292,6 +1393,38 @@ class GbaEeprom {
     this.#bitsReceived = snap.bitsReceived;
     this.#sendBuffer = BigInt(snap.sendBuffer);
     this.#sendPos = snap.sendPos;
+  }
+
+  /**
+   * How many bytes this chip holds: 512 for a 4 Kbit cartridge, 8192 for a 64 Kbit one,
+   * 0 while nothing has said which it is. The address width a transfer settles is what
+   * says it; before any transfer there is only the length of the file someone installed,
+   * which a padded `.sav` overstates — but overstating it is better than having no answer.
+   */
+  get saveBytes(): number {
+    if (this.#addrBits !== 0) {
+      return this.#addrBits === 6 ? 512 : EEPROM_BYTES;
+    }
+    return this.#installedBytes;
+  }
+
+  /** The chip's contents, as a `.sav` file holds them. */
+  read8(): Uint8Array {
+    return new Uint8Array(this.#data);
+  }
+
+  /**
+   * Put a `.sav` in the chip, erased past its end and with nothing in flight on the
+   * line. The address width is left where it was — a file's size is no evidence of it,
+   * since a 4 Kbit save padded out to 8 KB is a file several emulators write, and a
+   * width taken from one is a width the cartridge then has to be wrong about. Only the
+   * length is kept, for `saveBytes` to answer with until a transfer settles the width.
+   */
+  install(bytes: Uint8Array): void {
+    this.#data.fill(0xff);
+    this.#data.set(bytes);
+    this.#installedBytes = bytes.length;
+    this.#idle();
   }
 
   /** Write a single bit to the EEPROM serial interface */
@@ -1316,22 +1449,23 @@ class GbaEeprom {
         this.#address = (this.#address << 1) | bit;
         this.#bitsReceived++;
 
-        // Auto-detect address size: if we've received 6 bits and this is followed
-        // by a stop bit (for read) or data (for write), detect 6-bit addressing.
-        // If more bits come, it's 14-bit addressing.
-        // We detect based on the DMA transfer length:
-        // - 4Kbit read request: 9 bits total (1 start + 1 cmd + 6 addr + 1 stop) = 9 × 16-bit DMA
-        // - 64Kbit read request: 17 bits total (1 start + 1 cmd + 14 addr + 1 stop) = 17 × 16-bit DMA
-        // For auto-detection: use 6-bit if total bits suggests small EEPROM
-        if (this.#addrBits === 0) {
-          // Can't detect yet — assume 6-bit initially, upgrade to 14-bit if we get more
-          if (this.#bitsReceived === 6) {
-            // Could be 6-bit. Will confirm when next state transition happens.
-            // For now, tentatively accept 6 bits.
-            this.#addrBits = 6;
-            this.#finishAddressPhase();
+        // A read's address phase ends when the game turns around and reads, so `read`
+        // closes it and the transfer's own length says how wide the address was. A write
+        // has 64 data bits behind the address and no such turn, so it needs the width up
+        // front: whatever a read has settled, or 4 Kbit while no read has.
+        if (this.#command === 1) {
+          // no chip takes an address this long, so what is coming in is not a request: the
+          // line goes idle for the next start bit to resync it, rather than swallowing
+          // everything after a read the game never came back for
+          if (this.#bitsReceived > 15) {
+            this.#idle();
           }
-        } else if (this.#bitsReceived === this.#addrBits) {
+          break;
+        }
+        if (this.#addrBits === 0) {
+          this.#addrBits = 6;
+        }
+        if (this.#bitsReceived === this.#addrBits) {
           this.#finishAddressPhase();
         }
         break;
@@ -1367,6 +1501,9 @@ class GbaEeprom {
 
   /** Read a single bit from the EEPROM serial interface */
   read(): number {
+    if (this.#state === EepromState.ReceivingAddress && this.#command === 1) {
+      this.#settleAddressWidth();
+    }
     if (this.#state === EepromState.SendingData) {
       if (this.#sendPos < 4) {
         // First 4 bits are dummy (always 0)
@@ -1387,6 +1524,28 @@ class GbaEeprom {
     return 1;
   }
 
+  /**
+   * The game is reading back what it just clocked in, so its read request is whole and
+   * its length is what says how wide this cartridge addresses: 9 bits of request for a
+   * 4 Kbit chip, 17 for a 64 Kbit one, the last of them the stop bit. The cartridge has
+   * the final word on the width, so this is where it is settled.
+   *
+   * A turnaround at any other count is not the end of a request at all — the line is
+   * carrying something it lost the framing of — so the chip goes idle for the next start
+   * bit to pick it up again, rather than staying in an address phase that then eats
+   * every request after it.
+   */
+  #settleAddressWidth(): void {
+    const width = this.#bitsReceived - 1;
+    if (width !== 6 && width !== 14) {
+      this.#idle();
+      return;
+    }
+    this.#addrBits = width;
+    this.#address = (this.#address >>> 1) & ((1 << width) - 1);
+    this.#finishAddressPhase();
+  }
+
   #finishAddressPhase(): void {
     if (this.#command === 1) {
       // Read command: prepare to send data
@@ -1401,10 +1560,15 @@ class GbaEeprom {
     }
   }
 
+  /**
+   * The 64-bit word goes out most significant byte first and the GBA is little-endian,
+   * so the byte the game sends first is the last of the eight in memory — which is
+   * where a `.sav` file keeps it too, and why `#data` is one.
+   */
   #loadReadData(): void {
     const byteAddr = this.#address * 8;
     this.#sendBuffer = 0n;
-    for (let i = 0; i < 8; i++) {
+    for (let i = 7; i >= 0; i--) {
       const byte = this.#data[byteAddr + i] ?? 0xff;
       this.#sendBuffer = (this.#sendBuffer << 8n) | BigInt(byte);
     }
@@ -1416,9 +1580,10 @@ class GbaEeprom {
       this.#state = EepromState.WriteReady;
       return;
     }
+    // the first byte the game clocked in is the last of the eight, the order
+    // `#loadReadData` sends them back in and a `.sav` file keeps them
     for (let i = 0; i < 8; i++) {
-      const shift = BigInt((7 - i) * 8);
-      this.#data[byteAddr + i] = Number((this.#bitBuffer >> shift) & 0xffn);
+      this.#data[byteAddr + i] = Number((this.#bitBuffer >> BigInt(i * 8)) & 0xffn);
     }
     this.#state = EepromState.WriteReady;
   }

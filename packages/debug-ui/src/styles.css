@@ -415,6 +415,47 @@
   margin-bottom: 2px;
 }
 
+/* ─── menu ───────────────────────────────────────────────────────── */
+.gk-menu {
+  position: relative;
+  display: inline-flex;
+}
+.gk-menu-list {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 5;
+  min-width: 190px;
+  display: flex;
+  flex-direction: column;
+  padding: 2px;
+  background: var(--gk-panel-solid);
+  border: 1px solid var(--gk-border);
+  border-radius: var(--gk-radius);
+}
+.gk-menu-list[hidden] {
+  display: none;
+}
+.gk-menu-item {
+  padding: 4px 8px;
+  color: var(--gk-fg);
+  background: none;
+  border: 0;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.gk-menu-item:hover:not(:disabled) {
+  background: var(--gk-accent-bg);
+}
+.gk-menu-item:disabled {
+  color: var(--gk-dim);
+  cursor: default;
+}
+
 /* ─── save state drawer ──────────────────────────────────────────── */
 .gk-drawer {
   display: flex;

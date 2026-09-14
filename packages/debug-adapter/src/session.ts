@@ -25,8 +25,11 @@ import {
   type StackFrame,
   type StopInfo,
   type VarNode,
+  base64ToBytes,
+  bytesToBase64,
   decodeTake,
   encodeTake,
+  freeStateName,
   hex8,
   regionOf,
   renameSaveState,
@@ -234,9 +237,27 @@ function registerIndex(name: string): number {
   return i >= 0 && i <= 15 ? i : -1;
 }
 
-/** A state name as a file name: anything a path could not carry becomes `_`. */
+/** How much of a state's name its file carries. */
+const NAME_LIMIT = 80;
+
+/** ` (999)` becomes `_999_`: the longest mark `freeStateName` ever puts on a repeated name. */
+const REPEAT_MARK_LIMIT = 5;
+
+/**
+ * A state name as a file name: anything a path could not carry becomes `_`, and nothing
+ * longer than `NAME_LIMIT` comes back. A long name keeps the `(2)`, `(3)`… an import
+ * numbers a repeat with — it is what tells the files apart, so shortening takes from the
+ * middle rather than the end. A longer run of digits than a mark could be is part of the
+ * name rather than a mark, and goes the way of the rest of the tail.
+ */
 function safeName(name: string): string {
-  return name.replace(/[^\w.-]+/g, '_').slice(0, 80);
+  const safe = name.replace(/[^\w.-]+/g, '_');
+  if (safe.length <= NAME_LIMIT) {
+    return safe;
+  }
+  const mark = /_\d+_?$/.exec(safe)?.[0] ?? '';
+  const repeat = mark.length <= REPEAT_MARK_LIMIT ? mark : '';
+  return safe.slice(0, NAME_LIMIT - repeat.length) + repeat;
 }
 
 function fileKind(file: string): 'file' | 'directory' | 'missing' {
@@ -291,6 +312,8 @@ export class GbaDebugSession extends DebugSession {
   #clientTakesInvalidated = false;
   /** the stop the machine is sitting on, so `gba-kit/state` can say what it was */
   #lastStop: StopInfo | null = null;
+  /** imports queue here: two of them looking for a free name at once would both take the same one */
+  #importing: Promise<unknown> = Promise.resolve();
   /** while set, session events queue here so a response can go out first */
   #deferred: DebugProtocol.Event[] | null = null;
   readonly #breakpoints: BreakpointSet = { source: new Map(), functions: [], instructions: [], data: [], events: [] };
@@ -1417,6 +1440,12 @@ export class GbaDebugSession extends DebugSession {
         return this.#renameState(s, args as Args<'gba-kit/renameState'>);
       case 'gba-kit/deleteState':
         return { deleted: await this.#deleteState(s, args as Args<'gba-kit/deleteState'>) };
+      case 'gba-kit/importSave': {
+        const a = args as Args<'gba-kit/importSave'>;
+        return this.#importSave(s, base64ToBytes(needString(a.bytes, 'bytes')), optionalString(a.name, 'name'));
+      }
+      case 'gba-kit/exportSave':
+        return { bytes: bytesToBase64(s.exportSaveFile()) };
       case 'gba-kit/ppu':
         return ppuBody(s, args as PpuArguments);
       case 'gba-kit/ioRegisters':
@@ -1580,8 +1609,35 @@ export class GbaDebugSession extends DebugSession {
   }
 
   /**
-   * The file a saved state names, by name or by a path `saveState` / `listStates`
-   * gave out. Only the states directory is reached: a state name is the request's
+   * A `.sav` as a state file, under a name no state already has: importing the same
+   * file twice keeps both rather than writing over the first. Imports wait for one
+   * another, since choosing a free name and writing it are two steps and a second import
+   * running between them would be told the same name is free. Nothing about the session's
+   * execution moves, so no client sees a stop it did not cause.
+   */
+  async #importSave(session: Session, bytes: Uint8Array, name?: string): Promise<SavedStateInfo> {
+    const done = this.#importing.then(() => this.#writeImportedSave(session, bytes, name));
+    // one import failing does not free the next of its turn, so the queue keeps a settled promise
+    this.#importing = done.catch(() => undefined);
+    return done;
+  }
+
+  async #writeImportedSave(session: Session, bytes: Uint8Array, name?: string): Promise<SavedStateInfo> {
+    const files = this.#files(session);
+    const stateName = await freeStateName(
+      name?.trim() || 'imported save',
+      async (candidate) => (await files.readText(this.#statePath(session, candidate)).catch(() => null)) !== null,
+    );
+    const file = this.#statePath(session, stateName);
+    const text = session.importSaveState(bytes, stateName);
+    await files.writeText(file, text);
+    this.#log(`gba-kit: ${bytes.length} bytes imported as state '${stateName}' in ${file}\n`);
+    return savedStateInfo(stateName, file, saveStateMeta(text));
+  }
+
+  /**
+   * The file a saved state names, by name or by a path `saveState`, `importSave` or
+   * `listStates` gave out. Only the states directory is reached: a state name is the request's
    * whole reach into the file system.
    */
   #stateFile(session: Session, args: { name?: unknown; path?: unknown }): string {

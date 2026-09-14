@@ -6,6 +6,7 @@
  */
 export {
   createMessageTransport,
+  fileTooBig,
   serveTransport,
   type ControlAction,
   type Feed,
@@ -26,6 +27,7 @@ export {
   Icon,
   type IconName,
   MAX_ROWS,
+  Menu,
   OmittedRow,
   Panel,
   Screenshot,
@@ -40,7 +42,16 @@ export {
 } from './components.js';
 export { AudioPlayer } from './audio.js';
 export { BUTTONS, GAMEPAD, KEYBOARD, KEYBOARD_HINT, buttonForKey, gamepadMask } from './keys.js';
-export { base64ToBytes, cssColor, hex, spriteToRgba, tilemapToRgba, tilesToRgba, unpackRgb } from './render.js';
+export {
+  base64ToBytes,
+  bytesToBase64,
+  cssColor,
+  hex,
+  spriteToRgba,
+  tilemapToRgba,
+  tilesToRgba,
+  unpackRgb,
+} from './render.js';
 export { ScreenPanel, type ScreenPanelProps } from './panels/ScreenPanel.js';
 export { PalettePanel, PaletteView } from './panels/PalettePanel.js';
 export { TilesPanel, paintTiles, type TileSheet } from './panels/TilesPanel.js';
