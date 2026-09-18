@@ -23,6 +23,23 @@ export interface LabelsFile {
   labels: Array<Omit<Label, 'source'> & { source?: Label['source'] }>;
 }
 
+/**
+ * A typed member path as a name a label can carry: `gEntityInfo[3].xPosBg2` becomes
+ * `gEntityInfo_3_xPosBg2`.
+ *
+ * A label is exported as a `.sym` line and read back by the importer below, whose
+ * names are C identifiers — so a bracketed path written straight into a label leaves
+ * the project on export and is silently skipped on the way back in. The path is what
+ * the memory diff has to offer, and an identifier is what survives the round trip.
+ */
+export function labelName(path: string): string {
+  const name = path
+    .replace(/[^A-Za-z0-9_.$]+/g, '_')
+    .replace(/_+(?=\.)/g, '')
+    .replace(/_+$/, '');
+  return /^[A-Za-z_.$]/.test(name) ? name : `_${name}`;
+}
+
 export class LabelStore {
   readonly #byAddress = new Map<number, Label>();
   readonly #byName = new Map<string, Label>();

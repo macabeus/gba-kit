@@ -37,6 +37,7 @@ export function Panel({
 export type IconName =
   | 'add'
   | 'chevron-down'
+  | 'chevron-left'
   | 'chevron-right'
   | 'debug-continue'
   | 'debug-pause'

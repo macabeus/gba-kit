@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { applySnapshotDelta, decodeDelta, deltaSnapshot, encodeDelta } from '../delta.js';
 import { packSnapshot, unpackSnapshot } from '../delta.js';
+import { DIFF_LIMITS } from '../diff-limits.js';
 import {
   type ExprEnv,
   type ExprHints,
@@ -16,11 +17,11 @@ import {
 } from '../expression.js';
 import { ManualHost } from '../host.js';
 import { ioRegisterAt } from '../io.js';
-import { LabelStore } from '../labels.js';
+import { LabelStore, labelName } from '../labels.js';
 import { RAM_REGIONS, stackBoundFor } from '../machine.js';
-import { CandidateMask, DIFF_LIMITS, MemoryDiff } from '../memory-diff.js';
+import { CandidateMask, MemoryDiff } from '../memory-diff.js';
 import { MuteStore, muteBytes } from '../memory-noise.js';
-import { LOG, TILES, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
+import { LOG, TILES, diffRowBody, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
 import { decodeTake, encodeTake, recordingToScript, toSegments } from '../recorder.js';
 import { Ring } from '../rings.js';
 import { base64ToBytes, bytesToBase64, encodeSaveState } from '../snapshot-codec.js';
@@ -652,6 +653,21 @@ describe('labels', () => {
     expect(copy.size).toBe(2);
     expect(copy.dirty).toBe(false);
   });
+
+  it('a typed member path becomes a name the exporter writes and the importer reads back', () => {
+    // the memory diff's answer is a path, and a `.sym` line's name is a C identifier:
+    // a path written straight in leaves the project on export and never comes back
+    expect(labelName('gEntityInfo[3].xPosBg2')).toBe('gEntityInfo_3.xPosBg2');
+    expect(labelName('g_samples[1]')).toBe('g_samples_1');
+    expect(labelName('[0]')).toBe('_0');
+
+    const store = new LabelStore();
+    store.set({ address: 0x03000abc, label: labelName('g_samples[1]') });
+    store.set({ address: 0x03000ac0, label: labelName('gEntityInfo[3].xPosBg2') });
+    const back = new LabelStore();
+    expect(back.importSymbols(store.exportSymbols())).toBe(2);
+    expect(back.all().map((l) => l.label)).toEqual(['g_samples_1', 'gEntityInfo_3.xPosBg2']);
+  });
 });
 
 describe('source mapper', () => {
@@ -898,19 +914,96 @@ describe('memory diff', () => {
     capture(diff, 'A', { [cursor]: 1, [noisy]: 1 });
 
     expect(diff.apply({ kind: 'tags' }, 1).total).toBe(2);
-    diff.reset();
+
+    // a mute hides candidates where they are reported rather than where they are found,
+    // so it takes effect on the result already on screen — with no filter to run again
     diff.mutes.replaceDiscovered([
       { source: 'idle', ranges: [{ lo: noisy, hi: noisy + 1 }], note: 'moves on its own' },
     ]);
-    const muted = diff.apply({ kind: 'tags' }, 1);
+    const muted = diff.result();
     expect(muted.total).toBe(1);
     expect(muted.hidden).toEqual({ idle: 1 });
     expect(diff.rows(0, 4)[0]!.address).toBe(cursor);
 
-    // a mute is always reversible, and switching it off puts its addresses back
+    // and switching it off puts its addresses back, in the same place
     diff.mutes.setEnabled(diff.mutes.all()[0]!.id, false);
-    diff.reset();
-    expect(diff.apply({ kind: 'tags' }, 1).total).toBe(2);
+    expect(diff.result().total).toBe(2);
+    expect(diff.result().hidden).toEqual({});
+    expect(diff.rows(0, 4).map((r) => r.address)).toEqual([cursor, noisy]);
+  });
+
+  it('the tag filter is refused where no pair of tags could answer it', () => {
+    const diff = new MemoryDiff(context);
+    const cursor = IWRAM.base + 0x40;
+    capture(diff, '', { [cursor]: 1 });
+    capture(diff, '', { [cursor]: 2 });
+    capture(diff, '', { [cursor]: 1 });
+    // untagged captures claim nothing, so the whole of RAM is not the answer to this
+    expect(() => diff.apply({ kind: 'tags' }, 1)).toThrow(/no capture is tagged/);
+
+    diff.retag(diff.captures()[0]!.id, 'A');
+    diff.retag(diff.captures()[2]!.id, 'A');
+    expect(() => diff.apply({ kind: 'tags' }, 1)).toThrow(/every tagged capture is 'A'/);
+
+    // one differing tag is a question, and the capture left untagged takes no part in it
+    diff.retag(diff.captures()[1]!.id, 'B');
+    expect(diff.apply({ kind: 'tags' }, 1).total).toBe(1);
+    expect(diff.rows(0, 4)[0]!.address).toBe(cursor);
+  });
+
+  it('a candidate is ranked against the captures its own filter compared', () => {
+    const diff = new MemoryDiff(context);
+    const scalar = IWRAM.base + 0x40;
+    const buffer = IWRAM.base + 0x100;
+    capture(diff, 'A', {});
+    capture(diff, 'A', {});
+    capture(diff, 'B', {});
+    capture(diff, 'C', { [scalar]: 7, [buffer]: 9, [buffer + 1]: 9, [buffer + 2]: 9, [buffer + 3]: 9 });
+    const [, , third, fourth] = diff.captures();
+
+    diff.apply({ kind: 'changed', from: third!.id, to: fourth!.id }, 1);
+    const rows = new Map(diff.rows(0, 8).map((r) => [r.address, r]));
+    // the first two captures are identical, so ranking against them would call every
+    // candidate a lone byte in still memory and score the buffer like the scalar
+    expect(rows.get(scalar)!.reasons).toContain('a run of 1 changed byte');
+    expect(rows.get(buffer)!.reasons).toContain('a run of 4 changed bytes');
+    expect(rows.get(scalar)!.rank).toBeGreaterThan(rows.get(buffer)!.rank);
+  });
+
+  it('a row body carries every caveat the placement raised, alternatives included', () => {
+    // a union's members cover the same bytes, so the first reading is one reading and
+    // the others have to travel with it — a caveat computed and then dropped is no caveat
+    const body = diffRowBody({
+      address: IWRAM.base + 4,
+      group: 'symbol:g_state',
+      values: [1, 2],
+      rank: 3,
+      reasons: ['a run of 1 changed byte'],
+      placement: {
+        address: IWRAM.base + 4,
+        tier: 'sized',
+        symbol: { name: 'g_state', base: IWRAM.base, offset: 4 },
+        path: 'g_state.split.low',
+        type: { kind: 'base', name: 'u16', size: 2 },
+        alternatives: ['all'],
+        straddles: true,
+      },
+    });
+    expect(body).toMatchObject({
+      group: 'symbol:g_state',
+      path: 'g_state.split.low',
+      type: 'u16',
+      alternatives: ['all'],
+      straddles: true,
+    });
+  });
+
+  it('forgetting a capture that is not there is refused rather than reported as done', () => {
+    const diff = new MemoryDiff(context);
+    capture(diff, 'A', {});
+    const [only] = diff.captures();
+    expect(diff.forget(only!.id).tag).toBe('A');
+    expect(() => diff.forget(only!.id)).toThrow(/no capture/);
   });
 
   it('a discovery replaces what the last one found; what the user muted is theirs', () => {

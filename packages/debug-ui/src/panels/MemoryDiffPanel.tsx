@@ -10,7 +10,8 @@
  *
  * The exact-value search the panel used to be is one of the modes.
  */
-import type { DiffRowBody, SavedStateInfo } from '@gba-kit/debug-core/protocol';
+import type { DiffRowBody, MuteTally, SavedStateInfo } from '@gba-kit/debug-core/protocol';
+import { DIFF, labelName } from '@gba-kit/debug-core/protocol';
 import { useState } from 'react';
 
 import { Button, EditableName, Empty, Icon, Menu, Screenshot, Select, parseNumber } from '../components.js';
@@ -28,6 +29,13 @@ const MODES: Array<{ value: Mode; label: string }> = [
   { value: 'decreased', label: 'Decreased' },
   { value: 'value', label: 'Exact value' },
 ];
+
+/**
+ * How long the noise baseline may watch for. What the run is worth is measured in
+ * candidates left standing, and a game whose churn is slower than the measured one
+ * needs the longer looks, so the choice is the user's rather than a fixed number.
+ */
+const NOISE_CHOICES = [16, 60, 120, 300];
 
 /** What a mute source is called where its byte count is shown. */
 const SOURCES = {
@@ -49,6 +57,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [mutesOpen, setMutesOpen] = useState(false);
+  const [frames, setFrames] = useState<number>(DIFF.noiseFramesDefault);
   const [problem, setProblem] = useState<string | null>(null);
 
   const captures = diff.captures;
@@ -109,12 +118,24 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
     }
   };
 
+  /**
+   * A row action that says so when it fails. Every other control here reports through
+   * the hook's own `run`; these two reach the session directly, and a label or a
+   * breakpoint that was never created must not look like one that was.
+   */
+  const attempt = (what: () => Promise<unknown>): void => {
+    setProblem(null);
+    void what().catch((e: unknown) => setProblem(e instanceof Error ? e.message : String(e)));
+  };
+
   const label = (row: DiffRowBody): void => {
-    void transport.request('gba-kit/setLabel', {
-      address: row.address,
-      label: row.path ?? `gUnk_${row.address.toString(16).padStart(8, '0')}`,
-      size: diff.result?.size ?? size,
-    });
+    attempt(() =>
+      transport.request('gba-kit/setLabel', {
+        address: row.address,
+        label: nameFor(row),
+        size: diff.result?.size ?? size,
+      }),
+    );
   };
 
   const result = diff.result;
@@ -143,12 +164,18 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
           />
         )}
         <Button
-          onClick={() => void diff.findNoise()}
+          onClick={() => void diff.findNoise(frames)}
           disabled={!stopped || busy}
-          title="Run a few idle frames and mute whatever moves on its own"
+          title="Run idle frames and mute whatever moves on its own"
         >
           Find background noise
         </Button>
+        <Select
+          value={frames}
+          options={NOISE_CHOICES.map((n) => ({ value: n, label: `${n} frames` }))}
+          onChange={setFrames}
+          title="How long to watch for churn; a longer look leaves fewer candidates standing"
+        />
       </div>
       {!stopped && <span className="gk-muted gk-small">Capturing needs a stopped machine.</span>}
       {(diff.error ?? problem) && <span className="gk-bad gk-small">{diff.error ?? problem}</span>}
@@ -298,8 +325,29 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
           <span className="gk-muted gk-small">
             {result.total} candidate{result.total === 1 ? '' : 's'} at {result.size * 8}-bit
             {hiddenText(result.hidden)}
-            {result.capped && ' — too many to group or rank; narrow further'}
+            {result.capped && ` — more than ${result.detail}, too many to group or rank; narrow further`}
           </span>
+          {result.total > result.rows.length && (
+            <div className="gk-row">
+              <Button
+                onClick={() => void diff.page(Math.max(0, diff.from - DIFF.rowsDefault))}
+                disabled={busy || diff.from === 0}
+              >
+                <Icon name="chevron-left" />
+                Previous
+              </Button>
+              <span className="gk-muted gk-small">
+                {`rows ${diff.from + 1}–${diff.from + result.rows.length} of ${result.total}`}
+              </span>
+              <Button
+                onClick={() => void diff.page(diff.from + result.rows.length)}
+                disabled={busy || diff.from + result.rows.length >= result.total}
+              >
+                Next
+                <Icon name="chevron-right" />
+              </Button>
+            </div>
+          )}
           {result.total === 0 ? (
             <Empty>Nothing survives that. Undo puts the previous candidates back.</Empty>
           ) : (
@@ -316,7 +364,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
                 onSelect: select,
                 onLabel: label,
                 onBreak: (row) =>
-                  void transport.request('gba-kit/breakOnWrite', { address: row.address, size: result.size }),
+                  attempt(() => transport.request('gba-kit/breakOnWrite', { address: row.address, size: result.size })),
                 onMute: (row) => muteAddresses([row.address], 'muted from the results'),
               }}
             />
@@ -327,11 +375,24 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   );
 }
 
+/**
+ * What to call an address a row found. A typed path names the address only where the
+ * program states an extent covering it — everywhere else the path is a landmark's
+ * hypothesis, and a label is a claim that outlives this panel: it reaches disassembly,
+ * the `.sym` export and the project's labels file, none of which say which tier it came
+ * from. What survives that round trip is an identifier, which is what `labelName` makes.
+ */
+export function nameFor(row: DiffRowBody): string {
+  return row.tier === 'sized' && !row.extrapolated && row.path
+    ? labelName(row.path)
+    : `gUnk_${row.address.toString(16).padStart(8, '0')}`;
+}
+
 /** What each mute source took, named the way the mute list names it. */
-function hiddenText(hidden: Record<string, number>): string {
+function hiddenText(hidden: MuteTally): string {
   const parts = Object.entries(hidden)
     .filter(([, n]) => n > 0)
-    .map(([source, n]) => `${n} hidden by ${SOURCES[source as keyof typeof SOURCES] ?? source}`);
+    .map(([source, n]) => `${n} hidden by ${SOURCES[source as keyof typeof SOURCES]}`);
   return parts.length === 0 ? '' : `; ${parts.join(', ')}`;
 }
 

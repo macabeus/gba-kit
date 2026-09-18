@@ -250,6 +250,14 @@ describe('session transport', () => {
     expect(retagged.captures.map((c) => c.tag)).toEqual(['A', 'C', 'A']);
     const left = await transport.request('gba-kit/forgetCapture', { id: listed.captures[0]!.id });
     expect(left.captures).toHaveLength(2);
+    // both hosts read a capture id the same way, so neither answers one with a TypeError
+    await expect(transport.request('gba-kit/retagCapture', { id: 0, tag: 'x' })).rejects.toThrow(
+      /'id' must be a capture id/,
+    );
+    await expect(transport.request('gba-kit/retagCapture', { id: listed.captures[1]!.id } as never)).rejects.toThrow(
+      /'tag' must be a string/,
+    );
+    await expect(transport.request('gba-kit/forgetCapture', { id: 99 })).rejects.toThrow(/no capture 99/);
   });
 
   it('the exact-value filter answers what searchMemory answers, narrowed by what came before', async () => {
@@ -306,6 +314,10 @@ describe('session transport', () => {
     const body = await transport.request('gba-kit/breakOnWrite', { address: counter, size: 4 });
     expect(body).toMatchObject({ watched: 1, address: counter, length: 4, verified: true });
     await expect(transport.request('gba-kit/breakOnWrite', { address: -1 })).rejects.toThrow(/not an address/);
+    // a watch on memory nothing writes would verify and never fire, which reads as proof
+    await expect(transport.request('gba-kit/breakOnWrite', { address: 0x08000100 })).rejects.toThrow(
+      /is rom, which nothing writes/,
+    );
   });
 
   it('imports and exports symbol files, telling label listeners, and reports a failed save', async () => {

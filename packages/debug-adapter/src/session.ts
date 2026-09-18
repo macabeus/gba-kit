@@ -53,7 +53,9 @@ import {
   type SavedStateInfo,
   type StateBody,
   breakOnWriteBody,
+  captureId,
   captureInfo,
+  captureTag,
   capturesBody,
   diffFilterBody,
   diffMode,
@@ -1527,12 +1529,12 @@ export class GbaDebugSession extends DebugSession {
       }
       case 'gba-kit/retagCapture': {
         const a = args as Args<'gba-kit/retagCapture'>;
-        s.memoryDiff.retag(needInteger(a.id, 'id', 1, Number.MAX_SAFE_INTEGER), needString(a.tag, 'tag'));
+        s.memoryDiff.retag(captureId(a.id), captureTag(a.tag));
         return capturesBody(s);
       }
       case 'gba-kit/forgetCapture': {
         const a = args as Args<'gba-kit/forgetCapture'>;
-        s.memoryDiff.forget(needInteger(a.id, 'id', 1, Number.MAX_SAFE_INTEGER));
+        s.memoryDiff.forget(captureId(a.id));
         return capturesBody(s);
       }
       case 'gba-kit/discoverNoise': {

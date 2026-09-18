@@ -55,7 +55,7 @@ export {
 export { type RewindOptions } from './rewind.js';
 export { type SnapshotDelta } from './delta.js';
 export { type EventEntry, type TimeStamp, type TraceEntry } from './rings.js';
-export { LabelStore, type Label, type LabelsFile } from './labels.js';
+export { LabelStore, labelName, type Label, type LabelsFile } from './labels.js';
 export { freeStateName } from './cartridge-save.js';
 export { type PackedSnapshot, packSnapshot, unpackSnapshot } from './delta.js';
 export {
@@ -103,9 +103,9 @@ export {
   type IoRegisterValue,
 } from './io.js';
 export { filterMemory, searchMemory, type SearchOptions, type SearchRegion } from './memory-search.js';
+export { DIFF_LIMITS, NOISE_FRAMES, rangeBytes } from './diff-limits.js';
 export {
   CandidateMask,
-  DIFF_LIMITS,
   MemoryDiff,
   type Capture,
   type DiffContext,
@@ -118,8 +118,8 @@ export {
   type RamRegion,
 } from './memory-diff.js';
 export {
+  MUTE_SOURCES,
   MuteStore,
-  NOISE_FRAMES,
   discoverNoise,
   muteBytes,
   type Mute,

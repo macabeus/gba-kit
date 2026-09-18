@@ -2167,7 +2167,16 @@ describe('the memory diff', () => {
     // the fixture's own counters move on their own, so the baseline is not empty
     expect(noise.churnBytes).toBeGreaterThan(0);
     expect(session.memoryDiff.mutes.all().some((m) => m.source === 'idle')).toBe(true);
-    expect(session.memoryDiff.mutes.all().some((m) => m.source === 'stack')).toBe(true);
+
+    // the live frames at and above the pointer are the same in every capture taken at
+    // the same place; what moves is the abandoned frames below it, so the mute reaches
+    // down to the deepest the run saw the pointer go
+    const stack = session.memoryDiff.mutes.all().find((m) => m.source === 'stack');
+    const sp = session.machine.registers[13]!;
+    expect(stack).toBeDefined();
+    expect(stack!.ranges[0]!.lo).toBeLessThan(sp);
+    expect(stack!.ranges[0]!.hi).toBeGreaterThan(sp);
+    expect(stack!.note).toMatch(/as deep as 8 idle frames saw it go/);
   });
 
   it('adopts a save state as a capture without moving the machine', async () => {
@@ -2212,5 +2221,15 @@ describe('the memory diff', () => {
     expect(all.map((bp) => bp.address)).toEqual([counter, samples]);
     // the same watch twice is one watch
     expect(session.watchAddress({ address: samples, length: 4, name: 'g_samples', access: 'write' })).toHaveLength(2);
+
+    // a watch on memory nothing writes verifies and never fires, which reads as a
+    // breakpoint that proved the address is written by nobody
+    expect(() => session.watchAddress({ address: 0x08000100, length: 4, name: 'in rom', access: 'write' })).toThrow(
+      /is rom, which nothing writes/,
+    );
+    expect(() => session.watchAddress({ address: 0xffffffff, length: 4, name: 'nowhere', access: 'write' })).toThrow(
+      /is unmapped, which nothing writes/,
+    );
+    expect(session.breakpoints.data).toHaveLength(2);
   });
 });

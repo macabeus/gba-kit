@@ -61,7 +61,7 @@ export function DiffGroups({
   return (
     <div className="gk-col">
       {groups.map((group) => {
-        const mine = rows.filter((r) => groupKeyOf(r) === group.key);
+        const mine = rows.filter((r) => r.group === group.key);
         const expanded = open.has(group.key);
         const tier = TIERS[group.tier];
         return (
@@ -78,7 +78,12 @@ export function DiffGroups({
               </span>
               <span className="gk-mono">{group.label}</span>
               <span className="gk-muted gk-small">
-                {`${group.rows} row${group.rows === 1 ? '' : 's'} · best rank ${group.topRank}`}
+                {/* a group counts every row it has; this page carries the ones that ranked
+                    high enough to reach it, and saying so is what keeps an expanded group
+                    that shows twelve of two hundred from reading as a group of twelve */}
+                {mine.length === group.rows
+                  ? `${group.rows} row${group.rows === 1 ? '' : 's'} · best rank ${group.topRank}`
+                  : `${mine.length} of ${group.rows} rows here · best rank ${group.topRank}`}
               </span>
             </button>
             {expanded && <DiffTable rows={mine} actions={actions} total={mine.length} />}
@@ -87,14 +92,6 @@ export function DiffGroups({
       })}
     </div>
   );
-}
-
-/** The key the session grouped a row under, worked out the same way here so a page needs no second request. */
-function groupKeyOf(row: DiffRowBody): string {
-  if (row.tier === 'unattributed' || !row.symbol) {
-    return `region:${row.address >>> 24 === 0x03 ? 'IWRAM' : 'EWRAM'}`;
-  }
-  return `symbol:${row.symbol.name}`;
 }
 
 function DiffTable({ rows, actions, total }: { rows: DiffRowBody[]; actions: DiffRowActions; total: number }) {
@@ -173,6 +170,9 @@ function Where({ row }: { row: DiffRowBody }) {
       <span className="gk-mono">
         {row.path}
         {row.type && <span className="gk-muted"> : {row.type}</span>}
+        {row.alternatives && (
+          <Caveat text={`or .${row.alternatives.join(', .')}`} title="a union: these members cover the same bytes" />
+        )}
         {row.straddles && <Caveat text="straddles" title="the read crosses out of this object" />}
       </span>
     );
