@@ -604,7 +604,12 @@ export class MemoryDiff {
       .map((address) => this.#row(address, this.#size, info, null, ['too many candidates to rank']));
   }
 
-  /** The groups the rows fall into, or none when there are too many candidates to place. */
+  /**
+   * The groups the rows fall into, or none when there are too many candidates to place.
+   * Ordered by their best row, so reading the groups top to bottom meets the candidates in
+   * the order ranking put them in: a bigger group of equally ranked rows is a wider guess,
+   * not a better one, and promoting it buries the row ranking chose under the ones it tied.
+   */
   groups(): DiffGroup[] {
     const all = this.#detailRows();
     if (!all) {
@@ -621,7 +626,9 @@ export class MemoryDiff {
         groups.set(key.key, { ...key, tier: row.placement.tier, rows: 1, topRank: row.rank });
       }
     }
-    return [...groups.values()].sort((a, b) => b.topRank - a.topRank || b.rows - a.rows);
+    // the rows arrive ranked, so a group enters the map where its best row sits in that
+    // order and a stable sort on the rank alone keeps it there
+    return [...groups.values()].sort((a, b) => b.topRank - a.topRank);
   }
 
   /**

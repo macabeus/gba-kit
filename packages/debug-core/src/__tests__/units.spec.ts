@@ -947,6 +947,31 @@ describe('memory diff', () => {
     expect(diff.rows(0, 4)[0]!.address).toBe(cursor);
   });
 
+  it('the groups are read in the order ranking put their rows in', () => {
+    const diff = new MemoryDiff(context);
+    // the one the user is after sits alone in EWRAM, and two rows it ties with share a
+    // group in IWRAM — the shape the Klonoa save-file screen produces, where the cursor
+    // is the lone candidate and two bytes of an entity array tie with it
+    const cursor = EWRAM.base + 0x818;
+    const decoys = [IWRAM.base + 0x800, IWRAM.base + 0x1800];
+    const at = (v: number): Record<number, number> => ({ [cursor]: v, [decoys[0]!]: v, [decoys[1]!]: v });
+    capture(diff, 'A', at(1));
+    capture(diff, 'B', at(2));
+    capture(diff, 'A', at(1));
+
+    expect(diff.apply({ kind: 'tags' }, 1).total).toBe(3);
+    const rows = diff.rows(0, 8);
+    const groups = diff.groups();
+    // all three are lone changed bytes answering one value per tag, so nothing separates
+    // them by rank
+    expect(new Set(rows.map((r) => r.rank)).size).toBe(1);
+    expect(groups.map((g) => g.rows)).toEqual([1, 2]);
+    // the panel reads the groups top to bottom, so the group holding the best row leads:
+    // a group of two rows tied with it is a wider guess, not a better one
+    expect(groups[0]!.key).toBe(rows[0]!.group);
+    expect(rows[0]!.address).toBe(cursor);
+  });
+
   it('a candidate is ranked against the captures its own filter compared', () => {
     const diff = new MemoryDiff(context);
     const scalar = IWRAM.base + 0x40;
