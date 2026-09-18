@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { EditableName } from '../components.js';
 import { DiffGroups } from '../panels/DiffRows.js';
-import { MemoryDiffPanel, nameFor, watchExpression } from '../panels/MemoryDiffPanel.js';
+import { MemoryDiffPanel, blockedReason, nameFor, watchExpression } from '../panels/MemoryDiffPanel.js';
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
 import { ScreenPanel } from '../panels/ScreenPanel.js';
 import { SaveStatesView } from '../panels/save-states.js';
@@ -265,6 +265,21 @@ describe('memory diff panel', () => {
     const running = renderToString(<MemoryDiffPanel transport={transport} />);
     expect(running).toContain('Capturing needs a stopped machine');
     expect(running.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).toContain('disabled');
+  });
+
+  it('says why a tag filter cannot run while the tags are still a click away', () => {
+    // the panel opens on the tag filter, so the untagged strip a first run produces is the
+    // state it has to explain rather than refuse after the button
+    expect(blockedReason('tags', ['', '', ''])).toContain('none of these 3 is tagged');
+    expect(blockedReason('tags', ['slot A', 'slot A'])).toContain("every tagged capture is 'slot A'");
+    expect(blockedReason('tags', ['slot A', 'slot B', 'slot A'])).toBeNull();
+    expect(blockedReason('tags', ['slot A'])).toContain('two states');
+    // an untagged capture takes no part in the question, so tagging two of three is enough
+    expect(blockedReason('tags', ['slot A', 'slot B', ''])).toBeNull();
+    // the other filters compare two captures and ask nothing of their tags
+    expect(blockedReason('changed', ['', ''])).toBeNull();
+    expect(blockedReason('changed', [''])).toContain('take another one');
+    expect(blockedReason('value', [])).toBeNull();
   });
 
   it('gives each tier its own treatment, so an inferred containment cannot read as a name', () => {
