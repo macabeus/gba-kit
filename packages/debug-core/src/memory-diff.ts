@@ -26,7 +26,15 @@
  * lets the tally say how many candidates each source is hiding right now.
  */
 import type { DebugInfo, Placement, TypeDesc, ValueReader } from '@gba-kit/debug-info';
-import { bitfieldPlacement, formatBitfield, formatValue, placementAt, scalarSize } from '@gba-kit/debug-info';
+import {
+  PointerIndex,
+  type WordReader,
+  bitfieldPlacement,
+  formatBitfield,
+  formatValue,
+  placementAt,
+  scalarSize,
+} from '@gba-kit/debug-info';
 
 import { DIFF_LIMITS } from './diff-limits.js';
 import { RAM_REGIONS } from './machine.js';
@@ -751,12 +759,35 @@ export class MemoryDiff {
     }
     const info = this.#context.info();
     const context = this.#rankContext();
+    const through = this.#pointers(info);
     const rows = view.mask
       .addresses(this.#size, 0, DIFF_LIMITS.detail)
-      .map((address) => this.#row(address, this.#size, info, context, []));
+      .map((address) => this.#row(address, this.#size, info, context, [], through));
     rows.sort((a, b) => b.rank - a.rank || a.address - b.address);
     view.rows = rows;
     return rows;
+  }
+
+  /**
+   * Where the program's typed pointers are aimed, according to the captures themselves.
+   * An address a pointer points at has no symbol of its own, so this is the only way one
+   * is ever named — and reading it from the captures rather than from the live machine is
+   * what makes the name true of the columns the row shows.
+   */
+  #pointers(info: DebugInfo | null): PointerIndex | undefined {
+    if (!info || this.#captures.length === 0) {
+      return undefined;
+    }
+    const readers = this.#captures.map(
+      (capture): WordReader =>
+        (address) => {
+          const at = locate(address);
+          return at && at.offset + 4 <= capture.ram[at.region].length
+            ? readAt(capture.ram[at.region], at.offset, 4)
+            : null;
+        },
+    );
+    return new PointerIndex(info, readers);
   }
 
   /**
@@ -803,10 +834,17 @@ export class MemoryDiff {
     return { states, taking, per };
   }
 
-  #row(address: number, size: 1 | 2 | 4, info: DebugInfo | null, rank: RankContext | null, reasons: string[]): DiffRow {
+  #row(
+    address: number,
+    size: 1 | 2 | 4,
+    info: DebugInfo | null,
+    rank: RankContext | null,
+    reasons: string[],
+    through?: PointerIndex,
+  ): DiffRow {
     const at = locate(address)!;
     const values = this.#captures.map((c) => readAt(c.ram[at.region], at.offset, size));
-    const placement = info ? placementAt(info, address, size) : { address, tier: 'unattributed' as const };
+    const placement = info ? placementAt(info, address, size, through) : { address, tier: 'unattributed' as const };
     const row: DiffRow = { address, group: groupKey(placement).key, values, placement, rank: 0, reasons };
     const type = formattable(placement, size);
     if (type) {
@@ -893,8 +931,14 @@ function format(capture: Capture, placement: Placement, type: TypeDesc): string 
   return formatValue(name, type, reader.read(base, Math.max(1, type.size)), base, reader).value;
 }
 
-/** What a row is grouped under: the object when one is claimed, else the memory it is in. */
+/**
+ * What a row is grouped under: the object when one is claimed, the pointer when one was
+ * followed to it, else the memory it is in.
+ */
 function groupKey(placement: Placement): { key: string; label: string } {
+  if (placement.through) {
+    return { key: `through:${placement.through}`, label: `what ${placement.through} points at` };
+  }
   if (placement.tier === 'unattributed' || !placement.symbol) {
     const at = locate(placement.address);
     const region = at ? at.region.toUpperCase() : 'memory';

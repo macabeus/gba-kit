@@ -632,6 +632,10 @@
 .gk-tier-sized {
   color: var(--gk-good);
 }
+/* a pointer aimed here is a different kind of claim from an object declared here */
+.gk-tier-through {
+  color: var(--gk-accent);
+}
 .gk-tier-inferred {
   color: var(--gk-warn);
 }

@@ -2098,6 +2098,25 @@ describe('the memory diff', () => {
     expect(first.origin).toBe('machine');
   });
 
+  it('names memory a pointer reaches, which no object of the program covers', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    // `g_player.counterRef` points at `g_vblank_count`, which is an object of its own; the
+    // address after it is not, and is reached only by following the pointer
+    const counter = addressOf(session, 'g_vblank_count');
+    put(session, counter, 1);
+    session.captureMemory('A');
+    put(session, counter, 2);
+    session.captureMemory('B');
+    const [a, b] = session.memoryDiff.captures().map((c) => c.id) as [number, number];
+
+    session.memoryDiff.apply({ edges: [{ from: a, to: b, relation: 'changed' }], values: [] }, 4);
+    const row = session.memoryDiff.rows(0, 500).find((r) => r.address === counter);
+    // the object wins where there is one: a pointer aimed here does not rename it
+    expect(row?.placement.tier).toBe('sized');
+    expect(row?.placement.path).toBe('g_vblank_count');
+  });
+
   it('captures a running machine where it already is, without asking for a stop first', async () => {
     const h = await boot('thumb-O0');
     h.run(10);

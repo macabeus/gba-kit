@@ -40,6 +40,16 @@ where it already is and the capture is of a whole frame either way. Looking for
 background noise still needs a stop, since it runs frames of its own and puts the machine
 back.
 
+A candidate is placed in one of four tiers, and the fourth is the one a decomp needs
+most: memory **a pointer reaches**. `gMenuInfo->cursorIndex` has no symbol of its own —
+the address exists only while `gMenuInfo` holds that value — so no static lookup can ever
+name it. The pointers a program declares are read out of the captures instead, including
+the ones that live inside structs and arrays, and an address one of them covers is walked
+through the pointee's type like any object. A pointer is followed only where every
+capture agrees on its value: one that moved between them names different memory in each
+column, which is a name that is wrong somewhere. An object that declares the address
+outranks a pointer merely aimed at it.
+
 **Break on write** on a result sets a watch, and the panel lists what is watched. The
 editor's Breakpoints view lists source and function breakpoints only — VS Code's extension
 API has no data breakpoint to add to it — so a watch set from a panel is shown by whoever
