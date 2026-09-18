@@ -14,9 +14,13 @@
  * this module for the types and the few constants and argument helpers below, so
  * a panel sees the same bodies and the same argument semantics either way.
  */
+import type { Tier } from '@gba-kit/debug-info';
+
 import type { EventBreakpointKind } from './breakpoints.js';
 import type { IoRegisterValue } from './io.js';
 import type { Label } from './labels.js';
+import { type Capture, DIFF_LIMITS, type DiffGroup, type DiffMode, type DiffRow } from './memory-diff.js';
+import { type Mute, NOISE_FRAMES, muteBytes } from './memory-noise.js';
 import type { SearchOptions } from './memory-search.js';
 import { type BackgroundInfo, type SpriteInfo, type TilemapSnapshot, screenToJson } from './ppu.js';
 import type { InputRecording, RecordedTake } from './recorder.js';
@@ -26,6 +30,55 @@ import { type SaveStateFile, bytesToBase64 } from './snapshot-codec.js';
 
 /** The most a `gba-kit/importSave` payload can carry, so a client can turn a mis-picked file away before encoding it. */
 export { MAX_SAVE_FILE_SIZE } from './cartridge-save.js';
+
+/** A capture as a client sees it: everything but the 288 KB of RAM, which never crosses. */
+export interface CaptureInfo {
+  id: number;
+  tag: string;
+  frame: number;
+  createdAt: string;
+  /** a capture adopted from a save state was never live in this machine */
+  from: 'machine' | 'state';
+  /** the screen it was taken on: base64 RGBA, `width` × `height` */
+  thumbnail: string;
+  width: number;
+  height: number;
+}
+
+/** One candidate address, with what every capture held there. */
+export interface DiffRowBody {
+  address: number;
+  /** one per capture, in capture order — the matrix the user reads by eye */
+  values: number[];
+  /** how each value reads through its type (an enum by name, a bool, a bitfield) */
+  formatted?: string[];
+  tier: Tier;
+  /** the object it is in when `tier` is `sized`, the nearest landmark when it is `inferred` */
+  symbol?: { name: string; offset: number };
+  /** `gEntityInfo[13].xPosBg2`, when a DWARF type reached the address */
+  path?: string;
+  type?: string;
+  /** the path went past a declared bound, so it is a hypothesis */
+  extrapolated?: boolean;
+  /** the read crosses out of the object the path names */
+  straddles?: boolean;
+  /** why it is ranked where it is, so the order is arguable rather than magic */
+  rank: number;
+  reasons: string[];
+}
+
+export interface DiffGroupBody {
+  key: string;
+  tier: Tier;
+  label: string;
+  rows: number;
+  topRank: number;
+}
+
+/** A muted range set as a client lists it, with how many addresses it covers. */
+export interface MuteBody extends Mute {
+  bytes: number;
+}
 
 /** What the head of a save-state file says about it. */
 export type SaveStateMeta = Partial<Omit<SaveStateFile, 'snapshot'>>;
@@ -225,6 +278,82 @@ export interface GbaKitRequests {
     body: { addresses: number[] };
   };
 
+  /** The captures this session holds, oldest first; the RAM they hold stays in the session. */
+  'gba-kit/captures': { args?: Record<string, never>; body: { captures: CaptureInfo[] } };
+  /**
+   * Take a capture of RAM as it is now, or adopt a save state as one — `state` names it
+   * the way `loadState` does, and the machine being debugged does not move either way.
+   */
+  'gba-kit/capture': { args?: { tag?: string; state?: string; path?: string }; body: { capture: CaptureInfo } };
+  /** Give a capture another tag; equal tags are what the tag filter matches on. */
+  'gba-kit/retagCapture': { args: { id: number; tag: string }; body: { captures: CaptureInfo[] } };
+  'gba-kit/forgetCapture': { args: { id: number }; body: { captures: CaptureInfo[] } };
+
+  /**
+   * Run the machine for a few idle frames and put it back, muting whatever moved on its
+   * own and whatever the DMA copied into VRAM, OAM or palette. Every mute is an address
+   * range; nothing here is muted by name.
+   */
+  'gba-kit/discoverNoise': {
+    args?: { frames?: number };
+    body: { mutes: MuteBody[]; churnBytes: number; frames: number };
+  };
+  'gba-kit/mutes': { args?: Record<string, never>; body: { mutes: MuteBody[] } };
+  /**
+   * Add, switch off or remove a mute: `ranges` adds one the user picked out, `id` with
+   * `enabled` switches one, `id` with `remove` takes it away.
+   */
+  'gba-kit/setMute': {
+    args: {
+      id?: number;
+      ranges?: Array<{ lo: number; hi: number }>;
+      note?: string;
+      enabled?: boolean;
+      remove?: boolean;
+    };
+    body: { mutes: MuteBody[] };
+  };
+
+  /** What a filter would leave behind, and what each mute source would take, without committing it. */
+  'gba-kit/diffPreview': {
+    args: { mode: DiffMode; size: 1 | 2 | 4 };
+    body: { kept: number; removed: number; hidden: Record<string, number> };
+  };
+  /**
+   * Narrow the candidates and read a page of what is left. `undo` steps back one filter
+   * instead, `reset` puts every address back, and neither takes a `mode`.
+   */
+  'gba-kit/diffFilter': {
+    args?: {
+      mode?: DiffMode;
+      size?: 1 | 2 | 4;
+      undo?: boolean;
+      reset?: boolean;
+      from?: number;
+      limit?: number;
+    };
+    body: {
+      total: number;
+      /** too many candidates to group, rank or order: the rows are a page in address order */
+      capped: boolean;
+      undoDepth: number;
+      size: 1 | 2 | 4;
+      hidden: Record<string, number>;
+      groups: DiffGroupBody[];
+      rows: DiffRowBody[];
+    };
+  };
+
+  /**
+   * Watch an address for writes, keeping what is already watched: the end of a memory
+   * diff is a function name, and the code that writes the variable is what names it. A
+   * DAP client that sets its own data breakpoints replaces the list, this one included.
+   */
+  'gba-kit/breakOnWrite': {
+    args: { address: number; size?: 1 | 2 | 4; name?: string; access?: 'write' | 'read' | 'readWrite' };
+    body: { watched: number; address: number; length: number; verified: boolean };
+  };
+
   /** The hardware events a breakpoint can be set on (also the `exceptionBreakpointFilters` capability). */
   'gba-kit/eventBreakpoints': {
     args?: Record<string, never>;
@@ -361,6 +490,156 @@ export function savedStateInfo(name: string, path: string, meta: SaveStateMeta |
   };
 }
 
+/**
+ * A capture as a body carries it: the thumbnail base64, the RAM nowhere. Twelve
+ * captures are 3.4 MB in the session and 154 KB of thumbnails; sending the RAM with
+ * them would be 3.4 MB on every render.
+ */
+export function captureInfo(capture: Capture): CaptureInfo {
+  const screen = screenToJson(capture.thumbnail);
+  return {
+    id: capture.id,
+    tag: capture.tag,
+    frame: capture.frame,
+    createdAt: capture.createdAt,
+    from: capture.origin,
+    thumbnail: screen.rgba,
+    width: screen.width,
+    height: screen.height,
+  };
+}
+
+/** A mute as a body carries it: what it hides, and how much of it. */
+export function muteBody(mute: Mute): MuteBody {
+  return { ...mute, ranges: mute.ranges.map((r) => ({ ...r })), bytes: muteBytes(mute) };
+}
+
+/**
+ * A row as a body carries it. The tiers are three separate words rather than one
+ * name with a caveat, because a containment the program never stated must not read
+ * like one it did.
+ */
+export function diffRowBody(row: DiffRow): DiffRowBody {
+  const p = row.placement;
+  const body: DiffRowBody = {
+    address: row.address,
+    values: row.values,
+    tier: p.tier,
+    rank: row.rank,
+    reasons: row.reasons,
+  };
+  if (row.formatted) {
+    body.formatted = row.formatted;
+  }
+  if (p.symbol) {
+    body.symbol = { name: p.symbol.name, offset: p.symbol.offset };
+  }
+  if (p.path) {
+    body.path = p.path;
+  }
+  if (p.type) {
+    body.type = p.type.name;
+  }
+  if (p.extrapolated) {
+    body.extrapolated = true;
+  }
+  if (p.straddles) {
+    body.straddles = true;
+  }
+  return body;
+}
+
+export function diffGroupBody(group: DiffGroup): DiffGroupBody {
+  return { key: group.key, tier: group.tier, label: group.label, rows: group.rows, topRank: group.topRank };
+}
+
+/** The captures a session holds, as every host reports them. */
+export function capturesBody(session: Session): GbaKitRequests['gba-kit/captures']['body'] {
+  return { captures: session.memoryDiff.captures().map(captureInfo) };
+}
+
+/** The mutes a session holds, as every host reports them. */
+export function mutesBody(session: Session): GbaKitRequests['gba-kit/mutes']['body'] {
+  return { mutes: session.memoryDiff.mutes.all().map(muteBody) };
+}
+
+/** A `gba-kit/breakOnWrite`, as both hosts answer it: one more watched address, and what is watched now. */
+export function breakOnWriteBody(
+  session: Session,
+  args: NonNullable<GbaKitRequests['gba-kit/breakOnWrite']['args']>,
+): GbaKitRequests['gba-kit/breakOnWrite']['body'] {
+  if (!Number.isInteger(args.address) || args.address < 0 || args.address > 0xffffffff) {
+    throw new Error(`not an address: ${String(args.address)}`);
+  }
+  const length = args.size === undefined ? 1 : diffSize(args.size);
+  const access = args.access ?? 'write';
+  const name = args.name?.trim() || `0x${(args.address >>> 0).toString(16).padStart(8, '0')}`;
+  const all = session.watchAddress({ address: args.address, length, name, access });
+  const mine = all.find((bp) => bp.address === args.address && bp.length === length && bp.access === access);
+  return { watched: all.length, address: args.address, length, verified: mine?.verified ?? false };
+}
+
+/**
+ * A `gba-kit/setMute`: add the ranges a user picked out as one reversible row, switch
+ * an existing one off, or take it away. A mute is always a range and never a name, so
+ * what a client may ask for here is ranges and ids.
+ */
+export function setMute(session: Session, args: NonNullable<GbaKitRequests['gba-kit/setMute']['args']>): void {
+  const mutes = session.memoryDiff.mutes;
+  if (args.ranges !== undefined) {
+    if (!Array.isArray(args.ranges) || args.ranges.length === 0) {
+      throw new Error("'ranges' must be a non-empty list of { lo, hi }");
+    }
+    for (const range of args.ranges) {
+      if (!Number.isInteger(range?.lo) || !Number.isInteger(range?.hi) || range.hi <= range.lo) {
+        throw new Error(`not an address range: ${JSON.stringify(range)}`);
+      }
+    }
+    mutes.add(args.ranges, 'user', args.note?.trim() || 'muted by hand');
+    return;
+  }
+  if (!Number.isInteger(args.id)) {
+    throw new Error("give a mute 'id', or the 'ranges' of a new one");
+  }
+  const id = args.id as number;
+  const done = args.remove ? mutes.remove(id) : mutes.setEnabled(id, args.enabled !== false);
+  if (!done) {
+    throw new Error(`no mute ${id}`);
+  }
+}
+
+/**
+ * A `gba-kit/diffFilter`, whole: narrow, undo or reset, then the counts, the groups
+ * and one page of rows. Both hosts answer it from here, so neither can read an
+ * argument differently or leave a field out of the body.
+ */
+export function diffFilterBody(
+  session: Session,
+  args: NonNullable<GbaKitRequests['gba-kit/diffFilter']['args']>,
+): GbaKitRequests['gba-kit/diffFilter']['body'] {
+  const diff = session.memoryDiff;
+  let result;
+  if (args.undo) {
+    result = diff.undo();
+    if (!result) {
+      throw new Error('there is no filter to undo');
+    }
+  } else if (args.reset) {
+    result = diff.reset();
+  } else if (args.mode !== undefined) {
+    result = diff.apply(diffMode(args.mode), diffSize(args.size));
+  } else {
+    result = diff.result();
+  }
+  const window = rowWindow(args.from, args.limit);
+  return {
+    ...result,
+    size: diff.size,
+    groups: diff.groups().map(diffGroupBody),
+    rows: diff.rows(window.from, window.limit).map(diffRowBody),
+  };
+}
+
 /** How many entries `gba-kit/trace` and `gba-kit/events` answer by default, and at most. */
 export const LOG = {
   traceDefault: 200,
@@ -392,6 +671,82 @@ export function entryCount(raw: unknown, fallback: number, max: number = LOG.max
 export function rewindFrameCount(raw: unknown): number {
   const n = Math.floor(Number(raw));
   return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+
+/** How a memory-diff request's arguments are read, wherever one is answered. */
+export const DIFF = {
+  rowsDefault: DIFF_LIMITS.rowsDefault,
+  rowsMax: DIFF_LIMITS.rowsMax,
+  undoDepth: DIFF_LIMITS.undoDepth,
+  noiseFramesDefault: NOISE_FRAMES.default,
+  noiseFramesMax: NOISE_FRAMES.max,
+} as const;
+
+/** The `size` of a memory-diff request: a width memory is actually stepped by, so a wrong one is refused rather than rounded. */
+export function diffSize(raw: unknown): 1 | 2 | 4 {
+  if (raw === 1 || raw === 2 || raw === 4) {
+    return raw;
+  }
+  throw new Error(`'size' must be 1, 2 or 4, not ${String(raw)}`);
+}
+
+/**
+ * The `mode` of a memory-diff request, checked down to the capture ids it names: a
+ * client sends this, and a filter over 288 KB of someone else's memory is not the
+ * place to find out a field was a string.
+ */
+export function diffMode(raw: unknown): DiffMode {
+  const mode = raw as { kind?: unknown; value?: unknown; from?: unknown; to?: unknown; by?: unknown };
+  if (!mode || typeof mode !== 'object') {
+    throw new Error("'mode' must be an object");
+  }
+  const number = (value: unknown, what: string): number => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error(`'${what}' must be a number, not ${String(value)}`);
+    }
+    return value;
+  };
+  switch (mode.kind) {
+    case 'value':
+      return { kind: 'value', value: number(mode.value, 'value') };
+    case 'tags':
+      return { kind: 'tags' };
+    case 'changed':
+    case 'unchanged':
+      return { kind: mode.kind, from: number(mode.from, 'from'), to: number(mode.to, 'to') };
+    case 'increased':
+    case 'decreased':
+      return {
+        kind: mode.kind,
+        from: number(mode.from, 'from'),
+        to: number(mode.to, 'to'),
+        by: mode.by === undefined ? undefined : number(mode.by, 'by'),
+      };
+    default:
+      throw new Error(
+        `unknown filter '${String(mode.kind)}' (value, changed, unchanged, increased, decreased or tags)`,
+      );
+  }
+}
+
+/** Which page of the rows a memory-diff request asks for, within what one response carries. */
+export function rowWindow(from: unknown, limit: unknown): { from: number; limit: number } {
+  return {
+    from: Math.max(0, Math.floor(Number(from ?? 0)) || 0),
+    limit: entryCount(limit, DIFF.rowsDefault, DIFF.rowsMax) || DIFF.rowsDefault,
+  };
+}
+
+/** The `frames` of a `gba-kit/discoverNoise` request: enough to see the churn saturate, never a run that hangs the client. */
+export function noiseFrames(raw: unknown): number {
+  if (raw === undefined || raw === null) {
+    return DIFF.noiseFramesDefault;
+  }
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n < 1 || n > DIFF.noiseFramesMax) {
+    throw new Error(`'frames' must be an integer from 1 to ${DIFF.noiseFramesMax}, not ${String(raw)}`);
+  }
+  return n;
 }
 
 /** The `count` of a `gba-kit/ppu` `tiles` request: `TILES.defaultCount` when unsaid or not a number, within 1..`TILES.maxCount`. */

@@ -531,3 +531,74 @@
 .gk-card-actions {
   justify-content: flex-end;
 }
+
+/* ─── memory diff ─────────────────────────────────────────────────── */
+/* a capture card carries its tag's colour, so `A B A` reads off the strip before any filter runs */
+.gk-diff-card {
+  border-left-width: 3px;
+}
+.gk-diff-card.gk-tag-1 {
+  border-left-color: var(--gk-accent);
+}
+.gk-diff-card.gk-tag-2 {
+  border-left-color: var(--gk-good);
+}
+.gk-diff-card.gk-tag-3 {
+  border-left-color: var(--gk-warn);
+}
+.gk-diff-card.gk-tag-4 {
+  border-left-color: var(--gk-bad);
+}
+.gk-diff-tag {
+  font-size: 11px;
+}
+.gk-matrix-cell {
+  font-variant-numeric: tabular-nums;
+}
+.gk-rank {
+  color: var(--gk-muted);
+}
+/* the three tiers are three treatments, never the same one with different words */
+.gk-tier {
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.gk-tier-sized {
+  color: var(--gk-good);
+}
+.gk-tier-inferred {
+  color: var(--gk-warn);
+}
+.gk-tier-unnamed {
+  color: var(--gk-dim);
+}
+tr.gk-tier-sized td:nth-child(2) {
+  color: var(--gk-fg);
+}
+tr.gk-tier-inferred td:nth-child(2),
+tr.gk-tier-unnamed td:nth-child(2) {
+  font-family: var(--gk-mono);
+}
+.gk-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--gk-fg);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--gk-border);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.gk-group-head:hover {
+  background: var(--gk-accent-bg);
+}
+.gk-mute-row {
+  align-items: center;
+  gap: 6px;
+}

@@ -103,5 +103,29 @@ export {
   type IoRegisterValue,
 } from './io.js';
 export { filterMemory, searchMemory, type SearchOptions, type SearchRegion } from './memory-search.js';
+export {
+  CandidateMask,
+  DIFF_LIMITS,
+  MemoryDiff,
+  type Capture,
+  type DiffContext,
+  type DiffGroup,
+  type DiffMode,
+  type DiffPreview,
+  type DiffResult,
+  type DiffRow,
+  type RamPair,
+  type RamRegion,
+} from './memory-diff.js';
+export {
+  MuteStore,
+  NOISE_FRAMES,
+  discoverNoise,
+  muteBytes,
+  type Mute,
+  type MuteRange,
+  type MuteSource,
+  type Noise,
+} from './memory-noise.js';
 export { ManualHost, timerHost, type Host, type HostFiles } from './host.js';
 export type { FrameMethod, VarNode } from '@gba-kit/debug-info';

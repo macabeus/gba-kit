@@ -1,4 +1,11 @@
-import { MAX_SAVE_FILE_SIZE, type SavedStateInfo, type StateBody } from '@gba-kit/debug-core/protocol';
+import {
+  type CaptureInfo,
+  type GbaKitRequests,
+  MAX_SAVE_FILE_SIZE,
+  type MuteBody,
+  type SavedStateInfo,
+  type StateBody,
+} from '@gba-kit/debug-core/protocol';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import { base64ToBytes, bytesToBase64 } from './render.js';
@@ -206,5 +213,118 @@ export function useSaveStates(transport: Transport): {
     load: (s) => run(() => transport.request('gba-kit/loadState', { path: s.path })),
     rename: (s, to) => run(() => transport.request('gba-kit/renameState', { path: s.path, to }), refresh),
     remove: (s) => run(() => transport.request('gba-kit/deleteState', { path: s.path }), refresh),
+  };
+}
+
+type DiffFilterBody = GbaKitRequests['gba-kit/diffFilter']['body'];
+type DiffPreviewBody = GbaKitRequests['gba-kit/diffPreview']['body'];
+type DiffMode = GbaKitRequests['gba-kit/diffPreview']['args']['mode'];
+type SetMuteArgs = GbaKitRequests['gba-kit/setMute']['args'];
+type FilterArgs = NonNullable<GbaKitRequests['gba-kit/diffFilter']['args']>;
+
+/**
+ * The memory diff: the captures, the mutes, and the candidate set the last filter
+ * left. Everything a panel does with them reports its own failure through `error`,
+ * and every action that changes the state answers with the new one, so nothing has
+ * to be refetched to stay in step.
+ *
+ * The RAM itself never arrives here — a capture is a thumbnail and a tag, a result is
+ * a count and one page of rows — so a dozen captures cost the page nothing.
+ */
+export function useMemoryDiff(transport: Transport): {
+  captures: CaptureInfo[];
+  mutes: MuteBody[];
+  result: DiffFilterBody | null;
+  preview: DiffPreviewBody | null;
+  /** where the page of rows begins, for a view that says which of them it is showing */
+  from: number;
+  error: string | null;
+  busy: boolean;
+  capture: (tag?: string) => Promise<unknown>;
+  adopt: (state: SavedStateInfo, tag?: string) => Promise<unknown>;
+  retag: (id: number, tag: string) => Promise<unknown>;
+  forget: (id: number) => Promise<unknown>;
+  findNoise: (frames?: number) => Promise<unknown>;
+  mute: (args: SetMuteArgs) => Promise<unknown>;
+  runPreview: (mode: DiffMode, size: 1 | 2 | 4) => Promise<unknown>;
+  clearPreview: () => void;
+  apply: (mode: DiffMode, size: 1 | 2 | 4) => Promise<unknown>;
+  undo: () => Promise<unknown>;
+  reset: () => Promise<unknown>;
+  page: (from: number) => Promise<unknown>;
+} {
+  const state = useDebugState(transport);
+  const epoch = state?.epoch;
+  const [captures, setCaptures] = useState<CaptureInfo[]>([]);
+  const [mutes, setMutes] = useState<MuteBody[]>([]);
+  const [result, setResult] = useState<DiffFilterBody | null>(null);
+  const [preview, setPreview] = useState<DiffPreviewBody | null>(null);
+  const [from, setFrom] = useState(0);
+  const action = useAction();
+  const { run } = action;
+
+  // a restart boots a different machine, and the captures it had were of the old one
+  useEffect(() => {
+    let ignore = false;
+    Promise.all([transport.request('gba-kit/captures'), transport.request('gba-kit/mutes')]).then(
+      ([c, m]) => {
+        if (!ignore) {
+          setCaptures(c.captures);
+          setMutes(m.mutes);
+          setResult(null);
+          setPreview(null);
+          setFrom(0);
+        }
+      },
+      () => undefined,
+    );
+    return () => {
+      ignore = true;
+    };
+  }, [transport, epoch]);
+
+  const filter = useCallback(
+    (args: FilterArgs, at = 0) =>
+      run(async () => {
+        const body = await transport.request('gba-kit/diffFilter', { ...args, from: at });
+        setResult(body);
+        setPreview(null);
+        setFrom(at);
+        return body;
+      }),
+    [run, transport],
+  );
+
+  return {
+    captures,
+    mutes,
+    result,
+    preview,
+    from,
+    error: action.error,
+    busy: action.busy,
+    capture: (tag) =>
+      run(async () => {
+        await transport.request('gba-kit/capture', { tag });
+        setCaptures((await transport.request('gba-kit/captures')).captures);
+      }),
+    adopt: (state, tag) =>
+      run(async () => {
+        await transport.request('gba-kit/capture', { path: state.path, tag });
+        setCaptures((await transport.request('gba-kit/captures')).captures);
+      }),
+    retag: (id, tag) =>
+      run(async () => setCaptures((await transport.request('gba-kit/retagCapture', { id, tag })).captures)),
+    forget: (id) => run(async () => setCaptures((await transport.request('gba-kit/forgetCapture', { id })).captures)),
+    findNoise: (frames) =>
+      run(async () => setMutes((await transport.request('gba-kit/discoverNoise', { frames })).mutes)),
+    mute: (args) => run(async () => setMutes((await transport.request('gba-kit/setMute', args)).mutes)),
+    runPreview: (mode, size) =>
+      run(async () => setPreview(await transport.request('gba-kit/diffPreview', { mode, size }))),
+    clearPreview: () => setPreview(null),
+    apply: (mode, size) => filter({ mode, size }),
+    undo: () => filter({ undo: true }),
+    reset: () => filter({ reset: true }),
+    page: (at) => filter({}, at),
   };
 }
