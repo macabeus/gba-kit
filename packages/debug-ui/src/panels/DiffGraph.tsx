@@ -17,6 +17,7 @@ import {
   EdgeLabelRenderer,
   type EdgeProps,
   Handle,
+  MarkerType,
   type Node,
   type NodeProps,
   Position,
@@ -52,6 +53,24 @@ export const RELATIONS: Array<{ value: Relation; sign: string; label: string; wo
 const RELATION_SIGN = new Map(RELATIONS.map((r) => [r.value, r.sign]));
 
 export const RELATION_WORD = new Map(RELATIONS.map((r) => [r.value, r.word]));
+
+/**
+ * What one relation says about the two captures it joins, named. An arrow has a direction
+ * and may point either way across the canvas, so "went up" on its own leaves the reader to
+ * work out up from what.
+ */
+export function relationLabel(relation: Relation, from: string, to: string): string {
+  switch (relation) {
+    case 'changed':
+      return `≠ changed between ${from} and ${to}`;
+    case 'same':
+      return `= the same in ${from} and ${to}`;
+    case 'increased':
+      return `↑ went up from ${from} to ${to}`;
+    case 'decreased':
+      return `↓ went down from ${from} to ${to}`;
+  }
+}
 
 /** What a new arrow says until it is told otherwise; "what changed here" is why one gets drawn. */
 export const DEFAULT_RELATION: Relation = 'changed';
@@ -171,6 +190,9 @@ function CaptureNodeView({ data }: NodeProps<CaptureNode>) {
 
 interface RelationEdgeData {
   relation: Relation;
+  /** what the captures at each end are called, so the menu can say which way is up */
+  from: string;
+  to: string;
   onRelation(relation: Relation): void;
   onDrop(): void;
   [key: string]: unknown;
@@ -186,7 +208,7 @@ function RelationEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, 
     sourcePosition,
     targetPosition,
   });
-  const { relation, onRelation, onDrop } = data as unknown as RelationEdgeData;
+  const { relation, from, to, onRelation, onDrop } = data as unknown as RelationEdgeData;
   return (
     <>
       <BaseEdge id={id} path={path} />
@@ -198,10 +220,13 @@ function RelationEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, 
           {/* a control wide enough to read the relation in is wider than the gap between
               two nodes, so the sign is what is drawn and the words are in the menu */}
           <Menu
-            label={`This arrow: ${RELATIONS.find((r) => r.value === relation)?.word ?? relation}`}
+            label={relationLabel(relation, from, to)}
             trigger={<span className="gk-graph-sign">{RELATION_SIGN.get(relation)}</span>}
             items={[
-              ...RELATIONS.map((r) => ({ label: r.label, onSelect: () => onRelation(r.value) })),
+              ...RELATIONS.map((r) => ({
+                label: relationLabel(r.value, from, to),
+                onSelect: () => onRelation(r.value),
+              })),
               { label: 'Remove this arrow', onSelect: onDrop },
             ]}
           />
@@ -258,6 +283,10 @@ function Canvas({ captures, edges, values, busy, onEdges, onName, onValue, onFor
   }, [captures.length, fitView]);
 
   const xOf = (id: number): number => nodes.find((n) => n.id === String(id))?.position.x ?? 0;
+  const nameOf = (id: number): string => {
+    const at = captures.findIndex((c) => c.id === id);
+    return captures[at]?.tag || (CIRCLED[at] ?? `#${at + 1}`);
+  };
 
   const drawn: Edge[] = edges.map((edge) => {
     return {
@@ -266,8 +295,12 @@ function Canvas({ captures, edges, values, busy, onEdges, onName, onValue, onFor
       target: String(edge.to),
       ...edgeHandles(xOf(edge.from), xOf(edge.to)),
       type: 'relation',
+      // an arrow that shows no head is a line, and a line has no direction to read
+      markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18 },
       data: {
         relation: edge.relation,
+        from: nameOf(edge.from),
+        to: nameOf(edge.to),
         onRelation: (relation: Relation) =>
           onEdges(edges.map((e) => (edgeId(e) === edgeId(edge) ? { ...e, relation } : e))),
         onDrop: () => onEdges(edges.filter((e) => edgeId(e) !== edgeId(edge))),
