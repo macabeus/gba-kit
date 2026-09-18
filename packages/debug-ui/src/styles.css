@@ -566,7 +566,27 @@
 .gk-diff-tag {
   font-size: 11px;
 }
-/* a tag is a field to fill in, so an untagged capture looks like one rather than a caption */
+/* the strip is the query: cards in the order they were taken, with the link between each pair */
+.gk-strip {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.gk-strip-step {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.gk-link {
+  flex: none;
+}
+.gk-dragging {
+  opacity: 0.4;
+}
+
+/* a name is a field to fill in, so an unnamed capture looks like one rather than a caption */
 button.gk-diff-tag {
   width: 100%;
   padding: 1px 4px;

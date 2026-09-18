@@ -1233,13 +1233,16 @@ describe('emulator requests', () => {
     const gKeys = Number(
       (await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression: '&g_keys' })).result,
     );
-    const mode = { kind: 'tags' };
-    const preview = await client.body<GbaKitRequests['gba-kit/diffPreview']['body']>('gba-kit/diffPreview', {
-      mode,
-      size: 2,
-    });
-    const applied = await client.body<Filter>('gba-kit/diffFilter', { mode, size: 2 });
-    expect(applied.total).toBe(preview.kept);
+    const [a, b, c] = listed.captures.map((capture) => capture.id) as [number, number, number];
+    const query = {
+      edges: [
+        { from: a, to: b, relation: 'changed' },
+        { from: b, to: c, relation: 'changed' },
+        { from: a, to: c, relation: 'same' },
+      ],
+    };
+    const applied = await client.body<Filter>('gba-kit/diffFilter', { query, size: 2 });
+    expect(applied.asked).toBe(true);
     const row = applied.rows.find((r) => r.address === gKeys)!;
     expect(row.values).toEqual([1, 2, 1]);
     expect(row).toMatchObject({ tier: 'sized', path: 'g_keys' });
@@ -1259,8 +1262,8 @@ describe('emulator requests', () => {
     });
     expect(watched).toMatchObject({ watched: 1, address: gKeys, length: 2, verified: true });
 
-    expect((await client.body<Filter>('gba-kit/diffFilter', { undo: true })).undoDepth).toBe(0);
-    expect((await client.body<Filter>('gba-kit/diffFilter', { reset: true })).total).toBeGreaterThan(applied.total);
+    expect((await client.body<Filter>('gba-kit/diffFilter', { reset: true })).asked).toBe(false);
+    expect((await client.body<Filter>('gba-kit/diffFilter', {})).total).toBeGreaterThan(applied.total);
 
     // a mute takes effect on the result already in hand, and switching it off puts its
     // addresses back — neither needs the filter run again. `g_keys` follows the buttons,
@@ -1268,7 +1271,7 @@ describe('emulator requests', () => {
     const idle = noise.mutes.find((m) => m.source === 'idle')!;
     expect(idle.bytes).toBeGreaterThan(0);
     await client.body('gba-kit/setMute', { id: idle.id, enabled: false });
-    const whole = await client.body<Filter>('gba-kit/diffFilter', { mode, size: 2 });
+    const whole = await client.body<Filter>('gba-kit/diffFilter', { query, size: 2 });
     expect(whole.rows.map((r) => r.address)).toContain(gKeys);
 
     const added = await client.body<GbaKitRequests['gba-kit/setMute']['body']>('gba-kit/setMute', {
@@ -1285,14 +1288,19 @@ describe('emulator requests', () => {
     expect(back.total).toBe(whole.total);
     expect(back.rows.map((r) => r.address)).toContain(gKeys);
 
-    // every tag equal asks nothing of the captures, and is refused rather than answered
-    // with the whole of RAM
-    for (const c of listed.captures) {
-      await client.body('gba-kit/retagCapture', { id: c.id, tag: 'same' });
-    }
-    const refused = await client.request('gba-kit/diffFilter', { mode, size: 2 });
+    // an arc says two captures hold one value, so a link that asks them to differ cannot
+    // be satisfied — and says so rather than answering with no rows
+    const refused = await client.request('gba-kit/diffFilter', {
+      query: {
+        edges: [
+          { from: a, to: c, relation: 'same' },
+          { from: a, to: c, relation: 'changed' },
+        ],
+      },
+      size: 2,
+    });
     expect(refused.success).toBe(false);
-    expect(refused.message).toMatch(/needs two different tags/);
+    expect(refused.message).toMatch(/are the same state, so nothing can have changed/);
   });
 
   it('adopts a save state as a capture, and reaches no file outside the states directory', async () => {
@@ -1349,11 +1357,21 @@ describe('emulator requests', () => {
       ['gba-kit/importSave', {}, /missing 'bytes'/],
       ['gba-kit/importSave', { bytes: 7 }, /'bytes' must be a string/],
       ['gba-kit/importSave', { bytes: 'AAAA', name: 42 }, /'name' must be a string/],
-      ['gba-kit/diffPreview', { mode: { kind: 'nope' }, size: 1 }, /unknown filter 'nope'/],
-      ['gba-kit/diffPreview', { mode: { kind: 'tags' }, size: 3 }, /'size' must be 1, 2 or 4/],
-      ['gba-kit/diffPreview', { mode: 'tags', size: 1 }, /'mode' must be an object/],
-      ['gba-kit/diffFilter', { mode: { kind: 'changed', from: 'a', to: 2 }, size: 1 }, /'from' must be a number/],
-      ['gba-kit/diffFilter', { mode: { kind: 'changed', from: 1, to: 2 }, size: 1 }, /no capture 1/],
+      [
+        'gba-kit/diffFilter',
+        { query: { edges: [{ from: 1, to: 2, relation: 'nope' }] }, size: 1 },
+        /unknown relation 'nope'/,
+      ],
+      ['gba-kit/diffFilter', { query: { edges: [] }, size: 3 }, /'size' must be 1, 2 or 4/],
+      ['gba-kit/diffFilter', { query: 'edges', size: 1 }, /'query' must be an object/],
+      [
+        'gba-kit/diffFilter',
+        { query: { edges: [{ from: 'a', to: 2, relation: 'same' }] }, size: 1 },
+        /'from' must be a number/,
+      ],
+      ['gba-kit/diffFilter', { query: { edges: [{ from: 1, to: 2, relation: 'same' }] }, size: 1 }, /no capture 1/],
+      ['gba-kit/reorderCaptures', { ids: [0] }, /'id' must be a capture id/],
+      ['gba-kit/reorderCaptures', { ids: 'nope' }, /'ids' must be an array/],
       [
         'gba-kit/discoverNoise',
         { frames: 0 },

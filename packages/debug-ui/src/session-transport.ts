@@ -24,12 +24,11 @@ import {
   type StateBody,
   breakOnWriteBody,
   captureId,
+  captureIds,
   captureInfo,
   captureTag,
   capturesBody,
   diffFilterBody,
-  diffMode,
-  diffSize,
   entryCount,
   frameBody,
   mutesBody,
@@ -340,6 +339,10 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         session.memoryDiff.retag(captureId(id), captureTag(tag));
         return capturesBody(session) as never;
       }
+      case 'gba-kit/reorderCaptures': {
+        session.memoryDiff.reorder(captureIds((a as A<'gba-kit/reorderCaptures'>).ids));
+        return capturesBody(session) as never;
+      }
       case 'gba-kit/forgetCapture': {
         session.memoryDiff.forget(captureId((a as A<'gba-kit/forgetCapture'>).id));
         return capturesBody(session) as never;
@@ -353,10 +356,6 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       case 'gba-kit/setMute': {
         setMute(session, a as A<'gba-kit/setMute'>);
         return mutesBody(session) as never;
-      }
-      case 'gba-kit/diffPreview': {
-        const { mode, size } = a as A<'gba-kit/diffPreview'>;
-        return session.memoryDiff.preview(diffMode(mode), diffSize(size)) as never;
       }
       case 'gba-kit/diffFilter':
         return diffFilterBody(session, a as NonNullable<A<'gba-kit/diffFilter'>>) as never;

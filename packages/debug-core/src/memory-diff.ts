@@ -29,9 +29,8 @@ import type { DebugInfo, Placement, TypeDesc, ValueReader } from '@gba-kit/debug
 import { bitfieldPlacement, formatBitfield, formatValue, placementAt, scalarSize } from '@gba-kit/debug-info';
 
 import { DIFF_LIMITS } from './diff-limits.js';
-import { type Machine, RAM_REGIONS } from './machine.js';
+import { RAM_REGIONS } from './machine.js';
 import { MUTE_SOURCES, type Mute, type MuteSource, MuteStore } from './memory-noise.js';
-import { searchMemory } from './memory-search.js';
 import type { Screen } from './ppu.js';
 
 /** The two regions a capture holds; the keys are `RAM_REGIONS`'. */
@@ -55,12 +54,35 @@ export interface Capture {
   thumbnail: Screen;
 }
 
-/** What a filter asks of the captures. */
-export type DiffMode =
-  | { kind: 'value'; value: number }
-  | { kind: 'changed' | 'unchanged'; from: number; to: number }
-  | { kind: 'increased' | 'decreased'; from: number; to: number; by?: number }
-  | { kind: 'tags' };
+/** What one link expects of a value between the two captures it joins. */
+export type Relation = 'same' | 'changed' | 'increased' | 'decreased' | 'any';
+
+/** Every relation a link can carry, in the order the panel offers them. */
+export const RELATIONS: readonly Relation[] = ['changed', 'same', 'increased', 'decreased', 'any'];
+
+/**
+ * One expectation, between two captures. The links along the strip and an arc back to a
+ * capture a later one repeats are the same thing: `same` between captures that are not
+ * neighbours is what says "I went back", and it is the constraint that does the work —
+ * "changed, then changed again" is what every churning byte does.
+ */
+export interface DiffEdge {
+  from: number;
+  to: number;
+  relation: Relation;
+}
+
+/** A value a capture held, for the states that do put a number on the screen. */
+export interface DiffValue {
+  capture: number;
+  value: number;
+}
+
+/** What a filter asks of the captures: every edge and every value, all at once. */
+export interface DiffQuery {
+  edges?: DiffEdge[];
+  values?: DiffValue[];
+}
 
 export interface DiffRow {
   address: number;
@@ -90,24 +112,14 @@ export interface DiffResult {
   detail: number;
   /** too many candidates to group, rank or order: the rows are a page in address order */
   capped: boolean;
-  undoDepth: number;
+  /** whether a query has been answered at all: an untouched set is every address there is, which nobody asked for */
+  asked: boolean;
   /** how many candidates each mute source hid, by source */
   hidden: Record<string, number>;
 }
 
-/** What a filter would do, without doing it. */
-export interface DiffPreview {
-  kept: number;
-  removed: number;
-  hidden: Record<string, number>;
-  /** the width both counts are of: a preview at another size counts other addresses than the result does */
-  size: 1 | 2 | 4;
-}
-
 /** What the engine reaches outside itself for: the live machine, and what the program says about an address. */
 export interface DiffContext {
-  /** an exact-value filter asks memory rather than the captures, the way `searchMemory` always has */
-  machine(): Machine;
   info(): DebugInfo | null;
 }
 
@@ -287,6 +299,119 @@ function formattable(placement: Placement, size: 1 | 2 | 4): TypeDesc | null {
   return start === placement.address && width === size ? type : null;
 }
 
+/** `①`, `②`, … for a capture at a position, so a refusal names it the way the strip does. */
+const CIRCLED = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩', '⑪', '⑫'];
+
+const positionName = (captures: Capture[], id: number): string => {
+  const at = captures.findIndex((c) => c.id === id);
+  return at < 0 ? `capture ${id}` : (CIRCLED[at] ?? `#${at + 1}`);
+};
+
+/**
+ * Why no value could satisfy this query, or null. Links between neighbours could never
+ * contradict each other, but an arc back to an earlier capture can: `①` up to `②`, `②` up
+ * to `③` and `③` the same as `①` describes a value that is both larger than itself and
+ * equal to it. That is one click away here, and a query nothing can satisfy has to say so
+ * rather than answer with no rows and look like a feature that found nothing.
+ */
+/**
+ * How many distinct states the query describes, and which captures take part. Captures an
+ * arc joins hold one state between them, so a strip of `A, B, A` describes two — and a
+ * candidate taking exactly that many distinct values is answering the question that was
+ * asked rather than merely moving.
+ */
+export function queryStates(asked: DiffQuery, captures: Capture[]): { count: number; taking: number[] } {
+  const edges = asked.edges ?? [];
+  const named = new Set(edges.flatMap((e) => [e.from, e.to]));
+  const group = new Map<number, number>();
+  const find = (id: number): number => {
+    let root = group.get(id) ?? id;
+    while (root !== (group.get(root) ?? root)) {
+      root = group.get(root) ?? root;
+    }
+    return root;
+  };
+  for (const edge of edges.filter((e) => e.relation === 'same')) {
+    group.set(find(edge.from), find(edge.to));
+  }
+  const taking = captures.flatMap((c, i) => (named.has(c.id) ? [i] : []));
+  return { count: new Set([...named].map(find)).size, taking };
+}
+
+export function queryProblem(asked: DiffQuery, captures: Capture[]): string | null {
+  const query = { edges: asked.edges ?? [], values: asked.values ?? [] };
+  const known = new Set(captures.map((c) => c.id));
+  for (const edge of query.edges) {
+    for (const end of [edge.from, edge.to]) {
+      if (!known.has(end)) {
+        return `no capture ${end}`;
+      }
+    }
+  }
+  for (const value of query.values) {
+    if (!known.has(value.capture)) {
+      return `no capture ${value.capture}`;
+    }
+  }
+
+  // captures a `same` link joins hold one value between them, so every other link is
+  // really a link between the groups those form
+  const group = new Map<number, number>();
+  const find = (id: number): number => {
+    let root = group.get(id) ?? id;
+    while (root !== (group.get(root) ?? root)) {
+      root = group.get(root) ?? root;
+    }
+    return root;
+  };
+  for (const edge of query.edges.filter((e) => e.relation === 'same')) {
+    group.set(find(edge.from), find(edge.to));
+  }
+
+  const name = (id: number): string => positionName(captures, id);
+  for (const edge of query.edges) {
+    if (edge.relation !== 'any' && edge.relation !== 'same' && find(edge.from) === find(edge.to)) {
+      return `${name(edge.from)} and ${name(edge.to)} are the same state, so nothing can have ${edge.relation} between them`;
+    }
+  }
+
+  // an increase is a strict order between groups: a cycle in it is a value above itself
+  const after = new Map<number, number[]>();
+  for (const edge of query.edges) {
+    if (edge.relation !== 'increased' && edge.relation !== 'decreased') {
+      continue;
+    }
+    const [low, high] =
+      edge.relation === 'increased' ? [find(edge.from), find(edge.to)] : [find(edge.to), find(edge.from)];
+    after.set(low, [...(after.get(low) ?? []), high]);
+  }
+  const done = new Set<number>();
+  const onPath = new Set<number>();
+  const cycles = (node: number): boolean => {
+    if (onPath.has(node)) {
+      return true;
+    }
+    if (done.has(node)) {
+      return false;
+    }
+    onPath.add(node);
+    for (const next of after.get(node) ?? []) {
+      if (cycles(next)) {
+        return true;
+      }
+    }
+    onPath.delete(node);
+    done.add(node);
+    return false;
+  };
+  for (const node of after.keys()) {
+    if (cycles(node)) {
+      return 'these links describe a value that rises and falls back to itself; loosen one of them';
+    }
+  }
+  return null;
+}
+
 export class MemoryDiff {
   readonly mutes = new MuteStore();
   readonly #context: DiffContext;
@@ -294,8 +419,9 @@ export class MemoryDiff {
   #nextId = 1;
   /** every address the filters kept, mutes included: what a mute hides is subtracted when this is read */
   #mask = CandidateMask.full();
-  /** the candidate set before each filter, with the size and the pair it was read at: undoing restores all three */
-  #undo: Array<{ mask: CandidateMask; size: 1 | 2 | 4; pair: RankPair }> = [];
+  #asked = false;
+  /** the states the standing query describes, which is what ranking judges a value's spread against */
+  #states: { count: number; taking: number[] } = { count: 0, taking: [] };
   #size: 1 | 2 | 4 = 1;
   /** the two captures the last filter compared, which is the pair ranking judges a neighbourhood by */
   #pair: RankPair = null;
@@ -348,6 +474,29 @@ export class MemoryDiff {
     return capture;
   }
 
+  /**
+   * Put the captures in this order. A strip read left to right is the run the links
+   * describe, and captures adopted from save states arrive in no order at all — so the
+   * sequence is the user's to state, not the order they happened to be taken in.
+   */
+  reorder(ids: number[]): Capture[] {
+    const byId = new Map(this.#captures.map((c) => [c.id, c]));
+    const moved: Capture[] = [];
+    for (const id of ids) {
+      const capture = byId.get(id);
+      if (!capture || moved.includes(capture)) {
+        throw new Error(`no capture ${id}`);
+      }
+      moved.push(capture);
+    }
+    if (moved.length !== this.#captures.length) {
+      throw new Error(`an order has to name every capture; ${moved.length} of ${this.#captures.length} were named`);
+    }
+    this.#captures = moved;
+    this.#view = null;
+    return this.#captures;
+  }
+
   forget(id: number): Capture {
     const at = this.#captures.findIndex((c) => c.id === id);
     if (at < 0) {
@@ -356,9 +505,8 @@ export class MemoryDiff {
     const [gone] = this.#captures.splice(at, 1) as [Capture];
     // a pair naming a capture that is gone is no pair: ranking falls back to the captures
     // still held rather than asking the store for one it no longer has, which would fail
-    // every read of the result — the rows, the groups, and each undo step that named it
+    // every read of the result — the rows and the groups alike
     this.#pair = withoutCapture(this.#pair, id);
-    this.#undo = this.#undo.map((step) => ({ ...step, pair: withoutCapture(step.pair, id) }));
     this.#view = null;
     return gone;
   }
@@ -372,20 +520,9 @@ export class MemoryDiff {
 
   reset(): DiffResult {
     this.#mask = CandidateMask.full();
-    this.#undo = [];
+    this.#asked = false;
+    this.#states = { count: 0, taking: [] };
     this.#pair = null;
-    this.#view = null;
-    return this.result();
-  }
-
-  undo(): DiffResult | null {
-    const previous = this.#undo.pop();
-    if (!previous) {
-      return null;
-    }
-    this.#mask = previous.mask;
-    this.#size = previous.size;
-    this.#pair = previous.pair;
     this.#view = null;
     return this.result();
   }
@@ -397,40 +534,40 @@ export class MemoryDiff {
       total,
       detail: DIFF_LIMITS.detail,
       capped: total > DIFF_LIMITS.detail,
-      undoDepth: this.#undo.length,
+      asked: this.#asked,
       hidden: view.hidden,
     };
   }
 
-  /** What `apply` would leave behind, and what each mute source would take, without committing it. */
-  preview(mode: DiffMode, size: 1 | 2 | 4): DiffPreview {
-    const scanned = this.#hide(this.#scan(mode, size), size);
-    const kept = scanned.mask.count(size);
-    return { kept, removed: this.#hide(this.#mask, size).mask.count(size) - kept, hidden: scanned.hidden, size };
-  }
-
-  /** Narrow the candidates; the previous set goes on the undo stack. */
-  apply(mode: DiffMode, size: 1 | 2 | 4): DiffResult {
-    const mask = this.#scan(mode, size);
-    this.#undo.push({ mask: this.#mask, size: this.#size, pair: this.#pair });
-    if (this.#undo.length > DIFF_LIMITS.undoDepth) {
-      this.#undo.shift();
+  /**
+   * Answer the query. It is asked of the whole address space every time, not of what the
+   * last one left: a query is a standing description of the run rather than a step in a
+   * narrowing, so loosening a link has to be able to bring rows back. A pass over both
+   * regions costs tens of milliseconds, which is what makes that affordable.
+   */
+  apply(asked: DiffQuery, size: 1 | 2 | 4): DiffResult {
+    const query = { edges: asked.edges ?? [], values: asked.values ?? [] };
+    const problem = queryProblem(query, this.#captures);
+    if (problem) {
+      throw new Error(problem);
     }
-    this.#mask = mask;
+    this.#mask = this.#scan(query, size);
+    this.#asked = true;
+    this.#states = queryStates(query, this.#captures);
     this.#size = size;
-    this.#pair = this.#pairOf(mode);
+    this.#pair = this.#pairOf(query);
     this.#view = null;
     return this.result();
   }
 
-  /** Which addresses the filter keeps, mutes not consulted: hiding is what reading does. */
-  #scan(mode: DiffMode, size: 1 | 2 | 4): CandidateMask {
-    const keep = this.#predicate(mode, size);
+  /** Which addresses the query keeps, mutes not consulted: hiding is what reading does. */
+  #scan(query: Required<DiffQuery>, size: 1 | 2 | 4): CandidateMask {
+    const keep = this.#predicate(query, size);
     const mask = CandidateMask.empty();
     for (const region of REGIONS) {
       const { base, size: length } = RAM_REGIONS[region];
       for (let offset = 0; offset + size <= length; offset += size) {
-        if (this.#mask.spans(region, offset, size) && keep(region, offset, base + offset)) {
+        if (keep(region, offset, base + offset)) {
           mask.setSpan(region, offset, size);
         }
       }
@@ -479,109 +616,53 @@ export class MemoryDiff {
   }
 
   /**
-   * What one mode asks of one address. Everything a mode needs from the captures is
-   * worked out once here and closed over, so the scan is a loop over memory rather
-   * than a loop over the modes.
+   * What the whole query asks of one address. Everything it needs from the captures is
+   * worked out once here and closed over, so the scan is a loop over memory rather than
+   * a loop over the query. An `any` link asks nothing and is dropped before the loop.
    */
-  #predicate(mode: DiffMode, size: 1 | 2 | 4): (region: RamRegion, offset: number, address: number) => boolean {
-    switch (mode.kind) {
-      case 'value': {
-        const found = CandidateMask.empty();
-        for (const address of searchMemory(this.#context.machine(), {
-          value: mode.value,
-          size,
-          limit: Number.MAX_SAFE_INTEGER,
-        })) {
-          const at = locate(address);
-          if (at) {
-            found.setSpan(at.region, at.offset, size);
-          }
+  #predicate(
+    query: Required<DiffQuery>,
+    size: 1 | 2 | 4,
+  ): (region: RamRegion, offset: number, address: number) => boolean {
+    const mask = size === 4 ? 0xffffffff : (1 << (size * 8)) - 1;
+    const values = query.values.map((v) => ({ ram: this.byId(v.capture).ram, value: (v.value & mask) >>> 0 }));
+    const edges = query.edges
+      .filter((e) => e.relation !== 'any')
+      .map((e) => ({ a: this.byId(e.from).ram, b: this.byId(e.to).ram, relation: e.relation }));
+    return (region, offset) => {
+      for (const v of values) {
+        if (readAt(v.ram[region], offset, size) !== v.value) {
+          return false;
         }
-        return (region, offset) => found.spans(region, offset, size);
       }
-      case 'tags': {
-        // an address survives when its value is equal exactly where the tags are equal: a
-        // sound mixer fails on the first pair that shares a tag; a menu cursor cannot. An
-        // untagged capture makes no claim about what it should equal, so it takes no part
-        // in the question; two captures tagged the same way ask nothing either, which is
-        // why the filter is refused rather than answered with the whole of RAM
-        const captures = this.#requireCaptures(2).filter((c) => c.tag !== '');
-        const named = new Set(captures.map((c) => c.tag));
-        if (named.size < 2) {
-          throw new Error(
-            named.size === 0
-              ? 'the tag filter needs two different tags; no capture is tagged'
-              : `the tag filter needs two different tags; every tagged capture is '${[...named][0]}'`,
-          );
+      for (const e of edges) {
+        const a = readAt(e.a[region], offset, size);
+        const b = readAt(e.b[region], offset, size);
+        if (
+          e.relation === 'same'
+            ? a !== b
+            : e.relation === 'changed'
+              ? a === b
+              : e.relation === 'increased'
+                ? b <= a
+                : b >= a
+        ) {
+          return false;
         }
-        const values = new Array<number>(captures.length);
-        return (region, offset) => {
-          for (let i = 0; i < captures.length; i++) {
-            values[i] = readAt(captures[i]!.ram[region], offset, size);
-          }
-          for (let i = 0; i < captures.length; i++) {
-            for (let j = i + 1; j < captures.length; j++) {
-              if ((captures[i]!.tag === captures[j]!.tag) !== (values[i] === values[j])) {
-                return false;
-              }
-            }
-          }
-          return true;
-        };
       }
-      default: {
-        const from = this.byId(mode.from);
-        const to = this.byId(mode.to);
-        const by = 'by' in mode ? mode.by : undefined;
-        return (region, offset) => {
-          const a = readAt(from.ram[region], offset, size);
-          const b = readAt(to.ram[region], offset, size);
-          switch (mode.kind) {
-            case 'changed':
-              return a !== b;
-            case 'unchanged':
-              return a === b;
-            case 'increased':
-              return by === undefined ? b > a : b - a === by;
-            case 'decreased':
-              return by === undefined ? b < a : a - b === by;
-          }
-        };
-      }
-    }
+      return true;
+    };
   }
 
   /**
    * The two captures a filter compared, which is the pair its candidates are judged
-   * against: a neighbourhood counted over some other pair describes memory the user
-   * did not ask about, and the run lengths it reports would be of that pair's buffers.
-   * A tag filter names no pair, so the first two captures whose tags differ are it.
+   * against: a neighbourhood counted over some other pair describes memory the user did
+   * not ask about, and the run lengths it reports would be of that pair's buffers. The
+   * first link that asks for a difference is the one the user is looking at.
    */
-  #pairOf(mode: DiffMode): RankPair {
-    if (mode.kind !== 'value' && mode.kind !== 'tags') {
-      return [mode.from, mode.to];
-    }
-    if (mode.kind === 'tags') {
-      for (let i = 0; i < this.#captures.length; i++) {
-        for (let j = i + 1; j < this.#captures.length; j++) {
-          const a = this.#captures[i]!;
-          const b = this.#captures[j]!;
-          if (a.tag !== '' && b.tag !== '' && a.tag !== b.tag) {
-            return [a.id, b.id];
-          }
-        }
-      }
-    }
-    return null;
-  }
-
-  #requireCaptures(least: number): Capture[] {
-    if (this.#captures.length < least) {
-      throw new Error(
-        `this filter needs at least ${least} captures; there ${this.#captures.length === 1 ? 'is 1' : `are ${this.#captures.length}`}`,
-      );
-    }
-    return this.#captures;
+  #pairOf(query: Required<DiffQuery>): RankPair {
+    const told = query.edges.find((e) => e.relation !== 'any' && e.relation !== 'same');
+    return told ? [told.from, told.to] : null;
   }
 
   /**
@@ -670,10 +751,9 @@ export class MemoryDiff {
     const pair = this.#pair;
     const first = pair ? this.byId(pair[0]) : this.#captures[0]!;
     const second = pair ? this.byId(pair[1]) : this.#captures[1]!;
-    // an untagged capture answers no tag question, so it is not one of the values a
-    // candidate is expected to take
-    const tagged = this.#captures.flatMap((c, i) => (c.tag === '' ? [] : [i]));
-    const tags = new Set(tagged.map((i) => this.#captures[i]!.tag)).size;
+    // a capture no link names takes no part in the question, so it is not one of the
+    // values a candidate is expected to take
+    const { count: states, taking } = this.#states;
     const per = {} as RankContext['per'];
     for (const region of REGIONS) {
       const a = first.ram[region];
@@ -698,7 +778,7 @@ export class MemoryDiff {
       }
       per[region] = { prefix, runs };
     }
-    return { tags, tagged, per };
+    return { states, taking, per };
   }
 
   #row(address: number, size: 1 | 2 | 4, info: DebugInfo | null, rank: RankContext | null, reasons: string[]): DiffRow {
@@ -717,7 +797,7 @@ export class MemoryDiff {
       // voices, a shadow OAM, a particle array — are hundreds of bytes of neighbours
       const near = prefix[Math.min(runs.length, at.offset + 256)]! - prefix[Math.max(0, at.offset - 256)]!;
       const run = runs[at.offset] || 1;
-      const distinct = new Set(rank.tagged.map((i) => values[i]!)).size;
+      const distinct = new Set(rank.taking.map((i) => values[i]!)).size;
       // the weights are an ordering, not a calibrated scale: the most any one criterion
       // is worth is what loneliness pays, so nothing a row is merely named by can carry
       // it past a candidate sitting on its own — and `reasons` is what a user reads to
@@ -733,12 +813,12 @@ export class MemoryDiff {
       if (near <= 64) {
         row.reasons.push(`${near} changed byte${near === 1 ? '' : 's'} within ±256`);
       }
-      // below two tags there is no tag question, so there is nothing for a candidate to
-      // answer well: awarding this to every row would say a criterion was met that the
-      // filter itself refuses to ask
-      if (rank.tags >= 2 && distinct === rank.tags) {
+      // below two states the strip asks nothing about how a value spreads, so there is
+      // nothing for a candidate to answer well: awarding this to every row would claim a
+      // criterion was met that the query never set
+      if (rank.states >= 2 && distinct === rank.states) {
         score += 3;
-        row.reasons.push(`${distinct} distinct value${distinct === 1 ? '' : 's'}, one per tag`);
+        row.reasons.push(`${distinct} distinct value${distinct === 1 ? '' : 's'}, one per state`);
       }
       if (run <= 4) {
         score += run <= 2 ? 3 : 1;
@@ -751,9 +831,9 @@ export class MemoryDiff {
 }
 
 interface RankContext {
-  tags: number;
+  states: number;
   /** which captures carry a tag, since only those are asked to hold one value per tag */
-  tagged: number[];
+  taking: number[];
   per: Record<RamRegion, { prefix: Int32Array; runs: Uint16Array }>;
 }
 

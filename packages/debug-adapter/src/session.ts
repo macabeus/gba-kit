@@ -54,12 +54,11 @@ import {
   type StateBody,
   breakOnWriteBody,
   captureId,
+  captureIds,
   captureInfo,
   captureTag,
   capturesBody,
   diffFilterBody,
-  diffMode,
-  diffSize,
   entryCount,
   frameBody,
   mutesBody,
@@ -1532,6 +1531,11 @@ export class GbaDebugSession extends DebugSession {
         s.memoryDiff.retag(captureId(a.id), captureTag(a.tag));
         return capturesBody(s);
       }
+      case 'gba-kit/reorderCaptures': {
+        const a = args as Args<'gba-kit/reorderCaptures'>;
+        s.memoryDiff.reorder(captureIds(a.ids));
+        return capturesBody(s);
+      }
       case 'gba-kit/forgetCapture': {
         const a = args as Args<'gba-kit/forgetCapture'>;
         s.memoryDiff.forget(captureId(a.id));
@@ -1552,10 +1556,6 @@ export class GbaDebugSession extends DebugSession {
       case 'gba-kit/setMute':
         setMute(s, args as Args<'gba-kit/setMute'>);
         return mutesBody(s);
-      case 'gba-kit/diffPreview': {
-        const a = args as Args<'gba-kit/diffPreview'>;
-        return s.memoryDiff.preview(diffMode(a.mode), diffSize(a.size));
-      }
       case 'gba-kit/diffFilter':
         return diffFilterBody(s, (args ?? {}) as NonNullable<Args<'gba-kit/diffFilter'>>);
       case 'gba-kit/breakOnWrite':

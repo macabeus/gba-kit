@@ -2098,14 +2098,26 @@ describe('the memory diff', () => {
     expect(first.origin).toBe('machine');
   });
 
-  it('finds the variable whose value follows the tags, and not the one that merely moves', async () => {
+  /** the strip as the panel draws it: each capture linked to the next, and an arc back to the first. */
+  const backAndForth = (session: { memoryDiff: { captures(): Array<{ id: number }> } }) => {
+    const ids = session.memoryDiff.captures().map((c) => c.id);
+    return {
+      edges: [
+        ...ids.slice(0, -1).map((id, i) => ({ from: id, to: ids[i + 1]!, relation: 'changed' as const })),
+        { from: ids[0]!, to: ids[ids.length - 1]!, relation: 'same' as const },
+      ],
+      values: [],
+    };
+  };
+
+  it('finds the variable whose value came back with the run, and not the one that merely moves', async () => {
     const { session, run } = await boot('thumb-O0');
     run(30);
     const counter = addressOf(session, 'g_frame');
     const samples = addressOf(session, 'g_samples');
 
-    // `g_samples` is written every frame from the frame counter, so it differs between
-    // the two captures that share a tag; only `g_frame` itself is put back
+    // `g_samples` is written every frame from the frame counter, so it differs across the
+    // arc the strip draws back to ①; only `g_frame` itself is put back
     put(session, counter, 0x1234);
     session.captureMemory('A');
     run(2);
@@ -2115,7 +2127,7 @@ describe('the memory diff', () => {
     put(session, counter, 0x1234);
     session.captureMemory('A');
 
-    session.memoryDiff.apply({ kind: 'tags' }, 4);
+    session.memoryDiff.apply(backAndForth(session), 4);
     const kept = new Set(session.memoryDiff.rows(0, 500).map((r) => r.address));
     expect(kept.has(counter)).toBe(true);
     expect(kept.has(samples)).toBe(false);
@@ -2132,7 +2144,7 @@ describe('the memory diff', () => {
     put(session, samples + 4, 1);
     session.captureMemory('A');
 
-    session.memoryDiff.apply({ kind: 'tags' }, 4);
+    session.memoryDiff.apply(backAndForth(session), 4);
     const row = session.memoryDiff.rows(0, 500).find((r) => r.address === samples + 4);
     expect(row?.placement.tier).toBe('sized');
     expect(row?.placement.path).toBe('g_samples[1]');
@@ -2151,7 +2163,7 @@ describe('the memory diff', () => {
     put(session, samples, 0x11223344);
     session.captureMemory('A');
 
-    session.memoryDiff.apply({ kind: 'tags' }, 1);
+    session.memoryDiff.apply(backAndForth(session), 1);
     const [row] = session.memoryDiff.rows(0, 8).map(diffRowBody);
     expect(row).toMatchObject({ address: samples, tier: 'sized', path: 'g_samples[0]', values: [0x44, 0x55, 0x44] });
     // the whole element is what `g_samples[0]` names, and one byte of it is not: a value
@@ -2161,7 +2173,7 @@ describe('the memory diff', () => {
     expect(row!.formatted).toBeUndefined();
 
     session.memoryDiff.reset();
-    session.memoryDiff.apply({ kind: 'unchanged', from: 1, to: 2 }, 1);
+    session.memoryDiff.apply({ edges: [{ from: 1, to: 2, relation: 'same' }], values: [] }, 1);
     const inside = session.memoryDiff
       .rows(0, 5000)
       .map(diffRowBody)
@@ -2171,7 +2183,7 @@ describe('the memory diff', () => {
 
     // at the element's own width the path names the address, and the value reads as the element
     session.memoryDiff.reset();
-    session.memoryDiff.apply({ kind: 'tags' }, 4);
+    session.memoryDiff.apply(backAndForth(session), 4);
     const whole = session.memoryDiff.rows(0, 8).map(diffRowBody)[0];
     expect(whole).toMatchObject({ address: samples, path: 'g_samples[0]' });
     expect(whole!.pathOffset).toBeUndefined();
