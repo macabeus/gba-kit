@@ -7,7 +7,7 @@ import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import { EditableName } from '../components.js';
-import { edgeHandles } from '../panels/DiffGraph.js';
+import { edgeHandles, relationLabel } from '../panels/DiffGraph.js';
 import { DiffGroups } from '../panels/DiffRows.js';
 import { MemoryDiffPanel, nameFor, querySentence, watchExpression } from '../panels/MemoryDiffPanel.js';
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
@@ -267,6 +267,16 @@ describe('memory diff panel', () => {
     const running = renderToString(<MemoryDiffPanel transport={transport} />);
     expect(running.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).not.toContain('disabled');
     expect(running).toContain('Looking for background noise needs a stopped machine');
+  });
+
+  it('an arrow names both ends, since which way is up is the whole of what it says', () => {
+    // an arrow has a direction and may point either way across the canvas, so a relation
+    // that is not symmetric has to say where it went up from
+    expect(relationLabel('increased', 'slot A', 'slot B')).toBe('↑ went up from slot A to slot B');
+    expect(relationLabel('decreased', '②', '①')).toBe('↓ went down from ② to ①');
+    // the symmetric ones read as a pair rather than as a direction
+    expect(relationLabel('changed', '①', '②')).toBe('≠ changed between ① and ②');
+    expect(relationLabel('same', '①', '③')).toBe('= the same in ① and ③');
   });
 
   it('an arrow leaves the side its target is on, so its label is never behind a node', () => {
