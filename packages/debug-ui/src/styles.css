@@ -566,6 +566,48 @@
 .gk-diff-tag {
   font-size: 11px;
 }
+/* the graph: a canvas of captures to place, and arrows to draw between any two */
+.gk-graph {
+  height: 280px;
+  border: 1px solid var(--gk-border);
+  border-radius: 3px;
+}
+.gk-graph-node {
+  padding: 3px;
+  border: 1px solid var(--gk-border);
+  border-radius: 3px;
+  background: var(--gk-bg);
+}
+.gk-graph-node canvas {
+  display: block;
+  width: 120px;
+  height: auto;
+  image-rendering: pixelated;
+}
+.gk-graph-name {
+  padding-top: 2px;
+  font-size: 11px;
+  text-align: center;
+}
+.gk-graph-edge-label {
+  position: absolute;
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  pointer-events: all;
+}
+.gk-graph-edge-drop {
+  border: none;
+  background: none;
+  color: var(--gk-muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+.gk-graph-edge-drop:hover {
+  color: var(--gk-bad);
+}
+
 /* the strip is the query: cards in the order they were taken, with the link between each pair */
 .gk-strip {
   display: flex;

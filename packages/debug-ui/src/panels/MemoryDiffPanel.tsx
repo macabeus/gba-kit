@@ -18,9 +18,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Button, Empty, Icon, Menu, Screenshot, Select, parseNumber } from '../components.js';
 import { useDebugState, useMemoryDiff, useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
+import { DiffGraph, type GraphEdge, type Relation } from './DiffGraph.js';
 import { CIRCLED, DiffGroups } from './DiffRows.js';
-
-type Relation = 'same' | 'changed' | 'increased' | 'decreased' | 'any';
 
 const RELATIONS: Array<{ value: Relation; label: string; word: string }> = [
   { value: 'changed', label: '≠ changed', word: 'changed' },
@@ -32,38 +31,36 @@ const RELATIONS: Array<{ value: Relation; label: string; word: string }> = [
 
 const RELATION_WORD = new Map(RELATIONS.map((r) => [r.value, r.word]));
 
-/** The default a new link takes: "what changed here" is the question a strip is built to ask. */
-const DEFAULT_RELATION: Relation = 'changed';
-
 /**
- * The query as one sentence, under the strip that draws it. A diagram is quick to read
- * wrongly, and a query nobody can say out loud is one nobody can check.
+ * The query as one sentence, under whichever picture is drawing it. A graph is quick to
+ * read wrongly and a query nobody can say out loud is one nobody can check, so the words
+ * are what both views are held to.
  */
 export function querySentence(
-  captures: Array<{ id: number; name: string }>,
-  links: Record<number, Relation>,
-  arcs: Record<number, number>,
+  captures: Array<{ id: number; tag: string }>,
+  edges: GraphEdge[],
   values: Record<number, number>,
 ): string {
   const at = (id: number): string => {
     const i = captures.findIndex((c) => c.id === id);
-    return captures[i]?.name || (CIRCLED[i] ?? `#${i + 1}`);
+    return captures[i]?.tag || (CIRCLED[i] ?? `#${i + 1}`);
   };
   if (captures.length < 2) {
     return 'Capture the same screen in two states, then say what the value did between them.';
   }
-  const parts: string[] = [];
-  for (let i = 0; i + 1 < captures.length; i++) {
-    const relation = links[captures[i]!.id] ?? DEFAULT_RELATION;
-    parts.push(`${at(captures[i]!.id)} → ${at(captures[i + 1]!.id)} ${RELATION_WORD.get(relation)}`);
-  }
-  for (const [id, sameAs] of Object.entries(arcs)) {
-    parts.push(`${at(Number(id))} is back to what ${at(sameAs)} held`);
-  }
-  for (const [id, value] of Object.entries(values)) {
-    parts.push(`${at(Number(id))} held ${value}`);
-  }
-  return `Keep addresses where ${parts.join(', ')}.`;
+  const parts = [
+    ...edges
+      .filter((e) => e.relation !== 'any')
+      .map((e) =>
+        e.relation === 'same'
+          ? `${at(e.to)} is back to what ${at(e.from)} held`
+          : `${at(e.from)} → ${at(e.to)} ${RELATION_WORD.get(e.relation)}`,
+      ),
+    ...Object.entries(values).map(([id, value]) => `${at(Number(id))} held ${value}`),
+  ];
+  return parts.length === 0
+    ? 'Every arrow asks for anything, so this keeps every address.'
+    : `Keep addresses where ${parts.join(', ')}.`;
 }
 
 /**
@@ -84,12 +81,11 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   const diff = useMemoryDiff(transport);
   const saves = useSaveStates(transport);
   const [size, setSize] = useState<1 | 2 | 4>(1);
-  /** what each link expects, keyed by the capture on its left */
-  const [links, setLinks] = useState<Record<number, Relation>>({});
-  /** the earlier capture a later one is a repeat of: the arc back over the strip */
-  const [arcs, setArcs] = useState<Record<number, number>>({});
+  /** every arrow drawn, which is the query: the strip and the graph are two ways of drawing it */
+  const [edges, setEdges] = useState<GraphEdge[]>([]);
   /** an exact value a capture held, as typed */
   const [typed, setTyped] = useState<Record<number, string>>({});
+  const [view, setView] = useState<'strip' | 'graph'>('graph');
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [mutesOpen, setMutesOpen] = useState(false);
@@ -102,6 +98,21 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   const tags = captures.map((c) => c.tag);
   const busy = diff.busy || saves.busy;
 
+  // a capture arrives joined to the one before it, which is the run as it was played;
+  // an arrow to a capture that has been forgotten is an arrow to nothing
+  useEffect(() => {
+    setEdges((was) => {
+      const held = new Set(captures.map((c) => c.id));
+      const kept = was.filter((e) => held.has(e.from) && held.has(e.to));
+      const last = captures[captures.length - 1];
+      const previous = captures[captures.length - 2];
+      if (last && previous && !kept.some((e) => e.from === last.id || e.to === last.id)) {
+        kept.push({ from: previous.id, to: last.id, relation: 'changed' });
+      }
+      return kept.length === was.length && kept.every((e, i) => e === was[i]) ? was : kept;
+    });
+  }, [captures]);
+
   const values: Record<number, number> = {};
   for (const [id, text] of Object.entries(typed)) {
     const parsed = parseNumber(text);
@@ -110,25 +121,9 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
     }
   }
 
-  /**
-   * The edges the strip draws. A link between neighbours and an arc back to a capture a
-   * later one repeats are the same kind of thing, so they are built into one list: the
-   * arc is what says "I went back", and without it a chain of `changed` keeps every byte
-   * that merely churns.
-   */
-  const edges = [
-    ...captures.slice(0, -1).map((c, i) => ({
-      from: c.id,
-      to: captures[i + 1]!.id,
-      relation: links[c.id] ?? DEFAULT_RELATION,
-    })),
-    ...Object.entries(arcs)
-      .filter(([id, sameAs]) => captures.some((c) => c.id === Number(id)) && captures.some((c) => c.id === sameAs))
-      .map(([id, sameAs]) => ({ from: sameAs, to: Number(id), relation: 'same' as Relation })),
-  ];
   const query = { edges, values: Object.entries(values).map(([id, value]) => ({ capture: Number(id), value })) };
 
-  // the query is a standing description, so the answer follows it: a link changed is a
+  // the query is a standing description, so the answer follows it: an arrow changed is a
   // question changed, and a pass over both regions costs tens of milliseconds
   const asked = JSON.stringify({ query, size });
   const lastAsked = useRef<string | null>(null);
@@ -145,6 +140,31 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
     // `asked` is the query and the size serialized, so the effect runs when what is being
     // asked changes rather than when the objects carrying it are rebuilt
   }, [asked, captures.length, busy, diff, query, size]);
+
+  /** The arrow between two captures, as the strip reads it: one link, either way round. */
+  const between = (a: number, b: number): GraphEdge | undefined =>
+    edges.find((e) => (e.from === a && e.to === b) || (e.from === b && e.to === a));
+
+  const setLink = (a: number, b: number, relation: Relation): void =>
+    setEdges((was) => {
+      const rest = was.filter((e) => !((e.from === a && e.to === b) || (e.from === b && e.to === a)));
+      return [...rest, { from: a, to: b, relation }];
+    });
+
+  /** The capture an arc says this one repeats: a `same` arrow from a capture that is not its neighbour. */
+  const arcInto = (id: number, at: number): number | undefined =>
+    edges.find(
+      (e) => e.to === id && e.relation === 'same' && e.from !== captures[at - 1]?.id && e.from !== captures[at + 1]?.id,
+    )?.from;
+
+  const setArc = (id: number, at: number, from: number | undefined): void =>
+    setEdges((was) => {
+      const rest = was.filter(
+        (e) =>
+          !(e.to === id && e.relation === 'same' && e.from !== captures[at - 1]?.id && e.from !== captures[at + 1]?.id),
+      );
+      return from === undefined ? rest : [...rest, { from, to: id, relation: 'same' }];
+    });
 
   const move = (id: number, before: number | null): void => {
     const rest = captures.filter((c) => c.id !== id).map((c) => c.id);
@@ -257,65 +277,63 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
 
       {captures.length === 0 ? (
         <Empty>Capture RAM on one screen, change something, capture again — then say what happened between them.</Empty>
+      ) : view === 'graph' ? (
+        <DiffGraph captures={captures} edges={edges} onEdges={setEdges} />
       ) : (
         <div className="gk-strip">
-          {captures.map((capture, i) => (
-            <div className="gk-strip-step" key={capture.id}>
-              <CaptureCard
-                at={i}
-                capture={capture}
-                earlier={captures.slice(0, i)}
-                sameAs={arcs[capture.id]}
-                value={typed[capture.id] ?? ''}
-                busy={busy}
-                dragging={dragging === capture.id}
-                onName={(name) => void diff.retag(capture.id, name)}
-                onSameAs={(id) =>
-                  setArcs((was) => {
-                    const next = { ...was };
-                    if (id === undefined) {
-                      delete next[capture.id];
-                    } else {
-                      next[capture.id] = id;
-                    }
-                    return next;
-                  })
-                }
-                onValue={(text) => setTyped((was) => ({ ...was, [capture.id]: text }))}
-                onForget={() => void diff.forget(capture.id)}
-                onDragStart={() => setDragging(capture.id)}
-                onDragEnd={() => setDragging(null)}
-                onDrop={() => dragging !== null && dragging !== capture.id && move(dragging, capture.id)}
-              />
-              {i + 1 < captures.length && (
-                <Select
-                  className="gk-link"
-                  value={links[capture.id] ?? DEFAULT_RELATION}
-                  options={RELATIONS}
-                  onChange={(relation) => setLinks((was) => ({ ...was, [capture.id]: relation }))}
-                  title={`What the value did between ${CIRCLED[i] ?? i + 1} and ${CIRCLED[i + 1] ?? i + 2}`}
+          {captures.map((capture, i) => {
+            const next = captures[i + 1];
+            const link = next ? between(capture.id, next.id) : undefined;
+            return (
+              <div className="gk-strip-step" key={capture.id}>
+                <CaptureCard
+                  at={i}
+                  capture={capture}
+                  earlier={captures.slice(0, i)}
+                  sameAs={arcInto(capture.id, i)}
+                  value={typed[capture.id] ?? ''}
+                  busy={busy}
+                  dragging={dragging === capture.id}
+                  onName={(name) => void diff.retag(capture.id, name)}
+                  onSameAs={(id) => setArc(capture.id, i, id)}
+                  onValue={(text) => setTyped((was) => ({ ...was, [capture.id]: text }))}
+                  onForget={() => void diff.forget(capture.id)}
+                  onDragStart={() => setDragging(capture.id)}
+                  onDragEnd={() => setDragging(null)}
+                  onDrop={() => dragging !== null && dragging !== capture.id && move(dragging, capture.id)}
                 />
-              )}
-            </div>
-          ))}
+                {next && (
+                  <Select
+                    className="gk-link"
+                    value={link?.relation ?? 'any'}
+                    options={RELATIONS}
+                    onChange={(relation) => setLink(capture.id, next.id, relation)}
+                    title={`What the value did between ${CIRCLED[i] ?? i + 1} and ${CIRCLED[i + 1] ?? i + 2}`}
+                  />
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
       <div className="gk-row">
+        <Select
+          value={view}
+          options={[
+            { value: 'graph' as const, label: 'Graph' },
+            { value: 'strip' as const, label: 'Strip' },
+          ]}
+          onChange={setView}
+          title="Draw the query as a graph you place, or as the run left to right"
+        />
         <Select
           value={size}
           options={[1, 2, 4].map((n) => ({ value: n as 1 | 2 | 4, label: `${n * 8}-bit` }))}
           onChange={setSize}
           title="How wide a value to read at each address"
         />
-        <span className="gk-hint">
-          {querySentence(
-            captures.map((c, i) => ({ id: c.id, name: c.tag || (CIRCLED[i] ?? `#${i + 1}`) })),
-            links,
-            arcs,
-            values,
-          )}
-        </span>
+        <span className="gk-hint">{querySentence(captures, edges, values)}</span>
       </div>
 
       <div className="gk-drawer">
