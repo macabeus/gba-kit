@@ -1,11 +1,12 @@
 /**
- * The captures as a graph: nodes to place where they make sense, and arrows to draw
- * between any two of them.
+ * The captures as a graph, which is what the query already is: nodes are the captures,
+ * arrows are the edges, and an arrow may join any two of them rather than only
+ * neighbours. That is what the picture is for — a repeat is drawn where it happened
+ * instead of chosen out of a list.
  *
- * The query is already an edge list, so this is a second way of drawing the same thing
- * the strip draws — and the one that can say what the strip cannot, since an arrow here
- * is not obliged to join neighbours. Positions are the view's own: nothing about where a
- * node sits reaches the query, so moving one changes nothing about the answer.
+ * Where a node sits says one thing and one thing only: the order the captures are read
+ * in, left to right, which is the order of the value columns under it. Nothing else about
+ * a position reaches the query.
  */
 import type { CaptureInfo } from '@gba-kit/debug-core/protocol';
 import {
@@ -28,55 +29,117 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useEffect } from 'react';
 
-import { Screenshot } from '../components.js';
+import { Button, Icon, Screenshot } from '../components.js';
 import { CIRCLED } from './DiffRows.js';
 
 export type Relation = 'same' | 'changed' | 'increased' | 'decreased' | 'any';
 
+/** One arrow: what the value did between two captures. */
 export interface GraphEdge {
   from: number;
   to: number;
   relation: Relation;
 }
 
-const RELATIONS: Array<{ value: Relation; label: string }> = [
-  { value: 'changed', label: '≠ changed' },
-  { value: 'same', label: '= same' },
-  { value: 'increased', label: '↑ up' },
-  { value: 'decreased', label: '↓ down' },
-  { value: 'any', label: '· anything' },
+/** Every relation an arrow can carry: how it is picked, and how it reads in a sentence. */
+export const RELATIONS: Array<{ value: Relation; label: string; word: string }> = [
+  { value: 'changed', label: '≠ changed', word: 'changed' },
+  { value: 'same', label: '= same', word: 'stayed the same' },
+  { value: 'increased', label: '↑ went up', word: 'went up' },
+  { value: 'decreased', label: '↓ went down', word: 'went down' },
+  { value: 'any', label: '· anything', word: 'did anything' },
 ];
 
-/** Where a capture's node sits when nothing has moved it: left to right, in capture order. */
-const laidOut = (at: number): { x: number; y: number } => ({ x: at * 190, y: 0 });
+export const RELATION_WORD = new Map(RELATIONS.map((r) => [r.value, r.word]));
 
-const edgeId = (edge: GraphEdge): string => `${edge.from}-${edge.to}`;
+/** What a new arrow says until it is told otherwise; "what changed here" is why one gets drawn. */
+export const DEFAULT_RELATION: Relation = 'changed';
 
-type CaptureNode = Node<{ capture: CaptureInfo; at: number }, 'capture'>;
+/**
+ * A node's handles. An arrow leaves the side its target is on and arrives on the side it
+ * came from, so a link forward reads left to right and one back to an earlier capture
+ * curves outside the nodes rather than across them — which is also what keeps its label
+ * off the node in front.
+ */
+const HANDLES = { sourceRight: 'sr', sourceLeft: 'sl', targetLeft: 'tl', targetRight: 'tr' } as const;
+
+/**
+ * Which sides an arrow between two nodes leaves and arrives on. Left to the first handle
+ * that matches and every arrow starts on a node's left, which puts its label behind the
+ * node before it.
+ */
+export function edgeHandles(fromX: number, toX: number): { sourceHandle: string; targetHandle: string } {
+  return fromX <= toX
+    ? { sourceHandle: HANDLES.sourceRight, targetHandle: HANDLES.targetLeft }
+    : { sourceHandle: HANDLES.sourceLeft, targetHandle: HANDLES.targetRight };
+}
+
+/** Where a capture's node sits when nothing has moved it: a row, in capture order. */
+const laidOut = (at: number): { x: number; y: number } => ({ x: at * 210, y: 0 });
+
+const edgeId = (edge: GraphEdge): string => `${edge.from}->${edge.to}`;
+
+interface CaptureNodeData {
+  capture: CaptureInfo;
+  at: number;
+  value: string;
+  busy: boolean;
+  onName(name: string): void;
+  onValue(text: string): void;
+  onForget(): void;
+  [key: string]: unknown;
+}
+
+export type CaptureNode = Node<CaptureNodeData, 'capture'>;
 
 function CaptureNodeView({ data }: NodeProps<CaptureNode>) {
-  const { capture, at } = data;
+  const { capture, at, value, busy, onName, onValue, onForget } = data;
   return (
     <div className="gk-graph-node">
-      {/* an arrow may run either way across the canvas, so both sides take one and give one */}
-      <Handle type="target" position={Position.Left} id="l" />
-      <Handle type="source" position={Position.Left} id="ls" />
+      <Handle type="target" position={Position.Left} id={HANDLES.targetLeft} />
+      <Handle type="source" position={Position.Left} id={HANDLES.sourceLeft} />
       <Screenshot
         rgba={capture.thumbnail}
         width={capture.width}
         height={capture.height}
         label={`the screen at frame ${capture.frame}`}
       />
-      <div className="gk-graph-name">
-        <span className="gk-mono">{CIRCLED[at] ?? `#${at + 1}`}</span> {capture.tag || `frame ${capture.frame}`}
+      <div className="gk-graph-row">
+        <span className="gk-mono gk-small">{CIRCLED[at] ?? `#${at + 1}`}</span>
+        <input
+          className="gk-input nodrag"
+          defaultValue={capture.tag}
+          placeholder={`frame ${capture.frame}`}
+          aria-label={`Name capture ${at + 1}`}
+          onBlur={(e) => e.currentTarget.value.trim() !== capture.tag && onName(e.currentTarget.value.trim())}
+          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+        />
+        <Button kind="icon danger" onClick={onForget} disabled={busy} title="Forget" label={`Forget capture ${at + 1}`}>
+          <Icon name="trash" />
+        </Button>
       </div>
-      <Handle type="source" position={Position.Right} id="r" />
-      <Handle type="target" position={Position.Right} id="rt" />
+      <input
+        className="gk-input nodrag gk-small"
+        placeholder="any value"
+        aria-label={`The value capture ${at + 1} held`}
+        value={value}
+        onChange={(e) => onValue(e.target.value)}
+        title="A value this capture held, for a screen that puts a number on it"
+      />
+      <Handle type="source" position={Position.Right} id={HANDLES.sourceRight} />
+      <Handle type="target" position={Position.Right} id={HANDLES.targetRight} />
     </div>
   );
 }
 
-/** An arrow that says what it expects, and can be changed or dropped where it is drawn. */
+interface RelationEdgeData {
+  relation: Relation;
+  onRelation(relation: Relation): void;
+  onDrop(): void;
+  [key: string]: unknown;
+}
+
+/** An arrow that says what it expects, and is changed or dropped where it is drawn. */
 function RelationEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data }: EdgeProps) {
   const [path, labelX, labelY] = getBezierPath({
     sourceX,
@@ -86,19 +149,19 @@ function RelationEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, 
     sourcePosition,
     targetPosition,
   });
-  const edge = data as { relation: Relation; onRelation(r: Relation): void; onDrop(): void };
+  const { relation, onRelation, onDrop } = data as unknown as RelationEdgeData;
   return (
     <>
       <BaseEdge id={id} path={path} />
       <EdgeLabelRenderer>
         <div
-          className="gk-graph-edge-label nodrag nopan"
+          className="gk-graph-label nodrag nopan"
           style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
         >
           <select
             className="gk-select"
-            value={edge.relation}
-            onChange={(e) => edge.onRelation(e.target.value as Relation)}
+            value={relation}
+            onChange={(e) => onRelation(e.target.value as Relation)}
             aria-label="What the value did along this arrow"
           >
             {RELATIONS.map((r) => (
@@ -107,7 +170,7 @@ function RelationEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, 
               </option>
             ))}
           </select>
-          <button type="button" className="gk-graph-edge-drop" onClick={edge.onDrop} aria-label="Remove this arrow">
+          <button type="button" className="gk-graph-drop" onClick={onDrop} aria-label="Remove this arrow">
             ×
           </button>
         </div>
@@ -122,46 +185,63 @@ const edgeTypes = { relation: RelationEdge };
 export interface DiffGraphProps {
   captures: CaptureInfo[];
   edges: GraphEdge[];
+  /** an exact value a capture held, as typed, keyed by capture id */
+  values: Record<number, string>;
+  busy: boolean;
   onEdges(edges: GraphEdge[]): void;
+  onName(id: number, name: string): void;
+  onValue(id: number, text: string): void;
+  onForget(id: number): void;
+  /** the captures in the order the canvas now reads them, left to right */
+  onOrder(ids: number[]): void;
 }
 
-function Canvas({ captures, edges, onEdges }: DiffGraphProps) {
+function Canvas({ captures, edges, values, busy, onEdges, onName, onValue, onForget, onOrder }: DiffGraphProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<CaptureNode>([]);
   const { fitView } = useReactFlow();
 
   // a capture added or forgotten changes what there is to draw; a node already placed
-  // keeps where it was put, since the position is the user's and not the data's
+  // keeps where it was put, since a position is the user's and not the data's
   useEffect(() => {
     setNodes((was) =>
-      captures.map((capture, at) => {
-        const held = was.find((n) => n.id === String(capture.id));
-        return {
-          id: String(capture.id),
-          type: 'capture' as const,
-          position: held?.position ?? laidOut(at),
-          data: { capture, at },
-        };
-      }),
+      captures.map((capture, at) => ({
+        id: String(capture.id),
+        type: 'capture' as const,
+        position: was.find((n) => n.id === String(capture.id))?.position ?? laidOut(at),
+        data: {
+          capture,
+          at,
+          value: values[capture.id] ?? '',
+          busy,
+          onName: (name: string) => onName(capture.id, name),
+          onValue: (text: string) => onValue(capture.id, text),
+          onForget: () => onForget(capture.id),
+        },
+      })),
     );
-  }, [captures, setNodes]);
+  }, [captures, values, busy, onName, onValue, onForget, setNodes]);
 
   useEffect(() => {
-    void fitView({ padding: 0.2, duration: 150 });
+    void fitView({ padding: 0.15, duration: 150 });
   }, [captures.length, fitView]);
 
-  const drawn: Edge[] = edges.map((edge) => ({
-    id: edgeId(edge),
-    source: String(edge.from),
-    target: String(edge.to),
-    type: 'relation',
-    animated: edge.relation === 'any',
-    data: {
-      relation: edge.relation,
-      onRelation: (relation: Relation) =>
-        onEdges(edges.map((e) => (edgeId(e) === edgeId(edge) ? { ...e, relation } : e))),
-      onDrop: () => onEdges(edges.filter((e) => edgeId(e) !== edgeId(edge))),
-    },
-  }));
+  const xOf = (id: number): number => nodes.find((n) => n.id === String(id))?.position.x ?? 0;
+
+  const drawn: Edge[] = edges.map((edge) => {
+    return {
+      id: edgeId(edge),
+      source: String(edge.from),
+      target: String(edge.to),
+      ...edgeHandles(xOf(edge.from), xOf(edge.to)),
+      type: 'relation',
+      data: {
+        relation: edge.relation,
+        onRelation: (relation: Relation) =>
+          onEdges(edges.map((e) => (edgeId(e) === edgeId(edge) ? { ...e, relation } : e))),
+        onDrop: () => onEdges(edges.filter((e) => edgeId(e) !== edgeId(edge))),
+      },
+    };
+  });
 
   return (
     <ReactFlow
@@ -172,16 +252,19 @@ function Canvas({ captures, edges, onEdges }: DiffGraphProps) {
       edgeTypes={edgeTypes}
       colorMode="dark"
       fitView
-      proOptions={{ hideAttribution: false }}
+      minZoom={0.2}
+      // the canvas reads left to right, and so do the value columns under it
+      onNodeDragStop={() => onOrder([...nodes].sort((a, b) => a.position.x - b.position.x).map((n) => Number(n.id)))}
       onConnect={(connection) => {
         const from = Number(connection.source);
         const to = Number(connection.target);
-        // an arrow from a capture to itself asks nothing, and a second arrow between the
-        // same pair would be two answers to one question
-        if (from === to || edges.some((e) => e.from === from && e.to === to)) {
+        // an arrow from a capture to itself asks nothing, and a second one between the same
+        // pair either way round would be two answers to one question
+        const taken = edges.some((e) => (e.from === from && e.to === to) || (e.from === to && e.to === from));
+        if (from === to || taken) {
           return;
         }
-        onEdges([...edges, { from, to, relation: 'changed' }]);
+        onEdges([...edges, { from, to, relation: DEFAULT_RELATION }]);
       }}
     >
       <Background />

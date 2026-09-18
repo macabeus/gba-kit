@@ -7,6 +7,7 @@ import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import { EditableName } from '../components.js';
+import { edgeHandles } from '../panels/DiffGraph.js';
 import { DiffGroups } from '../panels/DiffRows.js';
 import { MemoryDiffPanel, nameFor, querySentence, watchExpression } from '../panels/MemoryDiffPanel.js';
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
@@ -265,6 +266,15 @@ describe('memory diff panel', () => {
     const running = renderToString(<MemoryDiffPanel transport={transport} />);
     expect(running).toContain('Capturing needs a stopped machine');
     expect(running.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).toContain('disabled');
+  });
+
+  it('an arrow leaves the side its target is on, so its label is never behind a node', () => {
+    // left to the first handle that matches, every arrow starts on a node's left edge and
+    // its label lands on top of whatever sits before it
+    expect(edgeHandles(0, 210)).toEqual({ sourceHandle: 'sr', targetHandle: 'tl' });
+    expect(edgeHandles(420, 0)).toEqual({ sourceHandle: 'sl', targetHandle: 'tr' });
+    // stacked nodes still have to pick a side, and forward is the one to prefer
+    expect(edgeHandles(100, 100)).toEqual({ sourceHandle: 'sr', targetHandle: 'tl' });
   });
 
   it('says the query in words, so a picture of it can be checked by reading it', () => {

@@ -9,21 +9,25 @@
 Find the variable behind a feature by capturing RAM and comparing the captures
 
 The `Memory search` tab becomes `Memory diff`, at the same panel id. Take a capture with
-the menu on item A, move to item B, capture, move back, capture — then say on the strip
-what the value did between them: `changed`, `same`, `went up`, `went down`, or nothing at
-all. The captures are the query. A capture can also be marked as a repeat of an earlier
-one, drawn as an arc back over the strip, and that arc is what does the work: between
-neighbours, "changed, then changed again" is what every churning byte does, and on
-Klonoa's save-file screen with no muting it keeps 3,117 addresses where the arc back to
-the first capture keeps 90.
+the menu on item A, move to item B, capture, move back, capture — then draw what the
+value did between them. The captures are a graph: nodes to place, and arrows carrying
+`changed`, `same`, `went up`, `went down` or nothing at all. A new capture arrives joined
+to the one before it, which is the run as it was played.
+
+An arrow is not obliged to join neighbours, and that is what does the work: between
+neighbours, "changed, then changed again" is what every churning byte does, so on
+Klonoa's save-file screen with no muting a chain keeps 3,117 addresses where an arrow
+back to the first capture keeps 90. Where a node sits says one thing only — the order the
+captures are read in, left to right, which is the order of the value columns under the
+graph.
 
 With the noise baseline as well, the same three captures take 294,912 addresses to 4 in
 29 ms, and the cursor leads them, the one row the panel calls `likely` — writing 0, 1 and 2 to it moves the highlight between
 the three save slots, and a data breakpoint on it names `FileSelectScreenUpdateCursor`.
 
 A query is a standing description of the run, not a step in a narrowing: it is answered
-against the whole address space every time, so loosening a link brings addresses back and
-the answer follows the strip as it is edited. That is why there is no `Apply`, no
+against the whole address space every time, so loosening an arrow brings addresses back
+and the answer follows the graph as it is drawn. That is why there is no `Apply`, no
 `Preview` and no `Undo` — a pass over both regions costs tens of milliseconds, which is
 what makes recomputing affordable. A value can also be held against the capture that saw
 it, which is the exact-value search, now sayable for one capture of several. Links that
