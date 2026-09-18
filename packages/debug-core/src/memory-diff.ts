@@ -160,10 +160,6 @@ export class CandidateMask {
     return mask;
   }
 
-  clone(): CandidateMask {
-    return new CandidateMask(this.iwram.slice(), this.ewram.slice());
-  }
-
   bits(region: RamRegion): Uint8Array {
     return region === 'iwram' ? this.iwram : this.ewram;
   }
