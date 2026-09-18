@@ -17,7 +17,7 @@
  * extent that covers it.
  */
 import type { DebugInfo } from './debug-info.js';
-import type { MemberDesc, TypeDesc } from './dwarf/values.js';
+import { type MemberDesc, type TypeDesc, bitfieldPlacement } from './dwarf/values.js';
 
 /** How much the program states about an address, and how much of that is stated rather than guessed. */
 export type Tier = 'sized' | 'inferred' | 'unattributed';
@@ -86,6 +86,26 @@ function declaredType(info: DebugInfo, name: string): TypeDesc | null {
   return type;
 }
 
+/**
+ * The bytes of a struct a member occupies, from the struct's own start. A bitfield
+ * occupies the bytes its bits fall in rather than its whole storage type, which is
+ * what tells four bitfields packed into one word apart; a member the DWARF gives no
+ * size at all (a zero-length trailing array) occupies the one byte it begins at,
+ * since an address can still land on it.
+ */
+function extentOf(member: MemberDesc): { lo: number; hi: number } {
+  const bits = bitfieldPlacement(member);
+  if (bits) {
+    return { lo: bits.byteOffset, hi: bits.byteOffset + bits.bits.span };
+  }
+  return { lo: member.offset, hi: member.offset + Math.max(1, member.type.size || 1) };
+}
+
+function width(member: MemberDesc): number {
+  const at = extentOf(member);
+  return at.hi - at.lo;
+}
+
 interface Walk {
   path: string;
   leaf: TypeDesc;
@@ -135,15 +155,22 @@ export function pathTo(type: TypeDesc, offset: number, size: number): Walk {
       continue;
     }
     if ((leaf.kind === 'struct' || leaf.kind === 'union') && leaf.members?.length) {
-      const covering = leaf.members.filter((m) => off >= m.offset && off < m.offset + Math.max(1, m.type.size || 1));
+      const covering = leaf.members.filter((m) => {
+        const at = extentOf(m);
+        return off >= at.lo && off < at.hi;
+      });
       if (covering.length === 0) {
         break;
       }
       // a union's members overlap by construction, so the first covering one is the
-      // reading offered and the rest are named as the others it could be; a struct's
-      // do not, and the last covering one is the innermost of any zero-size or
-      // anonymous member that would otherwise shadow it
-      const m = leaf.kind === 'union' ? covering[0]! : covering[covering.length - 1]!;
+      // reading offered and the rest are named as the others it could be. A struct's do
+      // not, except where bitfields share a storage byte and where a zero-length
+      // trailing array sits on the byte after the last real member, so the narrowest
+      // covering member is the one the address is actually in.
+      const m =
+        leaf.kind === 'union'
+          ? covering[0]!
+          : covering.reduce((best, other) => (width(other) < width(best) ? other : best));
       if (leaf.kind === 'union' && covering.length > 1) {
         alternatives = covering.slice(1).map((other) => other.name);
       }

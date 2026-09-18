@@ -206,6 +206,86 @@ describe('session transport', () => {
     expect(narrowed.addresses.length).toBeLessThanOrEqual(addresses.length);
   });
 
+  it('captures, tags, filters, previews, undoes and forgets, without the RAM ever crossing', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session);
+    const gKeys = session.evaluate('&g_keys').address!;
+
+    // `g_keys` follows the buttons, so holding A, then B, then A again gives it the
+    // tag pattern and everything that merely counts frames does not
+    for (const [mask, tag] of [
+      [1, 'A'],
+      [2, 'B'],
+      [1, 'A'],
+    ] as const) {
+      await transport.request('gba-kit/buttons', { mask });
+      await transport.request('gba-kit/stepFrame');
+      await transport.request('gba-kit/stepFrame');
+      await transport.request('gba-kit/capture', { tag });
+    }
+
+    const listed = await transport.request('gba-kit/captures');
+    expect(listed.captures.map((c) => c.tag)).toEqual(['A', 'B', 'A']);
+    expect(listed.captures[0]).toMatchObject({ from: 'machine', width: 120, height: 80 });
+    expect(Object.keys(listed.captures[0]!)).not.toContain('ram');
+
+    const mode = { kind: 'tags' } as const;
+    const preview = await transport.request('gba-kit/diffPreview', { mode, size: 2 });
+    const applied = await transport.request('gba-kit/diffFilter', { mode, size: 2 });
+    expect(applied.total).toBe(preview.kept);
+    expect(applied.size).toBe(2);
+    expect(applied.rows.map((r) => r.address)).toContain(gKeys);
+    const found = applied.rows.find((r) => r.address === gKeys)!;
+    expect(found.values).toEqual([1, 2, 1]);
+    expect(found.tier).toBe('sized');
+    expect(found.path).toBe('g_keys');
+    expect(found.reasons.length).toBeGreaterThan(0);
+
+    const undone = await transport.request('gba-kit/diffFilter', { undo: true });
+    expect(undone.total).toBeGreaterThan(applied.total);
+    expect(undone.undoDepth).toBe(0);
+    await expect(transport.request('gba-kit/diffFilter', { undo: true })).rejects.toThrow(/no filter to undo/);
+
+    const retagged = await transport.request('gba-kit/retagCapture', { id: listed.captures[1]!.id, tag: 'C' });
+    expect(retagged.captures.map((c) => c.tag)).toEqual(['A', 'C', 'A']);
+    const left = await transport.request('gba-kit/forgetCapture', { id: listed.captures[0]!.id });
+    expect(left.captures).toHaveLength(2);
+  });
+
+  it('adopts a save state as a capture, and mutes ranges it found by running', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session);
+    await transport.request('gba-kit/stepFrame');
+    await transport.request('gba-kit/saveState', { name: 'here' });
+
+    const adopted = await transport.request('gba-kit/capture', { state: 'here', tag: 'from a state' });
+    expect(adopted.capture).toMatchObject({ from: 'state', tag: 'from a state', frame: 1 });
+    await expect(transport.request('gba-kit/capture', { state: 'nowhere' })).rejects.toThrow(/no such state/);
+
+    const noise = await transport.request('gba-kit/discoverNoise', { frames: 4 });
+    expect(noise.frames).toBe(4);
+    expect(noise.churnBytes).toBeGreaterThan(0);
+    expect(noise.mutes.some((m) => m.source === 'idle' && m.bytes > 0)).toBe(true);
+    // a mute is a range, never a name, and it is always reversible
+    const idle = noise.mutes.find((m) => m.source === 'idle')!;
+    expect(idle.ranges.every((r) => r.hi > r.lo)).toBe(true);
+    const off = await transport.request('gba-kit/setMute', { id: idle.id, enabled: false });
+    expect(off.mutes.find((m) => m.id === idle.id)!.enabled).toBe(false);
+    const mine = await transport.request('gba-kit/setMute', { ranges: [{ lo: 0x03000000, hi: 0x03000010 }] });
+    expect(mine.mutes.find((m) => m.source === 'user')?.bytes).toBe(16);
+    const gone = await transport.request('gba-kit/setMute', { id: idle.id, remove: true });
+    expect(gone.mutes.some((m) => m.id === idle.id)).toBe(false);
+  });
+
+  it('watches an address for writes without taking the list from whoever set the others', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session);
+    const counter = session.program.symbolAddress('g_frame')!;
+    const body = await transport.request('gba-kit/breakOnWrite', { address: counter, size: 4 });
+    expect(body).toMatchObject({ watched: 1, address: counter, length: 4, verified: true });
+    await expect(transport.request('gba-kit/breakOnWrite', { address: -1 })).rejects.toThrow(/not an address/);
+  });
+
   it('imports and exports symbol files, telling label listeners, and reports a failed save', async () => {
     const writes: string[] = [];
     let failWrites = false;

@@ -144,6 +144,28 @@ export async function run(): Promise<void> {
   const screen = (await session.customRequest('gba-kit/frame')) as { rgba: string };
   assert.equal(Buffer.from(screen.rgba, 'base64').length, 240 * 160 * 4);
 
+  // the memory diff, driven the way the panel drives it: two captures of a machine
+  // whose frame counter moved between them, then the filter that compares them
+  await session.customRequest('gba-kit/capture', { tag: 'before' });
+  await vscode.commands.executeCommand('gba-kit.stepFrame');
+  await session.customRequest('gba-kit/capture', { tag: 'after' });
+  const captures = (await session.customRequest('gba-kit/captures')) as {
+    captures: Array<{ id: number; tag: string }>;
+  };
+  assert.deepEqual(
+    captures.captures.map((c) => c.tag),
+    ['before', 'after'],
+  );
+  const diff = (await session.customRequest('gba-kit/diffFilter', {
+    mode: { kind: 'changed', from: captures.captures[0]!.id, to: captures.captures[1]!.id },
+    size: 4,
+  })) as { total: number; rows: Array<{ address: number; path?: string }> };
+  assert.ok(diff.total > 0, 'a frame of the fixture changes something in RAM');
+  assert.ok(
+    diff.rows.some((r) => r.path === 'g_frame'),
+    `the frame counter is among the changed addresses\n${JSON.stringify(diff.rows.slice(0, 5))}`,
+  );
+
   const ended = waitFor<void>('the session to end', (resolve) =>
     vscode.debug.onDidTerminateDebugSession((s) => s.id === session.id && resolve()),
   );
