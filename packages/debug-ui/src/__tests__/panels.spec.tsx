@@ -284,6 +284,17 @@ describe('memory diff panel', () => {
     expect(querySentence([{ id: 1, name: 'one' }], {}, {}, {})).toContain('two states');
   });
 
+  it('reports the odds as one of three words, with what earned them behind it', () => {
+    const html = renderToString(
+      <DiffGroups groups={[]} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
+    );
+    // a number gives nobody a way to disagree with the order; the words are what is read,
+    // and the criteria that earned them are what the title carries
+    expect(html).toContain('gk-odds-likely');
+    expect(html).not.toContain('>10<');
+    expect(html).toMatch(/title="Looks like a variable: [^"]+"/);
+  });
+
   it('gives each tier its own treatment, so an inferred containment cannot read as a name', () => {
     const html = renderToString(
       <DiffGroups groups={[]} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
@@ -332,7 +343,7 @@ describe('memory diff panel', () => {
     );
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('unattributed EWRAM');
-    expect(html).toContain('best rank 10');
+    expect(html).toContain('best likely');
     // nothing is expanded, so no row is rendered yet
     expect(html).not.toContain('gEntityInfo[0].xPosBg2');
 
@@ -361,7 +372,7 @@ describe('memory diff panel', () => {
     // the page carries one of gEntityInfo's 240 rows, and a header that said `240 rows`
     // over a table of one is what sends a reader looking for the other 239 on screen
     expect(html).toContain('1 of 240 rows here');
-    expect(html).toContain('1 row · best rank 10');
+    expect(html).toContain('1 row · best likely');
   });
 
   it('names an address by a path only where the program states one covering it', () => {

@@ -8,7 +8,7 @@
  * dressed up as a variable name would be a lie, and on the measured target it would be
  * the lie told about 83% of the rows.
  */
-import type { DiffGroupBody, DiffRowBody } from '@gba-kit/debug-core/protocol';
+import { type DiffGroupBody, type DiffRowBody, RANK_LEVELS, rankLevel } from '@gba-kit/debug-core/protocol';
 
 import { Hex, Icon, Menu } from '../components.js';
 
@@ -84,8 +84,8 @@ export function DiffGroups({
                     high enough to reach it, and saying so is what keeps an expanded group
                     that shows twelve of two hundred from reading as a group of twelve */}
                 {mine.length === group.rows
-                  ? `${group.rows} row${group.rows === 1 ? '' : 's'} · best rank ${group.topRank}`
-                  : `${mine.length} of ${group.rows} rows here · best rank ${group.topRank}`}
+                  ? `${group.rows} row${group.rows === 1 ? '' : 's'} · best ${rankLevel(group.topRank)}`
+                  : `${mine.length} of ${group.rows} rows here · best ${rankLevel(group.topRank)}`}
               </span>
             </button>
             {expanded && <DiffTable rows={mine} actions={actions} total={mine.length} />}
@@ -109,7 +109,7 @@ function DiffTable({ rows, actions, total }: { rows: DiffRowBody[]; actions: Dif
               {tag && <span className={`gk-diff-tag ${tagClass(actions.tags, tag)}`}>{tag}</span>}
             </th>
           ))}
-          <th className="gk-right">Rank</th>
+          <th>Odds</th>
           <th aria-label="actions" />
         </tr>
       </thead>
@@ -122,10 +122,26 @@ function DiffTable({ rows, actions, total }: { rows: DiffRowBody[]; actions: Dif
   );
 }
 
+/**
+ * How much a row looks like a variable, as one of three words. The score behind it is an
+ * ordering rather than a measurement, so the words are what is shown and the criteria
+ * that earned them are what the title says — a number alone gives nobody a way to
+ * disagree with the order it put the rows in.
+ */
+function Odds({ row }: { row: DiffRowBody }) {
+  const level = rankLevel(row.rank);
+  const why = row.reasons.length > 0 ? `: ${row.reasons.join(', ')}` : '';
+  return (
+    <span className={`gk-odds gk-odds-${level}`} title={`${RANK_LEVELS[level]}${why}`}>
+      {level}
+    </span>
+  );
+}
+
 function DiffRow({ row, actions }: { row: DiffRowBody; actions: DiffRowActions }) {
   const tier = TIERS[row.tier];
   return (
-    <tr className={tier.className} title={row.reasons.join('; ')}>
+    <tr className={tier.className}>
       <td>
         <input
           type="checkbox"
@@ -145,7 +161,9 @@ function DiffRow({ row, actions }: { row: DiffRowBody; actions: DiffRowActions }
           </span>
         </td>
       ))}
-      <td className="gk-right gk-rank">{row.rank}</td>
+      <td>
+        <Odds row={row} />
+      </td>
       <td>
         <Menu
           label={`what to do with 0x${row.address.toString(16)}`}

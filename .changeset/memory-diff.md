@@ -18,7 +18,7 @@ Klonoa's save-file screen with no muting it keeps 3,117 addresses where the arc 
 the first capture keeps 90.
 
 With the noise baseline as well, the same three captures take 294,912 addresses to 4 in
-29 ms, and the cursor leads them — writing 0, 1 and 2 to it moves the highlight between
+29 ms, and the cursor leads them, the one row the panel calls `likely` — writing 0, 1 and 2 to it moves the highlight between
 the three save slots, and a data breakpoint on it names `FileSelectScreenUpdateCursor`.
 
 A query is a standing description of the run, not a step in a narrowing: it is answered

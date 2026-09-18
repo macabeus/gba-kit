@@ -116,6 +116,9 @@ export {
   type DiffResult,
   type DiffRow,
   type Relation,
+  RANK_LEVELS,
+  type RankLevel,
+  rankLevel,
   type RamPair,
   type RamRegion,
 } from './memory-diff.js';

@@ -34,6 +34,7 @@ export type { MuteSource };
 
 /** The most a `gba-kit/importSave` payload can carry, so a client can turn a mis-picked file away before encoding it. */
 export { MAX_SAVE_FILE_SIZE } from './cartridge-save.js';
+export { RANK_LEVELS, type RankLevel, rankLevel } from './memory-diff.js';
 
 /** A typed member path as a name a label can carry and the `.sym` importer can read back. */
 export { labelName } from './labels.js';
