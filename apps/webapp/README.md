@@ -7,7 +7,7 @@ Browser-based GBA debugger with real-time emulation, disassembly, breakpoints, m
 - GBA emulation
 - Debugger panel with ARM/Thumb disassembly, execution control, CPU register viewer, memory viewer, etc
 - Source-level debugging from a sidecar ELF (`@gba-kit/debug-core`): C source view, DWARF-typed variables, breakpoints and exact rewind
-- The `@gba-kit/debug-ui` panels: screen, palette, tiles, tilemaps, sprites, I/O registers, trace, events, memory search, labels
+- The `@gba-kit/debug-ui` panels: screen, palette, tiles, tilemaps, sprites, I/O registers, trace, events, memory diff, labels
 - Save state slots, persisted in IndexedDB
 - Input recording and script replay
 

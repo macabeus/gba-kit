@@ -2063,3 +2063,154 @@ describe('a .sav as a save state', () => {
     },
   );
 });
+
+describe('the memory diff', () => {
+  /** Every address comes from the ELF at test time; a hard-coded one is a fixture change away from wrong. */
+  function addressOf(session: Session, name: string): number {
+    const address = session.program.symbolAddress(name);
+    if (address === null) {
+      throw new Error(`the fixture has no ${name}`);
+    }
+    return address;
+  }
+
+  function put(session: Session, address: number, value: number): void {
+    const bytes = new Uint8Array(4);
+    new DataView(bytes.buffer).setUint32(0, value, true);
+    session.writeMemory(address, bytes);
+  }
+
+  it('keeps the RAM a capture held while the machine runs on', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const first = session.captureMemory('start');
+    const frame = new Uint8Array(first.ram.iwram);
+    const at = session.frame;
+
+    run(60);
+    session.captureMemory('later');
+    expect(session.frame).toBeGreaterThan(at);
+    // the capture is a copy, not a view of memory that keeps moving under it
+    expect(first.ram.iwram).toEqual(frame);
+    expect(session.memoryDiff.captures().map((c) => c.tag)).toEqual(['start', 'later']);
+    expect(first.frame).toBe(at);
+    expect(first.origin).toBe('machine');
+  });
+
+  it('finds the variable whose value follows the tags, and not the one that merely moves', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const counter = addressOf(session, 'g_frame');
+    const samples = addressOf(session, 'g_samples');
+
+    // `g_samples` is written every frame from the frame counter, so it differs between
+    // the two captures that share a tag; only `g_frame` itself is put back
+    put(session, counter, 0x1234);
+    session.captureMemory('A');
+    run(2);
+    put(session, counter, 0x5678);
+    session.captureMemory('B');
+    run(2);
+    put(session, counter, 0x1234);
+    session.captureMemory('A');
+
+    session.memoryDiff.apply({ kind: 'tags' }, 4);
+    const kept = new Set(session.memoryDiff.rows(0, 500).map((r) => r.address));
+    expect(kept.has(counter)).toBe(true);
+    expect(kept.has(samples)).toBe(false);
+  });
+
+  it('places a candidate inside the object the program states holds it', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const samples = addressOf(session, 'g_samples');
+    put(session, samples + 4, 1);
+    session.captureMemory('A');
+    put(session, samples + 4, 2);
+    session.captureMemory('B');
+    put(session, samples + 4, 1);
+    session.captureMemory('A');
+
+    session.memoryDiff.apply({ kind: 'tags' }, 4);
+    const row = session.memoryDiff.rows(0, 500).find((r) => r.address === samples + 4);
+    expect(row?.placement.tier).toBe('sized');
+    expect(row?.placement.path).toBe('g_samples[1]');
+    expect(row?.values).toEqual([1, 2, 1]);
+  });
+
+  it('puts the machine back exactly after looking for background noise', async () => {
+    const { session, run, stops } = await boot('thumb-O0');
+    run(60);
+    const before = {
+      frame: session.frame,
+      pc: session.pc,
+      registers: Uint32Array.from(session.machine.registers),
+      iwram: session.machine.readRam('iwram'),
+      ewram: session.machine.readRam('ewram'),
+      events: session.events.size,
+      stops: stops.length,
+    };
+    session.setButtons(0b11);
+
+    const noise = session.discoverNoise(8);
+
+    expect(noise.frames).toBe(8);
+    expect(session.frame).toBe(before.frame);
+    expect(session.pc).toBe(before.pc);
+    expect(session.machine.registers).toEqual(before.registers);
+    expect(session.machine.readRam('iwram')).toEqual(before.iwram);
+    expect(session.machine.readRam('ewram')).toEqual(before.ewram);
+    // the frames nobody asked to run leave nothing behind: no events, no stops, buttons held
+    expect(session.events.size).toBe(before.events);
+    expect(stops.length).toBe(before.stops);
+    expect(session.buttons).toBe(0b11);
+    // the fixture's own counters move on their own, so the baseline is not empty
+    expect(noise.churnBytes).toBeGreaterThan(0);
+    expect(session.memoryDiff.mutes.all().some((m) => m.source === 'idle')).toBe(true);
+    expect(session.memoryDiff.mutes.all().some((m) => m.source === 'stack')).toBe(true);
+  });
+
+  it('adopts a save state as a capture without moving the machine', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const live = session.captureMemory('live');
+    const text = session.saveState('here');
+    const at = session.frame;
+
+    run(30);
+    const adopted = session.captureFromState(text, 'from a state');
+
+    expect(adopted.origin).toBe('state');
+    expect(adopted.frame).toBe(at);
+    expect(adopted.ram.iwram).toEqual(live.ram.iwram);
+    expect(adopted.ram.ewram).toEqual(live.ram.ewram);
+    expect(session.frame).toBeGreaterThan(at);
+  });
+
+  it('forgets its captures on a restart, since they are of a machine that is gone', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    session.captureMemory('before');
+    session.discoverNoise(2);
+    expect(session.memoryDiff.captures()).toHaveLength(1);
+
+    session.restart();
+
+    expect(session.memoryDiff.captures()).toEqual([]);
+    expect(session.memoryDiff.mutes.all()).toEqual([]);
+  });
+
+  it('watches one more address without taking the list away from whoever set the others', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const counter = addressOf(session, 'g_frame');
+    session.setDataBreakpoints([{ address: counter, length: 4, name: 'g_frame', access: 'write' }]);
+
+    const samples = addressOf(session, 'g_samples');
+    const all = session.watchAddress({ address: samples, length: 4, name: 'g_samples', access: 'write' });
+
+    expect(all.map((bp) => bp.address)).toEqual([counter, samples]);
+    // the same watch twice is one watch
+    expect(session.watchAddress({ address: samples, length: 4, name: 'g_samples', access: 'write' })).toHaveLength(2);
+  });
+});

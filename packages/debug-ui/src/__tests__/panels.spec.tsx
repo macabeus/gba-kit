@@ -2,11 +2,13 @@
  * Panels rendered against a fixed debugger state: what the controls show for a
  * given `StateBody`, with the state hook stood in for (no host, no effects).
  */
-import type { StateBody } from '@gba-kit/debug-core/protocol';
+import type { DiffGroupBody, DiffRowBody, StateBody } from '@gba-kit/debug-core/protocol';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import { EditableName } from '../components.js';
+import { DiffGroups } from '../panels/DiffRows.js';
+import { MemoryDiffPanel } from '../panels/MemoryDiffPanel.js';
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
 import { ScreenPanel } from '../panels/ScreenPanel.js';
 import { SaveStatesView } from '../panels/save-states.js';
@@ -208,5 +210,104 @@ describe('recording panel', () => {
     expect(renderToString(<RecordingsView takes={takes} onReplay={() => {}} onRemove={() => {}} />)).toContain(
       'codicon-trash',
     );
+  });
+});
+
+describe('memory diff panel', () => {
+  /** One row of each tier, as the session would hand them over. */
+  const rows: DiffRowBody[] = [
+    {
+      address: 0x03002920,
+      values: [1, 2, 1],
+      formatted: ['1', '2', '1'],
+      tier: 'sized',
+      symbol: { name: 'gEntityInfo', offset: 0 },
+      path: 'gEntityInfo[0].xPosBg2',
+      type: 'u16',
+      rank: 10,
+      reasons: ['2 changed bytes within ±256'],
+    },
+    {
+      address: 0x03000028,
+      values: [48, 0, 48],
+      tier: 'inferred',
+      symbol: { name: 'gMPlayTrack_0', offset: 0x20 },
+      path: 'gMPlayTrack_0[3]',
+      extrapolated: true,
+      rank: 8,
+      reasons: ['a run of 2 changed bytes'],
+    },
+    { address: 0x02000818, values: [1, 2, 1], tier: 'unattributed', rank: 10, reasons: [] },
+  ];
+  const groups: DiffGroupBody[] = [
+    { key: 'symbol:gEntityInfo', tier: 'sized', label: 'gEntityInfo', rows: 1, topRank: 10 },
+    { key: 'region:EWRAM', tier: 'unattributed', label: 'unattributed EWRAM', rows: 1, topRank: 10 },
+  ];
+  const actions = {
+    tags: ['slot A', 'slot B', 'slot A'],
+    selected: new Set<number>(),
+    onSelect: () => {},
+    onLabel: () => {},
+    onBreak: () => {},
+    onMute: () => {},
+  };
+
+  it('asks for a capture before it has one, and needs a stopped machine to take it', () => {
+    current.state = stoppedAt(0);
+    const stopped = renderToString(<MemoryDiffPanel transport={transport} />);
+    expect(stopped).toContain('Capture RAM on one screen');
+    expect(stopped).not.toContain('Capturing needs a stopped machine');
+    expect(stopped.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).not.toContain('disabled');
+
+    current.state = { ...stoppedAt(0), state: 'running' };
+    const running = renderToString(<MemoryDiffPanel transport={transport} />);
+    expect(running).toContain('Capturing needs a stopped machine');
+    expect(running.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).toContain('disabled');
+  });
+
+  it('gives each tier its own treatment, so an inferred containment cannot read as a name', () => {
+    const html = renderToString(
+      <DiffGroups groups={[]} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
+    );
+    expect(html).toContain('gk-tier-sized');
+    expect(html).toContain('gk-tier-inferred');
+    expect(html).toContain('gk-tier-unnamed');
+    // a sized row leads with the name the program vouches for
+    expect(html).toContain('gEntityInfo[0].xPosBg2');
+    // an inferred one leads with its address, and the symbol is only a landmark
+    expect(html).toContain('0x03000028');
+    expect(html).toContain('near gMPlayTrack_0 + 0x20');
+    expect(html).toContain('nothing states this array has that many elements');
+    // an unattributed one claims nothing at all
+    expect(html).toContain('0x02000818');
+    expect(html).not.toContain('near gNumMusicPlayers');
+    // the matrix is one column per capture, headed by its tag
+    expect(html).toContain('slot A');
+    expect(html).toContain('slot B');
+    expect(html).toContain('aria-rowcount="3"');
+  });
+
+  it('collapses the groups and says what each holds before it is opened', () => {
+    const html = renderToString(
+      <DiffGroups groups={groups} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
+    );
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('unattributed EWRAM');
+    expect(html).toContain('best rank 10');
+    // nothing is expanded, so no row is rendered yet
+    expect(html).not.toContain('gEntityInfo[0].xPosBg2');
+
+    const open = renderToString(
+      <DiffGroups
+        groups={groups}
+        rows={rows}
+        open={new Set(['symbol:gEntityInfo'])}
+        onToggle={() => {}}
+        total={3}
+        actions={actions}
+      />,
+    );
+    expect(open).toContain('gEntityInfo[0].xPosBg2');
+    expect(open).not.toContain('0x02000818');
   });
 });

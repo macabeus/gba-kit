@@ -78,7 +78,7 @@ export function DiffGroups({
               </span>
               <span className="gk-mono">{group.label}</span>
               <span className="gk-muted gk-small">
-                {group.rows} row{group.rows === 1 ? '' : 's'} · best rank {group.topRank}
+                {`${group.rows} row${group.rows === 1 ? '' : 's'} · best rank ${group.topRank}`}
               </span>
             </button>
             {expanded && <DiffTable rows={mine} actions={actions} total={mine.length} />}
@@ -178,25 +178,17 @@ function Where({ row }: { row: DiffRowBody }) {
     );
   }
   if (row.tier === 'sized' && row.symbol) {
-    return (
-      <span className="gk-mono">
-        {row.symbol.name}+0x{row.symbol.offset.toString(16)}
-      </span>
-    );
+    return <span className="gk-mono">{`${row.symbol.name}+0x${row.symbol.offset.toString(16)}`}</span>;
   }
   return (
     <span>
       <Hex value={row.address} />
       {row.symbol && (
-        <span className="gk-muted gk-small">
-          {' '}
-          near {row.symbol.name} + 0x{row.symbol.offset.toString(16)}
-        </span>
+        <span className="gk-muted gk-small">{` near ${row.symbol.name} + 0x${row.symbol.offset.toString(16)}`}</span>
       )}
       {row.path && row.extrapolated && (
         <span className="gk-mono gk-muted gk-small">
-          {' '}
-          {row.path}
+          {` ${row.path}`}
           <Caveat text="extrapolated" title="nothing states this array has that many elements" />
         </span>
       )}
@@ -207,8 +199,7 @@ function Where({ row }: { row: DiffRowBody }) {
 function Caveat({ text, title }: { text: string; title: string }) {
   return (
     <span className="gk-warn gk-small" title={title}>
-      {' '}
-      ({text})
+      {` (${text})`}
     </span>
   );
 }

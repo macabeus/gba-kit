@@ -1209,6 +1209,78 @@ describe('emulator requests', () => {
     expect(unknown.message).toMatch(/unknown request 'gba-kit\/nope'/);
   });
 
+  it('captures, compares and places memory over the wire', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(projectDir);
+    const client = await launch({ projectDir });
+    type Filter = GbaKitRequests['gba-kit/diffFilter']['body'];
+
+    // `g_keys` follows the buttons: A, then B, then A again gives it the tag pattern
+    for (const [mask, tag] of [
+      [1, 'A'],
+      [2, 'B'],
+      [1, 'A'],
+    ] as const) {
+      await client.body('gba-kit/buttons', { mask });
+      await client.body('gba-kit/stepFrame');
+      await client.body('gba-kit/stepFrame');
+      await client.body('gba-kit/capture', { tag });
+    }
+    const listed = await client.body<GbaKitRequests['gba-kit/captures']['body']>('gba-kit/captures');
+    expect(listed.captures.map((c) => c.tag)).toEqual(['A', 'B', 'A']);
+    expect(base64Bytes(listed.captures[0]!.thumbnail)).toBe(listed.captures[0]!.width * listed.captures[0]!.height * 4);
+
+    const gKeys = Number(
+      (await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression: '&g_keys' })).result,
+    );
+    const mode = { kind: 'tags' };
+    const preview = await client.body<GbaKitRequests['gba-kit/diffPreview']['body']>('gba-kit/diffPreview', {
+      mode,
+      size: 2,
+    });
+    const applied = await client.body<Filter>('gba-kit/diffFilter', { mode, size: 2 });
+    expect(applied.total).toBe(preview.kept);
+    const row = applied.rows.find((r) => r.address === gKeys)!;
+    expect(row.values).toEqual([1, 2, 1]);
+    expect(row).toMatchObject({ tier: 'sized', path: 'g_keys' });
+    expect(applied.groups.some((g) => g.label === 'g_keys')).toBe(true);
+
+    // the noise baseline runs frames and puts the machine back, so the state does not move
+    const before = await client.body<StateBody>('gba-kit/state');
+    const noise = await client.body<GbaKitRequests['gba-kit/discoverNoise']['body']>('gba-kit/discoverNoise', {
+      frames: 4,
+    });
+    expect(noise.mutes.some((m) => m.source === 'idle')).toBe(true);
+    expect((await client.body<StateBody>('gba-kit/state')).frame).toBe(before.frame);
+
+    const watched = await client.body<GbaKitRequests['gba-kit/breakOnWrite']['body']>('gba-kit/breakOnWrite', {
+      address: gKeys,
+      size: 2,
+    });
+    expect(watched).toMatchObject({ watched: 1, address: gKeys, length: 2, verified: true });
+
+    expect((await client.body<Filter>('gba-kit/diffFilter', { undo: true })).undoDepth).toBe(0);
+    expect((await client.body<Filter>('gba-kit/diffFilter', { reset: true })).total).toBeGreaterThan(applied.total);
+  });
+
+  it('adopts a save state as a capture, and reaches no file outside the states directory', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
+    tempDirs.push(projectDir);
+    const client = await launch({ projectDir });
+    await client.body('gba-kit/stepFrame');
+    await client.body('gba-kit/saveState', { name: 'here' });
+
+    const adopted = await client.body<GbaKitRequests['gba-kit/capture']['body']>('gba-kit/capture', {
+      state: 'here',
+      tag: 'from a state',
+    });
+    expect(adopted.capture).toMatchObject({ from: 'state', tag: 'from a state', frame: 1 });
+
+    const escaped = await client.request('gba-kit/capture', { path: '../../etc/passwd' });
+    expect(escaped.success).toBe(false);
+    expect(escaped.message).toMatch(/state files live under/);
+  });
+
   it('refuses a malformed request by the field at fault, changing nothing', async () => {
     const projectDir = await mkdtemp(join(tmpdir(), 'gba-kit-'));
     tempDirs.push(projectDir);
@@ -1245,6 +1317,18 @@ describe('emulator requests', () => {
       ['gba-kit/importSave', {}, /missing 'bytes'/],
       ['gba-kit/importSave', { bytes: 7 }, /'bytes' must be a string/],
       ['gba-kit/importSave', { bytes: 'AAAA', name: 42 }, /'name' must be a string/],
+      ['gba-kit/diffPreview', { mode: { kind: 'nope' }, size: 1 }, /unknown filter 'nope'/],
+      ['gba-kit/diffPreview', { mode: { kind: 'tags' }, size: 3 }, /'size' must be 1, 2 or 4/],
+      ['gba-kit/diffPreview', { mode: 'tags', size: 1 }, /'mode' must be an object/],
+      ['gba-kit/diffFilter', { mode: { kind: 'changed', from: 'a', to: 2 }, size: 1 }, /'from' must be a number/],
+      ['gba-kit/diffFilter', { mode: { kind: 'changed', from: 1, to: 2 }, size: 1 }, /no capture 1/],
+      ['gba-kit/discoverNoise', { frames: 0 }, /'frames' must be an integer from 1 to 300/],
+      ['gba-kit/discoverNoise', { frames: 9999 }, /'frames' must be an integer from 1 to 300/],
+      ['gba-kit/retagCapture', { id: 0, tag: 'x' }, /'id' must be an integer/],
+      ['gba-kit/setMute', {}, /give a mute 'id'/],
+      ['gba-kit/setMute', { ranges: [{ lo: 8, hi: 4 }] }, /not an address range/],
+      ['gba-kit/setMute', { id: 99 }, /no mute 99/],
+      ['gba-kit/breakOnWrite', { address: 'x' }, /not an address/],
     ];
     for (const [command, args, message] of cases) {
       const r = await client.request(command, args);
