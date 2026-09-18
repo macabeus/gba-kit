@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { EditableName } from '../components.js';
 import { DiffGroups } from '../panels/DiffRows.js';
-import { MemoryDiffPanel } from '../panels/MemoryDiffPanel.js';
+import { MemoryDiffPanel, nameFor } from '../panels/MemoryDiffPanel.js';
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
 import { ScreenPanel } from '../panels/ScreenPanel.js';
 import { SaveStatesView } from '../panels/save-states.js';
@@ -218,6 +218,7 @@ describe('memory diff panel', () => {
   const rows: DiffRowBody[] = [
     {
       address: 0x03002920,
+      group: 'symbol:gEntityInfo',
       values: [1, 2, 1],
       formatted: ['1', '2', '1'],
       tier: 'sized',
@@ -229,6 +230,7 @@ describe('memory diff panel', () => {
     },
     {
       address: 0x03000028,
+      group: 'symbol:gMPlayTrack_0',
       values: [48, 0, 48],
       tier: 'inferred',
       symbol: { name: 'gMPlayTrack_0', offset: 0x20 },
@@ -237,7 +239,7 @@ describe('memory diff panel', () => {
       rank: 8,
       reasons: ['a run of 2 changed bytes'],
     },
-    { address: 0x02000818, values: [1, 2, 1], tier: 'unattributed', rank: 10, reasons: [] },
+    { address: 0x02000818, group: 'region:EWRAM', values: [1, 2, 1], tier: 'unattributed', rank: 10, reasons: [] },
   ];
   const groups: DiffGroupBody[] = [
     { key: 'symbol:gEntityInfo', tier: 'sized', label: 'gEntityInfo', rows: 1, topRank: 10 },
@@ -287,6 +289,26 @@ describe('memory diff panel', () => {
     expect(html).toContain('aria-rowcount="3"');
   });
 
+  it('says when the members of a union cover the same bytes, so one reading is not the reading', () => {
+    const union: DiffRowBody = {
+      address: 0x03002928,
+      group: 'symbol:gEntityInfo',
+      values: [1, 2, 1],
+      tier: 'sized',
+      symbol: { name: 'gEntityInfo', offset: 8 },
+      path: 'gEntityInfo[0].unk8.split.unk8',
+      type: 'u8',
+      alternatives: ['all'],
+      rank: 9,
+      reasons: [],
+    };
+    const html = renderToString(
+      <DiffGroups groups={[]} rows={[union]} open={new Set()} onToggle={() => {}} total={1} actions={actions} />,
+    );
+    expect(html).toContain('gEntityInfo[0].unk8.split.unk8');
+    expect(html).toContain('or .all');
+  });
+
   it('collapses the groups and says what each holds before it is opened', () => {
     const html = renderToString(
       <DiffGroups groups={groups} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
@@ -309,5 +331,25 @@ describe('memory diff panel', () => {
     );
     expect(open).toContain('gEntityInfo[0].xPosBg2');
     expect(open).not.toContain('0x02000818');
+  });
+
+  it('says how many of a group rows this page carries, rather than claiming them all', () => {
+    const many: DiffGroupBody[] = [
+      { key: 'symbol:gEntityInfo', tier: 'sized', label: 'gEntityInfo', rows: 240, topRank: 10 },
+      { key: 'region:EWRAM', tier: 'unattributed', label: 'unattributed EWRAM', rows: 1, topRank: 10 },
+    ];
+    const html = renderToString(
+      <DiffGroups groups={many} rows={rows} open={new Set()} onToggle={() => {}} total={241} actions={actions} />,
+    );
+    // the page carries one of gEntityInfo's 240 rows, and a header that said `240 rows`
+    // over a table of one is what sends a reader looking for the other 239 on screen
+    expect(html).toContain('1 of 240 rows here');
+    expect(html).toContain('1 row · best rank 10');
+  });
+
+  it('names an address by a path only where the program states one covering it', () => {
+    // the row renderer never shows an inferred path as a name, and the action behind it
+    // must not either: a label reaches disassembly and `.sym` with no tier to explain it
+    expect(rows.map(nameFor)).toEqual(['gEntityInfo_0.xPosBg2', 'gUnk_03000028', 'gUnk_02000818']);
   });
 });

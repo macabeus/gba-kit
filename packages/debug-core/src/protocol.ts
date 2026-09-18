@@ -17,10 +17,11 @@
 import type { Tier } from '@gba-kit/debug-info';
 
 import type { EventBreakpointKind } from './breakpoints.js';
+import { DIFF_LIMITS, NOISE_FRAMES, rangeBytes } from './diff-limits.js';
 import type { IoRegisterValue } from './io.js';
 import type { Label } from './labels.js';
-import { type Capture, DIFF_LIMITS, type DiffGroup, type DiffMode, type DiffRow } from './memory-diff.js';
-import { type Mute, NOISE_FRAMES, muteBytes } from './memory-noise.js';
+import type { Capture, DiffGroup, DiffMode, DiffRow } from './memory-diff.js';
+import type { Mute, MuteSource } from './memory-noise.js';
 import type { SearchOptions } from './memory-search.js';
 import { type BackgroundInfo, type SpriteInfo, type TilemapSnapshot, screenToJson } from './ppu.js';
 import type { InputRecording, RecordedTake } from './recorder.js';
@@ -30,6 +31,9 @@ import { type SaveStateFile, bytesToBase64 } from './snapshot-codec.js';
 
 /** The most a `gba-kit/importSave` payload can carry, so a client can turn a mis-picked file away before encoding it. */
 export { MAX_SAVE_FILE_SIZE } from './cartridge-save.js';
+
+/** A typed member path as a name a label can carry and the `.sym` importer can read back. */
+export { labelName } from './labels.js';
 
 /** A capture as a client sees it: everything but the 288 KB of RAM, which never crosses. */
 export interface CaptureInfo {
@@ -48,6 +52,8 @@ export interface CaptureInfo {
 /** One candidate address, with what every capture held there. */
 export interface DiffRowBody {
   address: number;
+  /** the group it belongs to, so a page of rows needs no second request to be grouped */
+  group: string;
   /** one per capture, in capture order — the matrix the user reads by eye */
   values: number[];
   /** how each value reads through its type (an enum by name, a bool, a bitfield) */
@@ -58,6 +64,8 @@ export interface DiffRowBody {
   /** `gEntityInfo[13].xPosBg2`, when a DWARF type reached the address */
   path?: string;
   type?: string;
+  /** the other members of a union covering these bytes: no one reading of them is the reading */
+  alternatives?: string[];
   /** the path went past a declared bound, so it is a hypothesis */
   extrapolated?: boolean;
   /** the read crosses out of the object the path names */
@@ -74,6 +82,9 @@ export interface DiffGroupBody {
   rows: number;
   topRank: number;
 }
+
+/** How many candidates each kind of mute is hiding right now. */
+export type MuteTally = Partial<Record<MuteSource, number>>;
 
 /** A muted range set as a client lists it, with how many addresses it covers. */
 export interface MuteBody extends Mute {
@@ -317,7 +328,7 @@ export interface GbaKitRequests {
   /** What a filter would leave behind, and what each mute source would take, without committing it. */
   'gba-kit/diffPreview': {
     args: { mode: DiffMode; size: 1 | 2 | 4 };
-    body: { kept: number; removed: number; hidden: Record<string, number> };
+    body: { kept: number; removed: number; hidden: MuteTally };
   };
   /**
    * Narrow the candidates and read a page of what is left. `undo` steps back one filter
@@ -334,12 +345,16 @@ export interface GbaKitRequests {
     };
     body: {
       total: number;
+      /** how many of them are placed, ranked and reachable as rows: past this the pages stop */
+      detail: number;
       /** too many candidates to group, rank or order: the rows are a page in address order */
       capped: boolean;
       undoDepth: number;
       size: 1 | 2 | 4;
-      hidden: Record<string, number>;
+      hidden: MuteTally;
       groups: DiffGroupBody[];
+      /** where in the candidates this page starts, so a pager knows what it is showing */
+      from: number;
       rows: DiffRowBody[];
     };
   };
@@ -492,7 +507,7 @@ export function savedStateInfo(name: string, path: string, meta: SaveStateMeta |
 
 /**
  * A capture as a body carries it: the thumbnail base64, the RAM nowhere. Twelve
- * captures are 3.4 MB in the session and 154 KB of thumbnails; sending the RAM with
+ * captures are 3.4 MB in the session and 600 KB of thumbnails; sending the RAM with
  * them would be 3.4 MB on every render.
  */
 export function captureInfo(capture: Capture): CaptureInfo {
@@ -511,7 +526,7 @@ export function captureInfo(capture: Capture): CaptureInfo {
 
 /** A mute as a body carries it: what it hides, and how much of it. */
 export function muteBody(mute: Mute): MuteBody {
-  return { ...mute, ranges: mute.ranges.map((r) => ({ ...r })), bytes: muteBytes(mute) };
+  return { ...mute, ranges: mute.ranges.map((r) => ({ ...r })), bytes: rangeBytes(mute.ranges) };
 }
 
 /**
@@ -523,6 +538,7 @@ export function diffRowBody(row: DiffRow): DiffRowBody {
   const p = row.placement;
   const body: DiffRowBody = {
     address: row.address,
+    group: row.group,
     values: row.values,
     tier: p.tier,
     rank: row.rank,
@@ -539,6 +555,9 @@ export function diffRowBody(row: DiffRow): DiffRowBody {
   }
   if (p.type) {
     body.type = p.type.name;
+  }
+  if (p.alternatives?.length) {
+    body.alternatives = [...p.alternatives];
   }
   if (p.extrapolated) {
     body.extrapolated = true;
@@ -636,6 +655,7 @@ export function diffFilterBody(
     ...result,
     size: diff.size,
     groups: diff.groups().map(diffGroupBody),
+    from: window.from,
     rows: diff.rows(window.from, window.limit).map(diffRowBody),
   };
 }
@@ -681,6 +701,22 @@ export const DIFF = {
   noiseFramesDefault: NOISE_FRAMES.default,
   noiseFramesMax: NOISE_FRAMES.max,
 } as const;
+
+/** The `id` of a capture a request names: an id the session could have issued, so a missing field is refused here rather than inside the store. */
+export function captureId(raw: unknown): number {
+  if (!Number.isInteger(raw) || (raw as number) < 1) {
+    throw new Error(`'id' must be a capture id, not ${String(raw)}`);
+  }
+  return raw as number;
+}
+
+/** The `tag` of a `gba-kit/retagCapture`: what the tag filter matches on, so it has to be text. */
+export function captureTag(raw: unknown): string {
+  if (typeof raw !== 'string') {
+    throw new Error(`'tag' must be a string, not ${String(raw)}`);
+  }
+  return raw;
+}
 
 /** The `size` of a memory-diff request: a width memory is actually stepped by, so a wrong one is refused rather than rounded. */
 export function diffSize(raw: unknown): 1 | 2 | 4 {

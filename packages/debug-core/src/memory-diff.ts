@@ -19,12 +19,18 @@
  * Candidates are a bitset rather than a list of addresses: `unchanged` between two
  * captures answers 291,679 of them, which is 2.3 MB as a `number[]` for every undo
  * step and 36 KB as bits.
+ *
+ * A mute is a view over that set, not a filter into it: the bits a mute covers stay
+ * in the candidate set and are dropped when the set is reported. That is what makes
+ * switching a mute off put its addresses back — with no filter to re-run — and what
+ * lets the tally say how many candidates each source is hiding right now.
  */
 import type { DebugInfo, Placement, TypeDesc, ValueReader } from '@gba-kit/debug-info';
 import { bitfieldPlacement, formatBitfield, formatValue, placementAt, scalarSize } from '@gba-kit/debug-info';
 
+import { DIFF_LIMITS } from './diff-limits.js';
 import { type Machine, RAM_REGIONS } from './machine.js';
-import { type Mute, type MuteSource, MuteStore } from './memory-noise.js';
+import { MUTE_SOURCES, type Mute, type MuteSource, MuteStore } from './memory-noise.js';
 import { searchMemory } from './memory-search.js';
 import type { Screen } from './ppu.js';
 
@@ -34,15 +40,6 @@ export type RamRegion = keyof typeof RAM_REGIONS;
 export type RamPair = Record<RamRegion, Uint8Array>;
 
 const REGIONS: readonly RamRegion[] = ['iwram', 'ewram'];
-
-/** How many candidates are worth grouping, ranking and ordering, and how deep undo goes. */
-export const DIFF_LIMITS = {
-  /** beyond this a result is a count and a page of addresses: nobody reads 290,000 ranked rows */
-  detail: 5000,
-  rowsDefault: 512,
-  rowsMax: 5000,
-  undoDepth: 20,
-} as const;
 
 /** A capture as the session holds it: the RAM never leaves, everything else describes it. */
 export interface Capture {
@@ -67,6 +64,8 @@ export type DiffMode =
 
 export interface DiffRow {
   address: number;
+  /** the group it belongs to, so a client that pages the rows needs no second request */
+  group: string;
   /** one per capture, in capture order — the matrix the user reads by eye */
   values: number[];
   /** how each value reads through its type, when a type reached the address */
@@ -87,6 +86,8 @@ export interface DiffGroup {
 
 export interface DiffResult {
   total: number;
+  /** how many candidates a page of rows can still reach, so a client knows what it is not showing */
+  detail: number;
   /** too many candidates to group, rank or order: the rows are a page in address order */
   capped: boolean;
   undoDepth: number;
@@ -250,12 +251,16 @@ export class CandidateMask {
   }
 }
 
-/** The enabled mutes as a byte per address saying which source hides it, for a filter that asks per candidate. */
+/**
+ * The enabled mutes as a byte per address saying which source hides it, for a view
+ * that asks per candidate. Code 0 is "nothing hides this", so a source's code is one
+ * past its place in `MUTE_SOURCES` and `sourceOfCode` reads it back off the same list.
+ */
 function muteMask(mutes: Mute[]): Record<RamRegion, Uint8Array> | null {
   if (mutes.length === 0) {
     return null;
   }
-  const codes: Record<MuteSource, number> = { idle: 1, dma: 2, stack: 3, user: 4 };
+  const codes = (source: MuteSource): number => MUTE_SOURCES.indexOf(source) + 1;
   const mask = {
     iwram: new Uint8Array(RAM_REGIONS.iwram.size),
     ewram: new Uint8Array(RAM_REGIONS.ewram.size),
@@ -271,7 +276,7 @@ function muteMask(mutes: Mute[]): Record<RamRegion, Uint8Array> | null {
           // the first mute covering an address is the one credited with hiding it, so
           // the tally adds up to the number of candidates removed rather than over-counting
           if (into[i] === 0) {
-            into[i] = codes[mute.source];
+            into[i] = codes(mute.source);
           }
         }
       }
@@ -280,7 +285,7 @@ function muteMask(mutes: Mute[]): Record<RamRegion, Uint8Array> | null {
   return mask;
 }
 
-const SOURCE_NAMES = ['', 'idle', 'dma', 'stack', 'user'] as const;
+const sourceOfCode = (code: number): MuteSource => MUTE_SOURCES[code - 1]!;
 
 /** A reader over a capture's frozen RAM, so a value is formatted as it was then rather than as it is now. */
 function captureReader(capture: Capture): ValueReader {
@@ -309,13 +314,15 @@ export class MemoryDiff {
   readonly #context: DiffContext;
   #captures: Capture[] = [];
   #nextId = 1;
+  /** every address the filters kept, mutes included: what a mute hides is subtracted when this is read */
   #mask = CandidateMask.full();
-  /** the candidate set before each filter, with the size it was addressed at: undoing restores both */
-  #undo: Array<{ mask: CandidateMask; size: 1 | 2 | 4 }> = [];
+  /** the candidate set before each filter, with the size and the pair it was read at: undoing restores all three */
+  #undo: Array<{ mask: CandidateMask; size: 1 | 2 | 4; pair: RankPair }> = [];
   #size: 1 | 2 | 4 = 1;
-  #hidden: Record<string, number> = {};
-  /** the placed, ranked, ordered rows of the current candidate set: `rows` and `groups` are both this */
-  #rows: DiffRow[] | null = null;
+  /** the two captures the last filter compared, which is the pair ranking judges a neighbourhood by */
+  #pair: RankPair = null;
+  /** the visible candidates, their rows and what the mutes took, held until any of the three could change */
+  #view: View | null = null;
 
   constructor(context: DiffContext) {
     this.#context = context;
@@ -341,7 +348,7 @@ export class MemoryDiff {
       thumbnail,
     };
     this.#captures.push(capture);
-    this.#rows = null;
+    this.#view = null;
     return capture;
   }
 
@@ -356,18 +363,18 @@ export class MemoryDiff {
   retag(id: number, tag: string): Capture {
     const capture = this.byId(id);
     capture.tag = tag.trim();
-    this.#rows = null;
+    this.#view = null;
     return capture;
   }
 
-  forget(id: number): boolean {
+  forget(id: number): Capture {
     const at = this.#captures.findIndex((c) => c.id === id);
     if (at < 0) {
-      return false;
+      throw new Error(`no capture ${id}`);
     }
-    this.#captures.splice(at, 1);
-    this.#rows = null;
-    return true;
+    const [gone] = this.#captures.splice(at, 1) as [Capture];
+    this.#view = null;
+    return gone;
   }
 
   /** Everything a restart invalidates: the captures are of a machine that no longer exists. */
@@ -380,8 +387,8 @@ export class MemoryDiff {
   reset(): DiffResult {
     this.#mask = CandidateMask.full();
     this.#undo = [];
-    this.#hidden = {};
-    this.#rows = null;
+    this.#pair = null;
+    this.#view = null;
     return this.result();
   }
 
@@ -392,66 +399,97 @@ export class MemoryDiff {
     }
     this.#mask = previous.mask;
     this.#size = previous.size;
-    this.#hidden = {};
-    this.#rows = null;
+    this.#pair = previous.pair;
+    this.#view = null;
     return this.result();
   }
 
   result(): DiffResult {
-    const total = this.#mask.count(this.#size);
-    return { total, capped: total > DIFF_LIMITS.detail, undoDepth: this.#undo.length, hidden: this.#hidden };
+    const view = this.#seen();
+    const total = view.mask.count(this.#size);
+    return {
+      total,
+      detail: DIFF_LIMITS.detail,
+      capped: total > DIFF_LIMITS.detail,
+      undoDepth: this.#undo.length,
+      hidden: view.hidden,
+    };
   }
 
   /** What `apply` would leave behind, and what each mute source would take, without committing it. */
   preview(mode: DiffMode, size: 1 | 2 | 4): DiffPreview {
-    const scan = this.#scan(mode, size);
-    return { kept: scan.kept, removed: this.#mask.count(size) - scan.kept, hidden: scan.hidden };
+    const scanned = this.#hide(this.#scan(mode, size), size);
+    const kept = scanned.mask.count(size);
+    return { kept, removed: this.#hide(this.#mask, size).mask.count(size) - kept, hidden: scanned.hidden };
   }
 
   /** Narrow the candidates; the previous set goes on the undo stack. */
   apply(mode: DiffMode, size: 1 | 2 | 4): DiffResult {
-    const scan = this.#scan(mode, size);
-    this.#undo.push({ mask: this.#mask, size: this.#size });
+    const mask = this.#scan(mode, size);
+    this.#undo.push({ mask: this.#mask, size: this.#size, pair: this.#pair });
     if (this.#undo.length > DIFF_LIMITS.undoDepth) {
       this.#undo.shift();
     }
-    this.#mask = scan.mask;
+    this.#mask = mask;
     this.#size = size;
-    this.#hidden = scan.hidden;
-    this.#rows = null;
+    this.#pair = this.#pairOf(mode);
+    this.#view = null;
     return this.result();
   }
 
-  #scan(mode: DiffMode, size: 1 | 2 | 4): { mask: CandidateMask; kept: number; hidden: Record<string, number> } {
+  /** Which addresses the filter keeps, mutes not consulted: hiding is what reading does. */
+  #scan(mode: DiffMode, size: 1 | 2 | 4): CandidateMask {
     const keep = this.#predicate(mode, size);
-    const mutes = muteMask(this.mutes.enabled());
     const mask = CandidateMask.empty();
-    const hidden: Record<string, number> = {};
-    let kept = 0;
     for (const region of REGIONS) {
       const { base, size: length } = RAM_REGIONS[region];
-      const muted = mutes?.[region];
       for (let offset = 0; offset + size <= length; offset += size) {
-        if (!this.#mask.spans(region, offset, size)) {
-          continue;
+        if (this.#mask.spans(region, offset, size) && keep(region, offset, base + offset)) {
+          mask.setSpan(region, offset, size);
         }
-        if (!keep(region, offset, base + offset)) {
+      }
+    }
+    return mask;
+  }
+
+  /** A candidate set as it is reported: what no enabled mute covers, and the tally of what each took. */
+  #hide(mask: CandidateMask, size: 1 | 2 | 4): { mask: CandidateMask; hidden: Record<string, number> } {
+    const mutes = muteMask(this.mutes.enabled());
+    if (!mutes) {
+      return { mask, hidden: {} };
+    }
+    const out = CandidateMask.empty();
+    const hidden: Record<string, number> = {};
+    for (const region of REGIONS) {
+      const { size: length } = RAM_REGIONS[region];
+      const muted = mutes[region];
+      for (let offset = 0; offset + size <= length; offset += size) {
+        if (!mask.spans(region, offset, size)) {
           continue;
         }
         let code = 0;
         for (let k = 0; k < size && code === 0; k++) {
-          code = muted?.[offset + k] ?? 0;
+          code = muted[offset + k] ?? 0;
         }
         if (code !== 0) {
-          const name = SOURCE_NAMES[code]!;
+          const name = sourceOfCode(code);
           hidden[name] = (hidden[name] ?? 0) + 1;
           continue;
         }
-        mask.setSpan(region, offset, size);
-        kept++;
+        out.setSpan(region, offset, size);
       }
     }
-    return { mask, kept, hidden };
+    return { mask: out, hidden };
+  }
+
+  /** The visible candidates and their rows, recomputed when the candidates, the captures or the mutes moved. */
+  #seen(): View {
+    const version = this.mutes.version;
+    if (this.#view && this.#view.version === version) {
+      return this.#view;
+    }
+    this.#view = { version, ...this.#hide(this.#mask, this.#size), rows: undefined };
+    return this.#view;
   }
 
   /**
@@ -476,7 +514,18 @@ export class MemoryDiff {
         return (region, offset) => found.spans(region, offset, size);
       }
       case 'tags': {
-        const captures = this.#requireCaptures(2);
+        // an untagged capture makes no claim about what it should equal, so it takes no
+        // part in the question; two captures tagged the same way ask nothing either, which
+        // is why the filter is refused rather than answered with the whole of RAM
+        const captures = this.#requireCaptures(2).filter((c) => c.tag !== '');
+        const named = new Set(captures.map((c) => c.tag));
+        if (named.size < 2) {
+          throw new Error(
+            named.size === 0
+              ? 'the tag filter needs two different tags; no capture is tagged'
+              : `the tag filter needs two different tags; every tagged capture is '${[...named][0]}'`,
+          );
+        }
         const values = new Array<number>(captures.length);
         return (region, offset) => {
           for (let i = 0; i < captures.length; i++) {
@@ -514,6 +563,30 @@ export class MemoryDiff {
     }
   }
 
+  /**
+   * The two captures a filter compared, which is the pair its candidates are judged
+   * against: a neighbourhood counted over some other pair describes memory the user
+   * did not ask about, and the run lengths it reports would be of that pair's buffers.
+   * A tag filter names no pair, so the first two captures whose tags differ are it.
+   */
+  #pairOf(mode: DiffMode): RankPair {
+    if (mode.kind !== 'value' && mode.kind !== 'tags') {
+      return [mode.from, mode.to];
+    }
+    if (mode.kind === 'tags') {
+      for (let i = 0; i < this.#captures.length; i++) {
+        for (let j = i + 1; j < this.#captures.length; j++) {
+          const a = this.#captures[i]!;
+          const b = this.#captures[j]!;
+          if (a.tag !== '' && b.tag !== '' && a.tag !== b.tag) {
+            return [a.id, b.id];
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   #requireCaptures(least: number): Capture[] {
     if (this.#captures.length < least) {
       throw new Error(
@@ -538,8 +611,8 @@ export class MemoryDiff {
       return all.slice(from, from + limit);
     }
     const info = this.#context.info();
-    return this.#mask
-      .addresses(this.#size, from, limit)
+    return this.#seen()
+      .mask.addresses(this.#size, from, limit)
       .map((address) => this.#row(address, this.#size, info, null, ['too many candidates to rank']));
   }
 
@@ -570,35 +643,42 @@ export class MemoryDiff {
    * so asking for the rows and the groups of one result does the work once.
    */
   #detailRows(): DiffRow[] | null {
-    if (this.#rows) {
-      return this.#rows;
+    const view = this.#seen();
+    if (view.rows !== undefined) {
+      return view.rows;
     }
-    if (this.#mask.count(this.#size) > DIFF_LIMITS.detail) {
+    if (view.mask.count(this.#size) > DIFF_LIMITS.detail) {
+      view.rows = null;
       return null;
     }
     const info = this.#context.info();
     const context = this.#rankContext();
-    const rows = this.#mask
+    const rows = view.mask
       .addresses(this.#size, 0, DIFF_LIMITS.detail)
       .map((address) => this.#row(address, this.#size, info, context, []));
     rows.sort((a, b) => b.rank - a.rank || a.address - b.address);
-    this.#rows = rows;
+    view.rows = rows;
     return rows;
   }
 
   /**
    * What ranking needs to know about the neighbourhood of an address, worked out once
-   * per result: which bytes changed between the first two captures, how many changed
-   * within reach of each one, and how long the run of changed bytes it sits in is. All
-   * three are one pass over 288 KB, where asking per row would be a 512-byte loop per
-   * row.
+   * per result: which bytes changed between the two captures the filter compared, how
+   * many changed within reach of each one, and how long the run of changed bytes it
+   * sits in is. All three are one pass over 288 KB, where asking per row would be a
+   * 512-byte loop per row.
    */
   #rankContext(): RankContext | null {
     if (this.#captures.length < 2) {
       return null;
     }
-    const [first, second] = this.#captures as [Capture, Capture];
-    const tags = new Set(this.#captures.map((c) => c.tag)).size;
+    const pair = this.#pair;
+    const first = pair ? this.byId(pair[0]) : this.#captures[0]!;
+    const second = pair ? this.byId(pair[1]) : this.#captures[1]!;
+    // an untagged capture answers no tag question, so it is not one of the values a
+    // candidate is expected to take
+    const tagged = this.#captures.flatMap((c, i) => (c.tag === '' ? [] : [i]));
+    const tags = new Set(tagged.map((i) => this.#captures[i]!.tag)).size;
     const per = {} as RankContext['per'];
     for (const region of REGIONS) {
       const a = first.ram[region];
@@ -623,14 +703,14 @@ export class MemoryDiff {
       }
       per[region] = { prefix, runs };
     }
-    return { tags, per };
+    return { tags, tagged, per };
   }
 
   #row(address: number, size: 1 | 2 | 4, info: DebugInfo | null, rank: RankContext | null, reasons: string[]): DiffRow {
     const at = locate(address)!;
     const values = this.#captures.map((c) => readAt(c.ram[at.region], at.offset, size));
     const placement = info ? placementAt(info, address, size) : { address, tier: 'unattributed' as const };
-    const row: DiffRow = { address, values, placement, rank: 0, reasons };
+    const row: DiffRow = { address, group: groupKey(placement).key, values, placement, rank: 0, reasons };
     const type = formattable(placement);
     if (type) {
       row.formatted = this.#captures.map((c) => format(c, placement, type));
@@ -639,7 +719,7 @@ export class MemoryDiff {
       const { prefix, runs } = rank.per[at.region];
       const near = prefix[Math.min(runs.length, at.offset + 256)]! - prefix[Math.max(0, at.offset - 256)]!;
       const run = runs[at.offset] || 1;
-      const distinct = new Set(values).size;
+      const distinct = new Set(rank.tagged.map((i) => values[i]!)).size;
       let score = 0;
       if (near <= 4) {
         score += 4;
@@ -667,7 +747,22 @@ export class MemoryDiff {
 
 interface RankContext {
   tags: number;
+  /** which captures carry a tag, since only those are asked to hold one value per tag */
+  tagged: number[];
   per: Record<RamRegion, { prefix: Int32Array; runs: Uint16Array }>;
+}
+
+/** The ids of the two captures a filter compared, or none when it compared no pair. */
+type RankPair = [number, number] | null;
+
+/** A candidate set as it is reported, with the rows it was worth placing. */
+interface View {
+  /** the `MuteStore` revision it was built against: a mute switched on or off makes it stale */
+  version: number;
+  mask: CandidateMask;
+  hidden: Record<string, number>;
+  /** the placed, ranked rows, `null` when there were too many to place, `undefined` until asked */
+  rows?: DiffRow[] | null;
 }
 
 /**

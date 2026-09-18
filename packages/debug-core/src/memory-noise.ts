@@ -17,10 +17,13 @@
  */
 import type { HardwareEvent } from '@gba-kit/gba-emulator';
 
+import { NOISE_FRAMES, rangeBytes } from './diff-limits.js';
 import { type Machine, RAM_REGIONS, regionOf, stackBoundFor } from './machine.js';
 
 /** Where a mute came from, which is also what a panel names it by. */
-export type MuteSource = 'idle' | 'dma' | 'stack' | 'user';
+export const MUTE_SOURCES = ['idle', 'dma', 'stack', 'user'] as const;
+
+export type MuteSource = (typeof MUTE_SOURCES)[number];
 
 /** Half-open `[lo, hi)`. */
 export interface MuteRange {
@@ -43,18 +46,24 @@ export interface Mute {
   enabled: boolean;
 }
 
-/** How many idle frames a noise baseline runs by default, and at most. */
-export const NOISE_FRAMES = { default: 16, max: 300 } as const;
-
 /** How many addresses a mute covers. */
 export function muteBytes(mute: Mute): number {
-  return mute.ranges.reduce((sum, r) => sum + (r.hi - r.lo), 0);
+  return rangeBytes(mute.ranges);
 }
 
 /** The mutes of a session: a discovery replaces the last one's ranges, what the user muted is theirs. */
 export class MuteStore {
   #mutes: Mute[] = [];
   #nextId = 1;
+  #version = 0;
+
+  /**
+   * Bumps on every change. A diff hides muted candidates when it reports them rather
+   * than when it finds them, so what it reports has to know when this moved.
+   */
+  get version(): number {
+    return this.#version;
+  }
 
   all(): Mute[] {
     return this.#mutes.map((m) => ({ ...m, ranges: m.ranges.map((r) => ({ ...r })) }));
@@ -74,6 +83,7 @@ export class MuteStore {
       enabled: true,
     };
     this.#mutes.push(mute);
+    this.#version++;
     return mute;
   }
 
@@ -86,6 +96,7 @@ export class MuteStore {
     for (const m of found) {
       this.#mutes.push({ ...m, id: this.#nextId++, enabled: true });
     }
+    this.#version++;
     return this.all();
   }
 
@@ -95,6 +106,7 @@ export class MuteStore {
       return false;
     }
     mute.enabled = enabled;
+    this.#version++;
     return true;
   }
 
@@ -104,11 +116,13 @@ export class MuteStore {
       return false;
     }
     this.#mutes.splice(at, 1);
+    this.#version++;
     return true;
   }
 
   clear(): void {
     this.#mutes = [];
+    this.#version++;
   }
 }
 
@@ -148,13 +162,17 @@ export interface Noise {
  * the run and restored after, and the hardware-event sink is swapped out so the
  * session's event ring does not fill with frames nobody asked to run.
  *
- * Sixteen frames is the default because the churn mask saturates: on the measured
- * target it reaches 93% of its eventual size by frame 8 and 94.5% by frame 16, where
- * 120 frames add a further 6% and cost eight times as much.
+ * How long the run is worth making is `NOISE_FRAMES`' own question, and the answer is
+ * measured in candidates rather than in churn bytes.
  *
  * The DMA watch is not covered by the churn: a shadow buffer the game rebuilds only
  * when something changes sits perfectly still through an idle run, and the measured
  * overlap between the two was between 0% and 0.6%.
+ *
+ * The stack is watched by the stack pointer rather than by the memory: every frame's
+ * abandoned call frames lie *below* the pointer, and how far below is only knowable by
+ * looking while the code runs. The run already runs, so the lowest pointer it sees is
+ * the depth the mute is bounded by.
  */
 export function discoverNoise(machine: Machine, frames: number = NOISE_FRAMES.default): Noise {
   const count = Math.max(1, Math.min(NOISE_FRAMES.max, Math.floor(frames)));
@@ -186,9 +204,19 @@ export function discoverNoise(machine: Machine, frames: number = NOISE_FRAMES.de
   };
 
   machine.setButtons(0);
+  const registers = machine.registers;
+  const stackRegion = regionOf(machine.registers[13]!);
+  let deepest = machine.registers[13]!;
+  const watchStack = (): boolean => {
+    const sp = registers[13]!;
+    if (sp < deepest && regionOf(sp) === stackRegion) {
+      deepest = sp;
+    }
+    return false;
+  };
   const previous = { iwram: machine.readRam('iwram'), ewram: machine.readRam('ewram') };
   for (let f = 0; f < count; f++) {
-    machine.runFrame();
+    machine.runFrame(watchStack);
     for (const region of ['iwram', 'ewram'] as const) {
       const now = machine.readRam(region);
       const was = previous[region];
@@ -231,11 +259,15 @@ export function discoverNoise(machine: Machine, frames: number = NOISE_FRAMES.de
   }
   const sp = machine.registers[13]!;
   const top = stackBoundFor(machine.cpsr & 0x1f, sp);
-  if (top > sp) {
+  // the live frames at and above the pointer are identical in every capture taken at
+  // the same place, so they hide nothing; what moves is the abandoned frames below it,
+  // and the run just measured how far down they reach
+  const floor = Math.min(sp, deepest);
+  if (top > floor) {
     mutes.push({
       source: 'stack',
-      ranges: [{ lo: sp, hi: top }],
-      note: 'below the stack pointer, so it is call frames',
+      ranges: [{ lo: floor, hi: top }],
+      note: `the stack, as deep as ${count} idle frame${count === 1 ? '' : 's'} saw it go`,
     });
   }
   return { mutes, churnBytes, frames: count };

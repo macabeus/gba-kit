@@ -23,7 +23,9 @@ import {
   type SavedStateInfo,
   type StateBody,
   breakOnWriteBody,
+  captureId,
   captureInfo,
+  captureTag,
   capturesBody,
   diffFilterBody,
   diffMode,
@@ -332,11 +334,11 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       }
       case 'gba-kit/retagCapture': {
         const { id, tag } = a as A<'gba-kit/retagCapture'>;
-        session.memoryDiff.retag(id, tag);
+        session.memoryDiff.retag(captureId(id), captureTag(tag));
         return capturesBody(session) as never;
       }
       case 'gba-kit/forgetCapture': {
-        session.memoryDiff.forget((a as A<'gba-kit/forgetCapture'>).id);
+        session.memoryDiff.forget(captureId((a as A<'gba-kit/forgetCapture'>).id));
         return capturesBody(session) as never;
       }
       case 'gba-kit/discoverNoise': {

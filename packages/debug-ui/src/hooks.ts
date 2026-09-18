@@ -263,17 +263,25 @@ export function useMemoryDiff(transport: Transport): {
   const action = useAction();
   const { run } = action;
 
-  // a restart boots a different machine, and the captures it had were of the old one
+  // a restart boots a different machine and the session dropped what it held of the old
+  // one; a state load keeps every capture and the narrowed candidate set, so what is
+  // read back here is the session's own answer either way rather than an assumption.
+  // A set no filter has narrowed is every address there is, which is not a result
+  // anyone asked for — `undoDepth` is what tells the two apart.
   useEffect(() => {
     let ignore = false;
-    Promise.all([transport.request('gba-kit/captures'), transport.request('gba-kit/mutes')]).then(
-      ([c, m]) => {
+    Promise.all([
+      transport.request('gba-kit/captures'),
+      transport.request('gba-kit/mutes'),
+      transport.request('gba-kit/diffFilter', {}),
+    ]).then(
+      ([c, m, f]) => {
         if (!ignore) {
           setCaptures(c.captures);
           setMutes(m.mutes);
-          setResult(null);
+          setResult(f.undoDepth > 0 ? f : null);
           setPreview(null);
-          setFrom(0);
+          setFrom(f.undoDepth > 0 ? f.from : 0);
         }
       },
       () => undefined,
@@ -289,11 +297,26 @@ export function useMemoryDiff(transport: Transport): {
         const body = await transport.request('gba-kit/diffFilter', { ...args, from: at });
         setResult(body);
         setPreview(null);
-        setFrom(at);
+        setFrom(body.from);
         return body;
       }),
     [run, transport],
   );
+
+  /**
+   * The result as the session reports it now, asking nothing of it: a mute switched on
+   * or a capture forgotten changes what the candidates are and what each row's values
+   * mean, and a matrix left standing under a changed set of columns is misread by eye.
+   * Nothing is read back where no filter has run, since there is no matrix yet.
+   */
+  const reread = async (at: number): Promise<void> => {
+    if (result === null) {
+      return;
+    }
+    const body = await transport.request('gba-kit/diffFilter', { from: at });
+    setResult(body);
+    setFrom(body.from);
+  };
 
   return {
     captures,
@@ -307,18 +330,34 @@ export function useMemoryDiff(transport: Transport): {
       run(async () => {
         await transport.request('gba-kit/capture', { tag });
         setCaptures((await transport.request('gba-kit/captures')).captures);
+        await reread(from);
       }),
     adopt: (state, tag) =>
       run(async () => {
         await transport.request('gba-kit/capture', { path: state.path, tag });
         setCaptures((await transport.request('gba-kit/captures')).captures);
+        await reread(from);
       }),
     retag: (id, tag) =>
-      run(async () => setCaptures((await transport.request('gba-kit/retagCapture', { id, tag })).captures)),
-    forget: (id) => run(async () => setCaptures((await transport.request('gba-kit/forgetCapture', { id })).captures)),
+      run(async () => {
+        setCaptures((await transport.request('gba-kit/retagCapture', { id, tag })).captures);
+        await reread(from);
+      }),
+    forget: (id) =>
+      run(async () => {
+        setCaptures((await transport.request('gba-kit/forgetCapture', { id })).captures);
+        await reread(0);
+      }),
     findNoise: (frames) =>
-      run(async () => setMutes((await transport.request('gba-kit/discoverNoise', { frames })).mutes)),
-    mute: (args) => run(async () => setMutes((await transport.request('gba-kit/setMute', args)).mutes)),
+      run(async () => {
+        setMutes((await transport.request('gba-kit/discoverNoise', { frames })).mutes);
+        await reread(0);
+      }),
+    mute: (args) =>
+      run(async () => {
+        setMutes((await transport.request('gba-kit/setMute', args)).mutes);
+        await reread(0);
+      }),
     runPreview: (mode, size) =>
       run(async () => setPreview(await transport.request('gba-kit/diffPreview', { mode, size }))),
     clearPreview: () => setPreview(null),

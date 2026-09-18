@@ -38,7 +38,7 @@ import {
 } from './inspector.js';
 import { type IoRegisterValue, ioRegisterAt, ioSnapshot } from './io.js';
 import { LabelStore, type LabelsFile } from './labels.js';
-import { Machine, romHash } from './machine.js';
+import { Machine, regionOf, romHash } from './machine.js';
 import { type Capture, MemoryDiff, type RamPair } from './memory-diff.js';
 import { type Noise, discoverNoise } from './memory-noise.js';
 import { type SearchOptions, filterMemory, searchMemory } from './memory-search.js';
@@ -978,6 +978,12 @@ export class Session {
    * editor. An identical watch is not set twice.
    */
   watchAddress(spec: DataBreakpointSpec): DataBreakpoint[] {
+    // a watch the bus can never report is worse than a refusal: it verifies, never
+    // fires, and reads as a breakpoint that proved nobody writes the address
+    const region = regionOf(spec.address);
+    if (region === null || region === 'bios' || region === 'rom') {
+      throw new Error(`0x${(spec.address >>> 0).toString(16)} is ${region ?? 'unmapped'}, which nothing writes`);
+    }
     const already = this.breakpoints.data.some(
       (bp) => bp.address === spec.address && bp.length === spec.length && bp.access === spec.access,
     );
