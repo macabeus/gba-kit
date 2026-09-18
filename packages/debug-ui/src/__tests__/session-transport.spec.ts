@@ -285,7 +285,8 @@ describe('session transport', () => {
     expect(filtered.total).toBe(searched.addresses.length);
     expect(filtered.rows.map((r) => r.address)).toContain(gKeys);
 
-    // narrowing is what the old Narrow button did, over the candidates already kept
+    // a second value filter runs over the candidates already kept rather than over the
+    // whole of RAM, which is what makes an exact-value search iterative
     await transport.request('gba-kit/buttons', { mask: 1 });
     await transport.request('gba-kit/stepFrame');
     await transport.request('gba-kit/stepFrame');

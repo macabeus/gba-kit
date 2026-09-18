@@ -163,10 +163,12 @@ function DiffRow({ row, actions }: { row: DiffRowBody; actions: DiffRowActions }
 }
 
 /**
- * What a row leads with. A `sized` row leads with the name where the object it names
- * begins at the address; every other row leads with the address, because nothing names
- * it — the object it is a byte of, or the nearest symbol below, follows as a landmark
- * and says in words how far away it is.
+ * What a row leads with. A path leads the row only where the object it names begins at
+ * the address, since that is the one case it names the address rather than an object
+ * the address is a byte of. A `sized` symbol with no type to walk leads with an offset
+ * from it, which claims a containment and no name. Everything else leads with the
+ * address, and whatever the program does say follows it as a landmark that states in
+ * words how far away it is.
  */
 function Where({ row }: { row: DiffRowBody }) {
   if (row.tier === 'sized' && row.path && row.pathOffset !== undefined) {

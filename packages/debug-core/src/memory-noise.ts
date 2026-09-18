@@ -202,6 +202,8 @@ export function discoverNoise(machine: Machine, frames: number = NOISE_FRAMES.de
   const registers = machine.registers;
   const stackRegion = regionOf(machine.registers[13]!);
   let deepest = machine.registers[13]!;
+  // a stop predicate that never stops: it is the only hook the run loop offers per
+  // instruction, and the pointer's low-water mark is only visible between calls
   const watchStack = (): boolean => {
     const sp = registers[13]!;
     if (sp < deepest && regionOf(sp) === stackRegion) {
