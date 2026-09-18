@@ -23,6 +23,7 @@ export {
   STT_OBJECT,
 } from './symbols.js';
 export { LineTable, normalizePath, parseDebugLine, type LineRow, type LineRowStart } from './debug-line.js';
+export { pathTo, placementAt, type Placement, type Tier } from './placement.js';
 export { parseDebugMacinfo, type MacroDefinition } from './debug-macro.js';
 export {
   DwarfScopes,
