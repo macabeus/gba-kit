@@ -55,7 +55,7 @@ export interface Capture {
 }
 
 /** What one link expects of a value between the two captures it joins. */
-export type Relation = 'same' | 'changed' | 'increased' | 'decreased' | 'any';
+export type Relation = 'same' | 'changed' | 'increased' | 'decreased';
 
 /**
  * How much a candidate looks like a variable rather than a byte of something bigger. The
@@ -78,7 +78,7 @@ export function rankLevel(score: number): RankLevel {
 }
 
 /** Every relation a link can carry, in the order the panel offers them. */
-export const RELATIONS: readonly Relation[] = ['changed', 'same', 'increased', 'decreased', 'any'];
+export const RELATIONS: readonly Relation[] = ['changed', 'same', 'increased', 'decreased'];
 
 /**
  * One expectation, between two captures. The links along the strip and an arc back to a
@@ -336,7 +336,7 @@ const positionName = (captures: Capture[], id: number): string => {
  */
 /**
  * How many distinct states the query describes, and which captures take part. Captures an
- * arc joins hold one state between them, so a strip of `A, B, A` describes two — and a
+ * arc joins hold one state between them, so `A, B, A` describes two — and a
  * candidate taking exactly that many distinct values is answering the question that was
  * asked rather than merely moving.
  */
@@ -390,7 +390,7 @@ export function queryProblem(asked: DiffQuery, captures: Capture[]): string | nu
 
   const name = (id: number): string => positionName(captures, id);
   for (const edge of query.edges) {
-    if (edge.relation !== 'any' && edge.relation !== 'same' && find(edge.from) === find(edge.to)) {
+    if (edge.relation !== 'same' && find(edge.from) === find(edge.to)) {
       return `${name(edge.from)} and ${name(edge.to)} are the same state, so nothing can have ${edge.relation} between them`;
     }
   }
@@ -646,9 +646,11 @@ export class MemoryDiff {
   ): (region: RamRegion, offset: number, address: number) => boolean {
     const mask = size === 4 ? 0xffffffff : (1 << (size * 8)) - 1;
     const values = query.values.map((v) => ({ ram: this.byId(v.capture).ram, value: (v.value & mask) >>> 0 }));
-    const edges = query.edges
-      .filter((e) => e.relation !== 'any')
-      .map((e) => ({ a: this.byId(e.from).ram, b: this.byId(e.to).ram, relation: e.relation }));
+    const edges = query.edges.map((e) => ({
+      a: this.byId(e.from).ram,
+      b: this.byId(e.to).ram,
+      relation: e.relation,
+    }));
     return (region, offset) => {
       for (const v of values) {
         if (readAt(v.ram[region], offset, size) !== v.value) {
@@ -681,7 +683,7 @@ export class MemoryDiff {
    * first link that asks for a difference is the one the user is looking at.
    */
   #pairOf(query: Required<DiffQuery>): RankPair {
-    const told = query.edges.find((e) => e.relation !== 'any' && e.relation !== 'same');
+    const told = query.edges.find((e) => e.relation !== 'same');
     return told ? [told.from, told.to] : null;
   }
 

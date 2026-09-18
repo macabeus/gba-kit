@@ -861,7 +861,7 @@ describe('memory diff', () => {
     capture(diff, 'before', { [up]: 4, [down]: 9 });
     capture(diff, 'after', { [up]: 6, [down]: 1 });
     const [first, second] = diff.captures().map((capture) => capture.id) as [number, number];
-    const between = (relation: 'increased' | 'decreased' | 'same' | 'changed' | 'any') => ({
+    const between = (relation: Relation) => ({
       edges: [{ from: first, to: second, relation }],
       values: [],
     });
@@ -879,7 +879,6 @@ describe('memory diff', () => {
     expect(same.capped).toBe(true);
     expect(diff.groups()).toEqual([]);
     expect(diff.rows(0, 3).map((r) => r.address)).toEqual([IWRAM.base, IWRAM.base + 1, IWRAM.base + 2]);
-    expect(diff.apply(between('any'), 1).total).toBe(IWRAM.size + EWRAM.size);
     expect(diff.reset().asked).toBe(false);
   });
 
@@ -985,14 +984,14 @@ describe('memory diff', () => {
     expect(diff.rows(0, 4).map((r) => r.address)).toEqual([cursor, noisy]);
   });
 
-  it('a query with nothing in it keeps every address, and says it was asked', () => {
+  it('a query with no arrows in it keeps every address, and says it was asked', () => {
     const diff = new MemoryDiff(context);
     capture(diff, '', { [IWRAM.base + 0x40]: 1 });
     capture(diff, '', { [IWRAM.base + 0x40]: 2 });
 
-    // every link set to `any` asks nothing, which is a question with a true answer rather
-    // than a refusal: the strip is a description, and an empty one describes everything
-    const asked = diff.apply(strip(diff, 'any'), 1);
+    // a graph nobody has drawn an arrow on asks nothing, which is a question with a true
+    // answer rather than a refusal: an empty description describes everything
+    const asked = diff.apply({ edges: [], values: [] }, 1);
     expect(asked.total).toBe(IWRAM.size + EWRAM.size);
     expect(asked.asked).toBe(true);
   });

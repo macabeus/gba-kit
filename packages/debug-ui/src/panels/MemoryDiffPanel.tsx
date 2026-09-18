@@ -39,17 +39,15 @@ export function querySentence(
     return 'Capture the same screen in two states, then say what the value did between them.';
   }
   const parts = [
-    ...edges
-      .filter((e) => e.relation !== 'any')
-      .map((e) =>
-        e.relation === 'same'
-          ? `${at(e.to)} is back to what ${at(e.from)} held`
-          : `${at(e.from)} → ${at(e.to)} ${RELATION_WORD.get(e.relation)}`,
-      ),
+    ...edges.map((e) =>
+      e.relation === 'same'
+        ? `${at(e.to)} is back to what ${at(e.from)} held`
+        : `${at(e.from)} → ${at(e.to)} ${RELATION_WORD.get(e.relation)}`,
+    ),
     ...Object.entries(values).map(([id, value]) => `${at(Number(id))} held ${value}`),
   ];
   return parts.length === 0
-    ? 'Every arrow asks for anything, so this keeps every address.'
+    ? 'Nothing is asked of these captures, so every address is kept. Draw an arrow between two of them.'
     : `Keep addresses where ${parts.join(', ')}.`;
 }
 
