@@ -252,6 +252,28 @@ describe('session transport', () => {
     expect(left.captures).toHaveLength(2);
   });
 
+  it('the exact-value filter answers what searchMemory answers, narrowed by what came before', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session);
+    await transport.request('gba-kit/buttons', { mask: 6 });
+    await transport.request('gba-kit/stepFrame');
+    await transport.request('gba-kit/stepFrame');
+    const gKeys = session.evaluate('&g_keys').address!;
+
+    const searched = await transport.request('gba-kit/searchMemory', { value: 6, size: 2 });
+    const filtered = await transport.request('gba-kit/diffFilter', { mode: { kind: 'value', value: 6 }, size: 2 });
+    expect(filtered.total).toBe(searched.addresses.length);
+    expect(filtered.rows.map((r) => r.address)).toContain(gKeys);
+
+    // narrowing is what the old Narrow button did, over the candidates already kept
+    await transport.request('gba-kit/buttons', { mask: 1 });
+    await transport.request('gba-kit/stepFrame');
+    await transport.request('gba-kit/stepFrame');
+    const narrowed = await transport.request('gba-kit/diffFilter', { mode: { kind: 'value', value: 1 }, size: 2 });
+    expect(narrowed.total).toBeLessThanOrEqual(filtered.total);
+    expect(narrowed.rows.map((r) => r.address)).toContain(gKeys);
+  });
+
   it('adopts a save state as a capture, and mutes ranges it found by running', async () => {
     const { session } = await boot();
     const transport = createSessionTransport(session);
