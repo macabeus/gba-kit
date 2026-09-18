@@ -20,6 +20,11 @@ const TIERS = {
     label: 'inferred',
     title: 'the nearest symbol below, in the same memory — a landmark, not a name',
   },
+  through: {
+    className: 'gk-tier-through',
+    label: 'pointed at',
+    title: 'no object declares this address; a pointer was aimed here in every capture',
+  },
   unattributed: {
     className: 'gk-tier-unnamed',
     label: 'unnamed',

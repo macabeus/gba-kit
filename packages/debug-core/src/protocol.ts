@@ -63,6 +63,8 @@ export interface DiffRowBody {
   /** how each value reads through its type (an enum by name, a bool, a bitfield) */
   formatted?: string[];
   tier: Tier;
+  /** the pointer this address was reached through, where nothing static covers it */
+  through?: string;
   /** the object it is in when `tier` is `sized`, the nearest landmark when it is `inferred` */
   symbol?: { name: string; offset: number };
   /** `gEntityInfo[13].xPosBg2`, when a DWARF type reached the address */
@@ -582,6 +584,9 @@ export function diffRowBody(row: DiffRow): DiffRowBody {
   }
   if (p.symbol) {
     body.symbol = { name: p.symbol.name, offset: p.symbol.offset };
+  }
+  if (p.through) {
+    body.through = p.through;
   }
   if (p.path) {
     body.path = p.path;

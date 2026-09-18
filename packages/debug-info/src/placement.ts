@@ -20,7 +20,7 @@ import type { DebugInfo } from './debug-info.js';
 import { type MemberDesc, type TypeDesc, bitfieldPlacement } from './dwarf/values.js';
 
 /** How much the program states about an address, and how much of that is stated rather than guessed. */
-export type Tier = 'sized' | 'inferred' | 'unattributed';
+export type Tier = 'sized' | 'inferred' | 'through' | 'unattributed';
 
 export interface Placement {
   address: number;
@@ -45,6 +45,8 @@ export interface Placement {
   straddles?: boolean;
   /** the walk went past a declared bound (an unsized `extern T x[]`), so the path is a hypothesis */
   extrapolated?: boolean;
+  /** the pointer this was reached through, when nothing static covers the address */
+  through?: string;
 }
 
 /** How deep a path may go before a self-referential type is what is being walked. */
@@ -198,10 +200,145 @@ export function pathTo(type: TypeDesc, offset: number, size: number): Walk {
  * of its own memory reaches is `unattributed`, which on a decomp is where the
  * interesting variables usually are.
  */
-export function placementAt(info: DebugInfo, address: number, size: 1 | 2 | 4): Placement {
+/**
+ * What a pointer reaches, where nothing the program declares covers the address. Only
+ * where nothing does: an object that says it is here outranks a pointer that happens to
+ * be aimed here.
+ */
+function throughPointer(
+  info: DebugInfo,
+  address: number,
+  size: 1 | 2 | 4,
+  through: PointerIndex | undefined,
+): Placement | null {
+  const aim = through?.covering(address);
+  if (!aim) {
+    return null;
+  }
+  const walk = pathTo(aim.pointee, address - aim.base, size);
+  return {
+    address,
+    tier: 'through',
+    through: aim.name,
+    path: throughPath(aim.name, walk),
+    type: walk.leaf,
+    base: address - walk.remainder,
+    member: walk.member,
+    alternatives: walk.alternatives,
+    straddles: walk.straddles || undefined,
+  };
+}
+
+/** One 32-bit word of a machine, or null where nothing is mapped. */
+export type WordReader = (address: number) => number | null;
+
+/**
+ * Where the typed pointers of a program are aimed. An address a pointer points at has no
+ * symbol of its own — it exists only while the pointer holds that value — so a static
+ * lookup can never name it, and following the pointers is the only way `gMenuInfo` ever
+ * reaches `gMenuInfo->cursorIndex`.
+ *
+ * A pointer is taken only where every reader agrees on its value: the readers are the
+ * captures a result is read against, and a pointer that moved between them names
+ * different memory in each column, which is a name that is wrong somewhere.
+ */
+export class PointerIndex {
+  readonly #aimed: Array<{ name: string; base: number; end: number; pointee: TypeDesc }> = [];
+
+  constructor(info: DebugInfo, readers: readonly WordReader[]) {
+    if (readers.length === 0 || !info.hasTypeInfo) {
+      return;
+    }
+    for (const name of info.symbols.names()) {
+      const type = declaredType(info, name);
+      const at = info.symbols.symbolToAddress(name);
+      if (!type || at === null) {
+        continue;
+      }
+      for (const held of pointersIn(type, name, at, 0)) {
+        if (this.#aimed.length >= POINTER_LIMITS.kept) {
+          return;
+        }
+        const first = readers[0]!(held.address);
+        // a pointer that moved between the captures names other memory in each column,
+        // which is a name that is wrong somewhere: only one they all agree on is taken
+        if (first === null || first === 0 || readers.some((read) => read(held.address) !== first)) {
+          continue;
+        }
+        this.#aimed.push({ name: held.name, base: first, end: first + held.pointee.size, pointee: held.pointee });
+      }
+    }
+  }
+
+  /** The pointer aimed at `address`, if one is, preferring the one that aims closest. */
+  covering(address: number): { name: string; base: number; pointee: TypeDesc } | null {
+    let best: { name: string; base: number; pointee: TypeDesc } | null = null;
+    for (const aim of this.#aimed) {
+      if (address >= aim.base && address < aim.end && (!best || aim.base > best.base)) {
+        best = { name: aim.name, base: aim.base, pointee: aim.pointee };
+      }
+    }
+    return best;
+  }
+
+  get size(): number {
+    return this.#aimed.length;
+  }
+}
+
+/** What bounds the pointer walk, so a table of pointers cannot cost more than it is worth. */
+const POINTER_LIMITS = { depth: 3, elements: 64, kept: 4096 } as const;
+
+/**
+ * Every pointer a type holds, with where it lives and what it points at. A pointer is as
+ * often a member as a global of its own — `gBgDataPtrs.pBufBg2Tilemap` is how a decomp
+ * reaches a buffer — so the walk goes into structs and arrays rather than stopping at
+ * the names the linker knows.
+ */
+function* pointersIn(
+  type: TypeDesc,
+  name: string,
+  address: number,
+  depth: number,
+): Generator<{ name: string; address: number; pointee: TypeDesc }> {
+  if (type.kind === 'pointer') {
+    if (type.target?.size) {
+      yield { name, address, pointee: type.target };
+    }
+    return;
+  }
+  if (depth >= POINTER_LIMITS.depth) {
+    return;
+  }
+  if (type.kind === 'struct' || type.kind === 'union') {
+    for (const member of type.members ?? []) {
+      // a bitfield is not a pointer and has no address of its own
+      if (member.type && member.bitSize === undefined) {
+        yield* pointersIn(member.type, `${name}.${member.name}`, address + member.offset, depth + 1);
+      }
+    }
+    return;
+  }
+  if (type.kind === 'array' && type.target?.size) {
+    const count = Math.min(type.count ?? 0, POINTER_LIMITS.elements);
+    for (let i = 0; i < count; i++) {
+      yield* pointersIn(type.target, `${name}[${i}]`, address + i * type.target.size, depth + 1);
+    }
+  }
+}
+
+/** `gMenuInfo->cursorIndex` for a walk that started at a pointer rather than at an object. */
+function throughPath(name: string, walk: Walk): string {
+  if (walk.path === '') {
+    return `*${name}`;
+  }
+  return walk.path.startsWith('.') ? `${name}->${walk.path.slice(1)}` : `${name}[0]${walk.path}`;
+}
+
+export function placementAt(info: DebugInfo, address: number, size: 1 | 2 | 4, through?: PointerIndex): Placement {
   const near = info.symbols.addressToSymbol(address);
   if (!near || regionKey(address - near.offset) !== regionKey(address)) {
-    return { address, tier: 'unattributed' };
+    return throughPointer(info, address, size, through) ?? { address, tier: 'unattributed' };
   }
   const base = address - near.offset;
   const symbol = { name: near.name, base, offset: near.offset };

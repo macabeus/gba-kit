@@ -200,6 +200,11 @@ export class SymbolIndex {
     return new SymbolIndex(symbols, sections, mappings);
   }
 
+  /** Every name the table defines, so a caller can ask what each one is without holding the table. */
+  names(): string[] {
+    return [...this.#byName.keys()];
+  }
+
   symbolToAddress(name: string): number | null {
     const s = this.#byName.get(name);
     return s ? s.address : null;
