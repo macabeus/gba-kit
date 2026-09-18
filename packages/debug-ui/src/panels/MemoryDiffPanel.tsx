@@ -16,7 +16,7 @@ import { DIFF, labelName } from '@gba-kit/debug-core/protocol';
 import { useEffect, useRef, useState } from 'react';
 
 import { Button, Empty, Icon, Menu, Select, parseNumber } from '../components.js';
-import { useDebugState, useMemoryDiff, useSaveStates } from '../hooks.js';
+import { useDebugState, useMemoryDiff, useSaveStates, useWatchpoints } from '../hooks.js';
 import type { Transport } from '../transport.js';
 import { DiffGraph, type GraphEdge, RELATION_WORD } from './DiffGraph.js';
 import { CIRCLED, DiffGroups } from './DiffRows.js';
@@ -68,6 +68,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   const stopped = state?.state === 'stopped';
   const diff = useMemoryDiff(transport);
   const saves = useSaveStates(transport);
+  const watches = useWatchpoints(transport);
   const [size, setSize] = useState<1 | 2 | 4>(1);
   /** every arrow drawn, which is the query: the strip and the graph are two ways of drawing it */
   const [edges, setEdges] = useState<GraphEdge[]>([]);
@@ -241,6 +242,34 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
         <span className="gk-hint">{querySentence(captures, edges, values)}</span>
       </div>
 
+      {watches.watchpoints.length > 0 && (
+        <div className="gk-drawer">
+          {/* VS Code's Breakpoints view has no data breakpoint to list, so a watch set
+              from here is shown here or nowhere */}
+          <span className="gk-muted gk-small">
+            Watched for writes — these do not reach the editor's Breakpoints view.
+          </span>
+          {watches.watchpoints.map((w) => (
+            <div key={`${w.address}:${w.length}:${w.access}`} className="gk-row gk-mute-row">
+              <span className={`gk-tier gk-mute-${w.verified ? 'found' : 'yours'}`}>{w.access}</span>
+              <span className="gk-mono gk-small">{w.name}</span>
+              <span className="gk-muted gk-small">
+                {w.length} byte{w.length === 1 ? '' : 's'} · {w.hits} hit{w.hits === 1 ? '' : 's'}
+                {w.verified ? '' : ` · ${w.message ?? 'not watching'}`}
+              </span>
+              <Button
+                kind="icon danger"
+                onClick={() => void watches.unwatch(w)}
+                label={`Stop watching ${w.name}`}
+                title="Stop watching"
+              >
+                <Icon name="trash" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="gk-drawer">
         <div className="gk-row">
           <button
@@ -328,7 +357,10 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
                 busy,
                 onLabel: label,
                 onBreak: (row) =>
-                  attempt(() => transport.request('gba-kit/breakOnWrite', { address: row.address, size: result.size })),
+                  attempt(async () => {
+                    await transport.request('gba-kit/breakOnWrite', { address: row.address, size: result.size });
+                    watches.refresh();
+                  }),
                 onWatch: transport.watch && ((row) => transport.watch!(watchExpression(row, result.size))),
                 onMute: (row) => muteAddress(row.address, 'muted from the results'),
               }}

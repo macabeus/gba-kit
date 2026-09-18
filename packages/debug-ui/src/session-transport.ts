@@ -38,6 +38,8 @@ import {
   savedStateInfo,
   setMute,
   takeBody,
+  unwatchBody,
+  watchpointsBody,
 } from '@gba-kit/debug-core/protocol';
 
 import type { PanelId } from './panels/DebugPanels.js';
@@ -359,6 +361,10 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       }
       case 'gba-kit/diffFilter':
         return diffFilterBody(session, a as NonNullable<A<'gba-kit/diffFilter'>>) as never;
+      case 'gba-kit/watchpoints':
+        return watchpointsBody(session) as never;
+      case 'gba-kit/unwatch':
+        return unwatchBody(session, a as NonNullable<A<'gba-kit/unwatch'>>) as never;
       case 'gba-kit/breakOnWrite':
         return breakOnWriteBody(session, a as A<'gba-kit/breakOnWrite'>) as never;
       case 'gba-kit/eventBreakpoints':

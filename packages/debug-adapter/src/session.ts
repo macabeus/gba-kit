@@ -68,6 +68,8 @@ import {
   savedStateInfo,
   setMute,
   takeBody,
+  unwatchBody,
+  watchpointsBody,
 } from './protocol.js';
 import { FrameStream } from './stream.js';
 
@@ -1558,6 +1560,12 @@ export class GbaDebugSession extends DebugSession {
         return mutesBody(s);
       case 'gba-kit/diffFilter':
         return diffFilterBody(s, (args ?? {}) as NonNullable<Args<'gba-kit/diffFilter'>>);
+      case 'gba-kit/watchpoints':
+        return watchpointsBody(s);
+      case 'gba-kit/unwatch': {
+        const a = args as Args<'gba-kit/unwatch'>;
+        return unwatchBody(s, a);
+      }
       case 'gba-kit/breakOnWrite':
         return breakOnWriteBody(s, args as Args<'gba-kit/breakOnWrite'>);
       case 'gba-kit/eventBreakpoints':

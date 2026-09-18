@@ -378,6 +378,19 @@ export interface GbaKitRequests {
     body: { watched: number; address: number; length: number; verified: boolean };
   };
 
+  /**
+   * What is watched for writes now. VS Code's Breakpoints view lists source and function
+   * breakpoints only — its API has no data breakpoint to add — so a watch set from a panel
+   * is shown by whoever set it or not at all.
+   */
+  'gba-kit/watchpoints': { args?: Record<string, never>; body: { watchpoints: WatchpointBody[] } };
+
+  /** Stop watching one address; the rest stay. Answers what is watched after it. */
+  'gba-kit/unwatch': {
+    args: { address: number; length?: number; access?: 'write' | 'read' | 'readWrite' };
+    body: { watchpoints: WatchpointBody[] };
+  };
+
   /** The hardware events a breakpoint can be set on (also the `exceptionBreakpointFilters` capability). */
   'gba-kit/eventBreakpoints': {
     args?: Record<string, never>;
@@ -602,6 +615,54 @@ export function capturesBody(session: Session): GbaKitRequests['gba-kit/captures
 }
 
 /** The mutes a session holds, as every host reports them. */
+/** One watched address, as a client is told about it. */
+export interface WatchpointBody {
+  address: number;
+  length: number;
+  access: 'write' | 'read' | 'readWrite';
+  name: string;
+  verified: boolean;
+  /** why it is unverified, when it is */
+  message?: string;
+  hits: number;
+}
+
+export function watchpointsBody(session: Session): GbaKitRequests['gba-kit/watchpoints']['body'] {
+  return {
+    watchpoints: session.breakpoints.data.map((bp) => ({
+      address: bp.address,
+      length: bp.length,
+      access: bp.access,
+      name: bp.name,
+      verified: bp.verified,
+      message: bp.message,
+      hits: bp.hits,
+    })),
+  };
+}
+
+/** A `gba-kit/unwatch`: the watches that are not the one named, put back in place. */
+export function unwatchBody(
+  session: Session,
+  args: NonNullable<GbaKitRequests['gba-kit/unwatch']['args']>,
+): GbaKitRequests['gba-kit/unwatch']['body'] {
+  if (!Number.isInteger(args.address)) {
+    throw new Error(`not an address: ${String(args.address)}`);
+  }
+  const kept = session.breakpoints.data
+    .filter(
+      (bp) =>
+        !(
+          bp.address === args.address &&
+          (args.length === undefined || bp.length === args.length) &&
+          (args.access === undefined || bp.access === args.access)
+        ),
+    )
+    .map((bp) => ({ ...bp }));
+  session.setDataBreakpoints(kept);
+  return watchpointsBody(session);
+}
+
 export function mutesBody(session: Session): GbaKitRequests['gba-kit/mutes']['body'] {
   return { mutes: session.memoryDiff.mutes.all().map(muteBody) };
 }
