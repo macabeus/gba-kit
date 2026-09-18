@@ -17,7 +17,7 @@
  */
 import type { HardwareEvent } from '@gba-kit/gba-emulator';
 
-import { NOISE_FRAMES, rangeBytes } from './diff-limits.js';
+import { NOISE_FRAMES } from './diff-limits.js';
 import { type Machine, RAM_REGIONS, regionOf, stackBoundFor } from './machine.js';
 
 /** Where a mute came from, which is also what a panel names it by. */
@@ -44,11 +44,6 @@ export interface Mute {
   /** what it is, in the terms it was discovered in: a DMA mute says where the bytes went */
   note: string;
   enabled: boolean;
-}
-
-/** How many addresses a mute covers. */
-export function muteBytes(mute: Mute): number {
-  return rangeBytes(mute.ranges);
 }
 
 /** The mutes of a session: a discovery replaces the last one's ranges, what the user muted is theirs. */

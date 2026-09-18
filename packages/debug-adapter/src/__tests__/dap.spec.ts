@@ -11,7 +11,7 @@ import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { type GbaKitRequests, LOG, STREAM, type SavedStateInfo, type StateBody } from '../protocol.js';
+import { DIFF, type GbaKitRequests, LOG, STREAM, type SavedStateInfo, type StateBody } from '../protocol.js';
 import { StreamReader } from '../stream.js';
 import { DapClient } from './client.js';
 
@@ -1354,8 +1354,16 @@ describe('emulator requests', () => {
       ['gba-kit/diffPreview', { mode: 'tags', size: 1 }, /'mode' must be an object/],
       ['gba-kit/diffFilter', { mode: { kind: 'changed', from: 'a', to: 2 }, size: 1 }, /'from' must be a number/],
       ['gba-kit/diffFilter', { mode: { kind: 'changed', from: 1, to: 2 }, size: 1 }, /no capture 1/],
-      ['gba-kit/discoverNoise', { frames: 0 }, /'frames' must be an integer from 1 to 300/],
-      ['gba-kit/discoverNoise', { frames: 9999 }, /'frames' must be an integer from 1 to 300/],
+      [
+        'gba-kit/discoverNoise',
+        { frames: 0 },
+        new RegExp(`'frames' must be an integer from 1 to ${DIFF.noiseFramesMax}`),
+      ],
+      [
+        'gba-kit/discoverNoise',
+        { frames: DIFF.noiseFramesMax + 1 },
+        new RegExp(`'frames' must be an integer from 1 to ${DIFF.noiseFramesMax}`),
+      ],
       ['gba-kit/retagCapture', { id: 0, tag: 'x' }, /'id' must be a capture id/],
       ['gba-kit/retagCapture', { id: 1 }, /'tag' must be a string/],
       ['gba-kit/forgetCapture', {}, /'id' must be a capture id/],

@@ -166,6 +166,31 @@ export async function run(): Promise<void> {
     `the frame counter is among the changed addresses\n${JSON.stringify(diff.rows.slice(0, 5))}`,
   );
 
+  // the Watch action a diff row offers, through the command the extension reaches for.
+  // VS Code exposes no API for putting an expression in the watch pane, so what the
+  // capability rests on is this command's shape — and the proof it worked is the
+  // adapter being asked to evaluate the expression as a watch
+  const watched = traffic.length;
+  await vscode.commands.executeCommand('debug.addToWatchExpressions', {
+    variable: { name: 'g_frame', evaluateName: 'g_frame' },
+  });
+  await waitFor<void>('the watch expression to be evaluated', (resolve) => {
+    const timer = setInterval(() => {
+      const seen = traffic
+        .slice(watched)
+        .some(
+          (t) =>
+            t.dir === '\u2192' &&
+            t.message.command === 'evaluate' &&
+            (t.message.arguments as { expression?: string; context?: string } | undefined)?.context === 'watch',
+        );
+      if (seen) {
+        resolve();
+      }
+    }, 100);
+    return { dispose: () => clearInterval(timer) };
+  });
+
   const ended = waitFor<void>('the session to end', (resolve) =>
     vscode.debug.onDidTerminateDebugSession((s) => s.id === session.id && resolve()),
   );

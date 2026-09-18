@@ -321,7 +321,10 @@ export function createSessionTransport(session: Session, options: SessionTranspo
       case 'gba-kit/captures':
         return capturesBody(session) as never;
       case 'gba-kit/capture': {
-        const { tag, state, path } = a as A<'gba-kit/capture'>;
+        const { tag: raw, state, path } = a as A<'gba-kit/capture'>;
+        // every other capture argument is read through the shared readers, and a tag that
+        // is not text must be refused here too rather than inside the store's `trim`
+        const tag = raw === undefined ? undefined : captureTag(raw);
         if (state === undefined && path === undefined) {
           return { capture: captureInfo(session.captureMemory(tag)) } as never;
         }

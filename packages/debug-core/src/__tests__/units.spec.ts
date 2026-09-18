@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { applySnapshotDelta, decodeDelta, deltaSnapshot, encodeDelta } from '../delta.js';
 import { packSnapshot, unpackSnapshot } from '../delta.js';
-import { DIFF_LIMITS } from '../diff-limits.js';
+import { DIFF_LIMITS, rangeBytes } from '../diff-limits.js';
 import {
   type ExprEnv,
   type ExprHints,
@@ -20,7 +20,7 @@ import { ioRegisterAt } from '../io.js';
 import { LabelStore, labelName } from '../labels.js';
 import { RAM_REGIONS, stackBoundFor } from '../machine.js';
 import { CandidateMask, MemoryDiff } from '../memory-diff.js';
-import { MuteStore, muteBytes } from '../memory-noise.js';
+import { MuteStore } from '../memory-noise.js';
 import { LOG, TILES, diffRowBody, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
 import { decodeTake, encodeTake, recordingToScript, toSegments } from '../recorder.js';
 import { Ring } from '../rings.js';
@@ -784,29 +784,25 @@ describe('memory diff', () => {
     diff.capture(ram, screen, 0, tag);
   }
 
-  it('a candidate mask holds every addressable byte of both regions, and narrows by range', () => {
+  it('a candidate mask holds every addressable byte of both regions, in address order', () => {
     const mask = CandidateMask.full();
     expect(mask.count(1)).toBe(IWRAM.size + EWRAM.size);
     expect(mask.count(2)).toBe((IWRAM.size + EWRAM.size) / 2);
     expect(mask.count(4)).toBe((IWRAM.size + EWRAM.size) / 4);
-    expect(mask.has(IWRAM.base)).toBe(true);
-    expect(mask.has(0x04000000)).toBe(false);
-
-    // a range crossing out of a region clips to it rather than reaching into the next
-    mask.clearRange(EWRAM.base + EWRAM.size - 4, EWRAM.base + EWRAM.size + 64);
-    expect(mask.count(1)).toBe(IWRAM.size + EWRAM.size - 4);
     expect(mask.addresses(1, 0, 2)).toEqual([IWRAM.base, IWRAM.base + 1]);
+    // a page runs through IWRAM and on into EWRAM, which is the order every result is read in
+    expect(mask.addresses(4, IWRAM.size / 4 - 1, 2)).toEqual([IWRAM.base + IWRAM.size - 4, EWRAM.base]);
   });
 
   it('an address is in play at a width only when every one of its bytes is', () => {
-    const mask = CandidateMask.full();
-    mask.clearRange(IWRAM.base + 1, IWRAM.base + 2);
-    expect(mask.has(IWRAM.base)).toBe(true);
+    const mask = CandidateMask.empty();
+    mask.setSpan('iwram', 0, 1);
     expect(mask.spans('iwram', 0, 1)).toBe(true);
     expect(mask.spans('iwram', 0, 2)).toBe(false);
-    const other = CandidateMask.full();
-    other.clearRange(IWRAM.base, IWRAM.base + 1);
-    expect(mask.and(other).has(IWRAM.base)).toBe(false);
+    expect(mask.count(2)).toBe(0);
+    mask.setSpan('iwram', 1, 1);
+    expect(mask.spans('iwram', 0, 2)).toBe(true);
+    expect(mask.count(2)).toBe(1);
   });
 
   it('the tag rule keeps what is equal where the tags are equal and different where they differ', () => {
@@ -998,6 +994,56 @@ describe('memory diff', () => {
     });
   });
 
+  it('forgetting a capture a filter compared leaves a result that can still be read', () => {
+    const diff = new MemoryDiff(context);
+    const cursor = IWRAM.base + 0x40;
+    capture(diff, 'A', { [cursor]: 1 });
+    capture(diff, 'B', { [cursor]: 2 });
+    capture(diff, 'A', { [cursor]: 1 });
+    const [first, second] = diff.captures();
+
+    diff.apply({ kind: 'changed', from: first!.id, to: second!.id }, 1);
+    diff.apply({ kind: 'tags' }, 1);
+    diff.forget(first!.id);
+
+    // every read of a result asks what its filter compared; a pair naming a capture that
+    // is gone would fail all three, and the panel that re-reads after a forget with them
+    expect(diff.result().total).toBe(1);
+    expect(diff.rows(0, 4).map((r) => r.values)).toEqual([[2, 1]]);
+    expect(diff.groups()).toHaveLength(1);
+    // the undo steps named it too, and stepping back through one must not bring it back
+    expect(diff.undo()!.total).toBe(1);
+    expect(diff.rows(0, 4)).toHaveLength(1);
+    expect(diff.undo()!.total).toBe(IWRAM.size + EWRAM.size);
+  });
+
+  it('ranking claims nothing about tags where no two tags were given', () => {
+    const diff = new MemoryDiff(context);
+    const moved = IWRAM.base + 0x40;
+    capture(diff, '', { [moved]: 1 });
+    capture(diff, '', { [moved]: 2 });
+    const [first, second] = diff.captures();
+
+    diff.apply({ kind: 'changed', from: first!.id, to: second!.id }, 1);
+    // with nothing tagged there is no tag question: a criterion awarded to every row
+    // says one was met that the tag filter itself refuses to ask
+    expect(diff.rows(0, 4)[0]!.reasons).not.toContain('0 distinct values, one per tag');
+    diff.retag(first!.id, 'A');
+    diff.retag(second!.id, 'B');
+    expect(diff.rows(0, 4)[0]!.reasons).toContain('2 distinct values, one per tag');
+  });
+
+  it('a session holds as many captures as the strip can name, and says so past that', () => {
+    const diff = new MemoryDiff(context);
+    for (let i = 0; i < DIFF_LIMITS.captures; i++) {
+      capture(diff, `#${i}`, {});
+    }
+    expect(diff.captures()).toHaveLength(DIFF_LIMITS.captures);
+    expect(() => capture(diff, 'one too many', {})).toThrow(/forget one to take another/);
+    diff.forget(diff.captures()[0]!.id);
+    expect(() => capture(diff, 'room again', {})).not.toThrow();
+  });
+
   it('forgetting a capture that is not there is refused rather than reported as done', () => {
     const diff = new MemoryDiff(context);
     capture(diff, 'A', {});
@@ -1012,8 +1058,7 @@ describe('memory diff', () => {
     store.replaceDiscovered([{ source: 'idle', ranges: [{ lo: 0x03000100, hi: 0x03000180 }], note: 'churn' }]);
     store.replaceDiscovered([{ source: 'idle', ranges: [{ lo: 0x03000100, hi: 0x03000180 }], note: 'churn' }]);
     expect(store.all().map((m) => m.source)).toEqual(['user', 'idle']);
-    expect(muteBytes(store.all()[0]!)).toBe(16);
-    expect(muteBytes(store.all()[1]!)).toBe(0x80);
+    expect(store.all().map((m) => rangeBytes(m.ranges))).toEqual([16, 0x80]);
   });
 
   it('a filter that needs captures says so rather than answering about none', () => {

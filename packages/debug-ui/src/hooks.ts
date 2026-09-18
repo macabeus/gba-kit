@@ -308,14 +308,18 @@ export function useMemoryDiff(transport: Transport): {
    * or a capture forgotten changes what the candidates are and what each row's values
    * mean, and a matrix left standing under a changed set of columns is misread by eye.
    * Nothing is read back where no filter has run, since there is no matrix yet.
+   *
+   * It reads and does not show, so a caller that also changes the capture strip can put
+   * both on screen together — or neither, when the read fails.
    */
-  const reread = async (at: number): Promise<void> => {
-    if (result === null) {
-      return;
+  const reread = (at: number): Promise<DiffFilterBody | null> =>
+    result === null ? Promise.resolve(null) : transport.request('gba-kit/diffFilter', { from: at });
+
+  const show = (body: DiffFilterBody | null): void => {
+    if (body) {
+      setResult(body);
+      setFrom(body.from);
     }
-    const body = await transport.request('gba-kit/diffFilter', { from: at });
-    setResult(body);
-    setFrom(body.from);
   };
 
   return {
@@ -329,34 +333,46 @@ export function useMemoryDiff(transport: Transport): {
     capture: (tag) =>
       run(async () => {
         await transport.request('gba-kit/capture', { tag });
-        setCaptures((await transport.request('gba-kit/captures')).captures);
-        await reread(from);
+        const list = await transport.request('gba-kit/captures');
+        const body = await reread(from);
+        setCaptures(list.captures);
+        show(body);
       }),
     adopt: (state, tag) =>
       run(async () => {
         await transport.request('gba-kit/capture', { path: state.path, tag });
-        setCaptures((await transport.request('gba-kit/captures')).captures);
-        await reread(from);
+        const list = await transport.request('gba-kit/captures');
+        const body = await reread(from);
+        setCaptures(list.captures);
+        show(body);
       }),
     retag: (id, tag) =>
       run(async () => {
-        setCaptures((await transport.request('gba-kit/retagCapture', { id, tag })).captures);
-        await reread(from);
+        const list = await transport.request('gba-kit/retagCapture', { id, tag });
+        const body = await reread(from);
+        setCaptures(list.captures);
+        show(body);
       }),
     forget: (id) =>
       run(async () => {
-        setCaptures((await transport.request('gba-kit/forgetCapture', { id })).captures);
-        await reread(0);
+        const list = await transport.request('gba-kit/forgetCapture', { id });
+        const body = await reread(0);
+        setCaptures(list.captures);
+        show(body);
       }),
     findNoise: (frames) =>
       run(async () => {
-        setMutes((await transport.request('gba-kit/discoverNoise', { frames })).mutes);
-        await reread(0);
+        const found = await transport.request('gba-kit/discoverNoise', { frames });
+        const body = await reread(0);
+        setMutes(found.mutes);
+        show(body);
       }),
     mute: (args) =>
       run(async () => {
-        setMutes((await transport.request('gba-kit/setMute', args)).mutes);
-        await reread(0);
+        const list = await transport.request('gba-kit/setMute', args);
+        const body = await reread(0);
+        setMutes(list.mutes);
+        show(body);
       }),
     runPreview: (mode, size) =>
       run(async () => setPreview(await transport.request('gba-kit/diffPreview', { mode, size }))),

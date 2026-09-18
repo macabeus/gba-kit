@@ -100,6 +100,8 @@ export interface DiffPreview {
   kept: number;
   removed: number;
   hidden: Record<string, number>;
+  /** the width both counts are of: a preview at another size counts other addresses than the result does */
+  size: 1 | 2 | 4;
 }
 
 /** What the engine reaches outside itself for: the live machine, and what the program says about an address. */
@@ -165,11 +167,6 @@ export class CandidateMask {
     return region === 'iwram' ? this.iwram : this.ewram;
   }
 
-  has(address: number): boolean {
-    const at = locate(address);
-    return at !== null && bitAt(this.bits(at.region), at.offset) === 1;
-  }
-
   /** Whether all `size` bytes from `offset` are in play. */
   spans(region: RamRegion, offset: number, size: number): boolean {
     const bits = this.bits(region);
@@ -186,32 +183,6 @@ export class CandidateMask {
     for (let k = 0; k < size; k++) {
       setBit(bits, offset + k);
     }
-  }
-
-  /** Drop `[lo, hi)`, whatever regions it reaches. */
-  clearRange(lo: number, hi: number): void {
-    for (const region of REGIONS) {
-      const { base, size } = RAM_REGIONS[region];
-      const from = Math.max(lo, base) - base;
-      const to = Math.min(hi, base + size) - base;
-      const bits = this.bits(region);
-      for (let i = from; i < to; i++) {
-        bits[i >> 3]! &= ~(1 << (i & 7));
-      }
-    }
-  }
-
-  and(other: CandidateMask): CandidateMask {
-    const out = CandidateMask.empty();
-    for (const region of REGIONS) {
-      const a = this.bits(region);
-      const b = other.bits(region);
-      const into = out.bits(region);
-      for (let i = 0; i < into.length; i++) {
-        into[i] = a[i]! & b[i]!;
-      }
-    }
-    return out;
   }
 
   /** How many `size`-aligned addresses are wholly in play. */
@@ -300,13 +271,21 @@ function captureReader(capture: Capture): ValueReader {
   };
 }
 
-/** Whether a type is worth formatting a single value through: a scalar, an enum, a bool, a bitfield. */
-function formattable(placement: Placement): TypeDesc | null {
+/**
+ * Whether a type is worth formatting a row's value through: a scalar, an enum, a bool,
+ * a bitfield — and only where the row's own bytes are that object's bytes. A byte of a
+ * `u32` is not the `u32`: formatting it through the word would print a number the row's
+ * filter never looked at, so a row kept by `unchanged` would read as one that changed.
+ */
+function formattable(placement: Placement, size: 1 | 2 | 4): TypeDesc | null {
   const type = placement.type;
   if (!type || placement.straddles) {
     return null;
   }
-  return placement.member?.bitSize !== undefined || scalarSize(type) > 0 ? type : null;
+  const bits = placement.member ? bitfieldPlacement(placement.member) : null;
+  const start = (placement.base ?? placement.address) + (bits?.byteOffset ?? 0);
+  const width = bits ? bits.bits.span : scalarSize(type);
+  return start === placement.address && width === size ? type : null;
 }
 
 export class MemoryDiff {
@@ -338,6 +317,9 @@ export class MemoryDiff {
   }
 
   capture(ram: RamPair, thumbnail: Screen, frame: number, tag = '', origin: Capture['origin'] = 'machine'): Capture {
+    if (this.#captures.length >= DIFF_LIMITS.captures) {
+      throw new Error(`this session holds ${DIFF_LIMITS.captures} captures; forget one to take another`);
+    }
     const capture: Capture = {
       id: this.#nextId++,
       tag: tag.trim(),
@@ -373,6 +355,11 @@ export class MemoryDiff {
       throw new Error(`no capture ${id}`);
     }
     const [gone] = this.#captures.splice(at, 1) as [Capture];
+    // a pair naming a capture that is gone is no pair: ranking falls back to the captures
+    // still held rather than asking the store for one it no longer has, which would fail
+    // every read of the result — the rows, the groups, and each undo step that named it
+    this.#pair = withoutCapture(this.#pair, id);
+    this.#undo = this.#undo.map((step) => ({ ...step, pair: withoutCapture(step.pair, id) }));
     this.#view = null;
     return gone;
   }
@@ -420,7 +407,7 @@ export class MemoryDiff {
   preview(mode: DiffMode, size: 1 | 2 | 4): DiffPreview {
     const scanned = this.#hide(this.#scan(mode, size), size);
     const kept = scanned.mask.count(size);
-    return { kept, removed: this.#hide(this.#mask, size).mask.count(size) - kept, hidden: scanned.hidden };
+    return { kept, removed: this.#hide(this.#mask, size).mask.count(size) - kept, hidden: scanned.hidden, size };
   }
 
   /** Narrow the candidates; the previous set goes on the undo stack. */
@@ -711,7 +698,7 @@ export class MemoryDiff {
     const values = this.#captures.map((c) => readAt(c.ram[at.region], at.offset, size));
     const placement = info ? placementAt(info, address, size) : { address, tier: 'unattributed' as const };
     const row: DiffRow = { address, group: groupKey(placement).key, values, placement, rank: 0, reasons };
-    const type = formattable(placement);
+    const type = formattable(placement, size);
     if (type) {
       row.formatted = this.#captures.map((c) => format(c, placement, type));
     }
@@ -731,7 +718,10 @@ export class MemoryDiff {
       if (near <= 64) {
         row.reasons.push(`${near} changed byte${near === 1 ? '' : 's'} within ±256`);
       }
-      if (distinct === rank.tags) {
+      // below two tags there is no tag question, so there is nothing for a candidate to
+      // answer well: awarding this to every row would say a criterion was met that the
+      // filter itself refuses to ask
+      if (rank.tags >= 2 && distinct === rank.tags) {
         score += 3;
         row.reasons.push(`${distinct} distinct value${distinct === 1 ? '' : 's'}, one per tag`);
       }
@@ -755,6 +745,9 @@ interface RankContext {
 /** The ids of the two captures a filter compared, or none when it compared no pair. */
 type RankPair = [number, number] | null;
 
+/** The same pair, unless the forgotten capture is in it, in which case there is no pair. */
+const withoutCapture = (pair: RankPair, id: number): RankPair => (pair && pair.includes(id) ? null : pair);
+
 /** A candidate set as it is reported, with the rows it was worth placing. */
 interface View {
   /** the `MuteStore` revision it was built against: a mute switched on or off makes it stale */
@@ -768,8 +761,8 @@ interface View {
 /**
  * One value, read through its type the way the variables tree reads it — from the
  * capture's own bytes, so the matrix shows what each capture held rather than what
- * memory holds now. A value is read at the start of the object the address landed in,
- * not at the address: halfway into a `u32` is not a `u32`.
+ * memory holds now. Only a row covering the whole object gets here, so where it reads
+ * from and what the row is addressed by are the same place.
  */
 function format(capture: Capture, placement: Placement, type: TypeDesc): string {
   const reader = captureReader(capture);

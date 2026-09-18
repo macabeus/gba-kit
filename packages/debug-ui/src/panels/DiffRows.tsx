@@ -35,6 +35,8 @@ export interface DiffRowActions {
   onLabel(row: DiffRowBody): void;
   onBreak(row: DiffRowBody): void;
   onMute(row: DiffRowBody): void;
+  /** only where the host has a watch pane to put an expression in, the way `openText` is only where there is an editor */
+  onWatch?(row: DiffRowBody): void;
   busy?: boolean;
 }
 
@@ -150,6 +152,7 @@ function DiffRow({ row, actions }: { row: DiffRowBody; actions: DiffRowActions }
           disabled={actions.busy}
           items={[
             { label: 'Add as a label', onSelect: () => actions.onLabel(row) },
+            ...(actions.onWatch ? [{ label: 'Watch', onSelect: () => actions.onWatch!(row) }] : []),
             { label: 'Break on write', onSelect: () => actions.onBreak(row) },
             { label: 'Mute this address', onSelect: () => actions.onMute(row) },
           ]}
@@ -160,11 +163,20 @@ function DiffRow({ row, actions }: { row: DiffRowBody; actions: DiffRowActions }
 }
 
 /**
- * What a row leads with. A `sized` row leads with the name, because the program says
- * that name covers the address; the other two lead with the address, because nothing
- * does — an inferred symbol follows it as a landmark and says so in words.
+ * What a row leads with. A `sized` row leads with the name where the object it names
+ * begins at the address; every other row leads with the address, because nothing names
+ * it — the object it is a byte of, or the nearest symbol below, follows as a landmark
+ * and says in words how far away it is.
  */
 function Where({ row }: { row: DiffRowBody }) {
+  if (row.tier === 'sized' && row.path && row.pathOffset !== undefined) {
+    return (
+      <span>
+        <Hex value={row.address} />
+        <span className="gk-mono gk-muted gk-small">{` in ${row.path} + 0x${row.pathOffset.toString(16)}`}</span>
+      </span>
+    );
+  }
   if (row.tier === 'sized' && row.path) {
     return (
       <span className="gk-mono">

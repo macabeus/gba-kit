@@ -125,10 +125,11 @@ interface Walk {
  * of it is a real place, but the result says the bound was extrapolated: nothing in
  * the program vouches for there being fourteen elements.
  *
- * A read wider than the member it lands in is not that member: the walk stops at the
- * innermost type that covers the whole span and says the read straddles, so a 32-bit
- * row over a `u16` field reads as the two halfwords at the struct rather than as the
- * field.
+ * The walk follows the first byte: it descends to the innermost member holding
+ * `offset`, whatever `size` is, and says the read *straddles* when it runs out past
+ * that member — a 32-bit read at a `u16` field is that field and the halfword after
+ * it. So a straddling path answers where the read begins and nothing about where it
+ * ends, which is why it is a landmark rather than a name.
  */
 export function pathTo(type: TypeDesc, offset: number, size: number): Walk {
   let path = '';

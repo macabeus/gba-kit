@@ -533,7 +533,9 @@
 }
 
 /* ─── memory diff ─────────────────────────────────────────────────── */
-/* a capture card carries its tag's colour, so `A B A` reads off the strip before any filter runs */
+/* a capture card carries its tag's colour, so `A B A` reads off the strip before any
+   filter runs — and the matrix's column headers carry the same four, since that is
+   where a row reading `0 1 0` is matched against the pattern that was asked for */
 .gk-diff-card {
   border-left-width: 3px;
 }
@@ -548,6 +550,18 @@
 }
 .gk-diff-card.gk-tag-4 {
   border-left-color: var(--gk-bad);
+}
+.gk-diff-tag.gk-tag-1 {
+  color: var(--gk-accent);
+}
+.gk-diff-tag.gk-tag-2 {
+  color: var(--gk-good);
+}
+.gk-diff-tag.gk-tag-3 {
+  color: var(--gk-warn);
+}
+.gk-diff-tag.gk-tag-4 {
+  color: var(--gk-bad);
 }
 .gk-diff-tag {
   font-size: 11px;
@@ -574,6 +588,13 @@
 }
 .gk-tier-unnamed {
   color: var(--gk-dim);
+}
+/* a mute's source is not a tier: it says who asked for it, not how well named anything is */
+.gk-mute-yours {
+  color: var(--gk-fg);
+}
+.gk-mute-found {
+  color: var(--gk-muted);
 }
 tr.gk-tier-sized td:nth-child(2) {
   color: var(--gk-fg);

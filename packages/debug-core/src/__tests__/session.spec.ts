@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { type Host, type HostFiles, ManualHost } from '../host.js';
 import { Machine } from '../machine.js';
+import { diffRowBody } from '../protocol.js';
 import { Session, type SessionState, type StopInfo } from '../session.js';
 import { decodeSaveState, encodeTypedArrays } from '../snapshot-codec.js';
 
@@ -2136,6 +2137,45 @@ describe('the memory diff', () => {
     expect(row?.placement.tier).toBe('sized');
     expect(row?.placement.path).toBe('g_samples[1]');
     expect(row?.values).toEqual([1, 2, 1]);
+  });
+
+  it('a byte of an object is not that object: it says how far in it is, and is not read as it', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const samples = addressOf(session, 'g_samples');
+    // one byte of `g_samples[0]` moves; the three around it never do
+    put(session, samples, 0x11223344);
+    session.captureMemory('A');
+    put(session, samples, 0x11223355);
+    session.captureMemory('B');
+    put(session, samples, 0x11223344);
+    session.captureMemory('A');
+
+    session.memoryDiff.apply({ kind: 'tags' }, 1);
+    const [row] = session.memoryDiff.rows(0, 8).map(diffRowBody);
+    expect(row).toMatchObject({ address: samples, tier: 'sized', path: 'g_samples[0]', values: [0x44, 0x55, 0x44] });
+    // the whole element is what `g_samples[0]` names, and one byte of it is not: a value
+    // formatted through the element would say 0x11223344 for a row the filter kept for
+    // its low byte alone, and a label would name four addresses the same thing
+    expect(row!.pathOffset).toBeUndefined();
+    expect(row!.formatted).toBeUndefined();
+
+    session.memoryDiff.reset();
+    session.memoryDiff.apply({ kind: 'unchanged', from: 1, to: 2 }, 1);
+    const inside = session.memoryDiff
+      .rows(0, 5000)
+      .map(diffRowBody)
+      .find((r) => r.address === samples + 2);
+    expect(inside).toMatchObject({ path: 'g_samples[0]', pathOffset: 2 });
+    expect(inside!.formatted).toBeUndefined();
+
+    // at the element's own width the path names the address, and the value reads as the element
+    session.memoryDiff.reset();
+    session.memoryDiff.apply({ kind: 'tags' }, 4);
+    const whole = session.memoryDiff.rows(0, 8).map(diffRowBody)[0];
+    expect(whole).toMatchObject({ address: samples, path: 'g_samples[0]' });
+    expect(whole!.pathOffset).toBeUndefined();
+    expect(whole!.formatted?.[0]).toMatch(/287454020|0x11223344/);
   });
 
   it('puts the machine back exactly after looking for background noise', async () => {
