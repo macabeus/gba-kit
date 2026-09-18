@@ -267,21 +267,27 @@ describe('memory diff panel', () => {
     expect(running.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).toContain('disabled');
   });
 
-  it('says the query in words, so a strip of arrows can be checked by reading it', () => {
+  it('says the query in words, so a picture of it can be checked by reading it', () => {
     const strip = [
-      { id: 1, name: 'slot A' },
-      { id: 2, name: 'slot B' },
-      { id: 3, name: 'slot A again' },
+      { id: 1, tag: 'slot A' },
+      { id: 2, tag: 'slot B' },
+      { id: 3, tag: 'slot A again' },
     ];
-    const sentence = querySentence(strip, { 1: 'changed', 2: 'changed' }, { 3: 1 }, { 1: 0 });
+    const sentence = querySentence(
+      strip,
+      [
+        { from: 1, to: 2, relation: 'changed' },
+        { from: 2, to: 3, relation: 'changed' },
+        { from: 1, to: 3, relation: 'same' },
+      ],
+      { 1: 0 },
+    );
     expect(sentence).toContain('slot A → slot B changed');
-    expect(sentence).toContain('slot B → slot A again changed');
     expect(sentence).toContain('slot A again is back to what slot A held');
     expect(sentence).toContain('slot A held 0');
-    // a link nobody set reads as the default the strip draws, not as a gap
-    expect(querySentence(strip, {}, {}, {})).toContain('slot A → slot B changed');
-    expect(querySentence(strip, { 1: 'any' }, {}, {})).toContain('slot A → slot B did anything');
-    expect(querySentence([{ id: 1, name: 'one' }], {}, {}, {})).toContain('two states');
+    // an arrow that asks for anything is not worth a clause, and a graph of them asks nothing
+    expect(querySentence(strip, [{ from: 1, to: 2, relation: 'any' }], {})).toContain('keeps every address');
+    expect(querySentence([{ id: 1, tag: 'one' }], [], {})).toContain('two states');
   });
 
   it('reports the odds as one of three words, with what earned them behind it', () => {

@@ -12,8 +12,9 @@ describe('package manifest', () => {
       dependencies: Record<string, string>;
       devDependencies: Record<string, string>;
     };
-    // the icon font is the only other one, and it is a stylesheet, not code
-    expect(Object.keys(pkg.dependencies).sort()).toEqual(['@gba-kit/debug-core', '@vscode/codicons']);
+    // the icon font is a stylesheet rather than code; the graph canvas is the one runtime
+    // dependency these panels carry, and what a host pays for the graph view
+    expect(Object.keys(pkg.dependencies).sort()).toEqual(['@gba-kit/debug-core', '@vscode/codicons', '@xyflow/react']);
     expect(pkg.devDependencies).not.toHaveProperty('@gba-kit/debug-adapter');
   });
 });
