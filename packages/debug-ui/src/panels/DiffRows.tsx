@@ -30,8 +30,6 @@ const TIERS = {
 export interface DiffRowActions {
   /** the tags of the captures, in capture order, so a column can be read as its tag */
   tags: string[];
-  selected: ReadonlySet<number>;
-  onSelect(address: number, on: boolean): void;
   onLabel(row: DiffRowBody): void;
   onBreak(row: DiffRowBody): void;
   onMute(row: DiffRowBody): void;
@@ -101,7 +99,6 @@ function DiffTable({ rows, actions, total }: { rows: DiffRowBody[]; actions: Dif
     <table className="gk-table gk-matrix" aria-rowcount={total}>
       <thead>
         <tr>
-          <th aria-label="selected" />
           <th>Where</th>
           {actions.tags.map((tag, i) => (
             <th key={i} className="gk-right" title={tag ? `tagged '${tag}'` : 'untagged'}>
@@ -142,15 +139,6 @@ function DiffRow({ row, actions }: { row: DiffRowBody; actions: DiffRowActions }
   const tier = TIERS[row.tier];
   return (
     <tr className={tier.className}>
-      <td>
-        <input
-          type="checkbox"
-          className="gk-check"
-          checked={actions.selected.has(row.address)}
-          onChange={(e) => actions.onSelect(row.address, e.target.checked)}
-          aria-label={`select 0x${row.address.toString(16)}`}
-        />
-      </td>
       <td>
         <Where row={row} />
       </td>
