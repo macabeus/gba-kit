@@ -10,7 +10,7 @@
  *
  * The exact-value search the panel used to be is one of the modes.
  */
-import type { DiffRowBody, MuteTally, SavedStateInfo } from '@gba-kit/debug-core/protocol';
+import type { DiffRowBody, MuteSource, MuteTally, SavedStateInfo } from '@gba-kit/debug-core/protocol';
 import { DIFF, labelName } from '@gba-kit/debug-core/protocol';
 import { useState } from 'react';
 
@@ -31,19 +31,16 @@ const MODES: Array<{ value: Mode; label: string }> = [
 ];
 
 /**
- * How long the noise baseline may watch for. What the run is worth is measured in
- * candidates left standing, and a game whose churn is slower than the measured one
- * needs the longer looks, so the choice is the user's rather than a fixed number.
+ * What a mute source is called where its byte count is shown. Every source has a name
+ * here because the type says so: a source nothing could name would be hidden bytes the
+ * panel could not account for.
  */
-const NOISE_CHOICES = [16, 60, 120, 300];
-
-/** What a mute source is called where its byte count is shown. */
-const SOURCES = {
+const SOURCES: Record<MuteSource, string> = {
   idle: 'idle churn',
   dma: 'a DMA shadow',
   stack: 'the stack',
   user: 'a mute you set',
-} as const;
+};
 
 export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   const state = useDebugState(transport);
@@ -64,8 +61,11 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   const tags = captures.map((c) => c.tag);
   const busy = diff.busy || saves.busy;
   const pairwise = mode !== 'tags' && mode !== 'value';
-  const from = pair.from || captures[0]?.id || 0;
-  const to = pair.to || captures[captures.length - 1]?.id || 0;
+  // a capture that has been forgotten is no longer one of the two a filter can compare,
+  // so the pair falls back to the ends of the strip rather than naming a card that is gone
+  const held = (id: number): boolean => captures.some((c) => c.id === id);
+  const from = held(pair.from) ? pair.from : (captures[0]?.id ?? 0);
+  const to = held(pair.to) ? pair.to : (captures[captures.length - 1]?.id ?? 0);
 
   const filter = (): { mode: Parameters<typeof diff.apply>[0]; size: 1 | 2 | 4 } | null => {
     setProblem(null);
@@ -166,13 +166,13 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
         <Button
           onClick={() => void diff.findNoise(frames)}
           disabled={!stopped || busy}
-          title="Run idle frames and mute whatever moves on its own"
+          title="Run idle frames and mute whatever moves on its own — take it where the captures are taken, since a look only covers the churn that happens while it runs"
         >
           Find background noise
         </Button>
         <Select
           value={frames}
-          options={NOISE_CHOICES.map((n) => ({ value: n, label: `${n} frames` }))}
+          options={DIFF.noiseChoices.map((n) => ({ value: n, label: `${n} frames` }))}
           onChange={setFrames}
           title="How long to watch for churn; a longer look leaves fewer candidates standing"
         />
@@ -183,7 +183,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
       {captures.length === 0 ? (
         <Empty>Capture RAM on one screen, change something, capture again — then compare them.</Empty>
       ) : (
-        <div className="gk-cards gk-diff-strip">
+        <div className="gk-cards">
           {captures.map((capture, i) => (
             <CaptureCard
               key={capture.id}
@@ -199,11 +199,24 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
       )}
 
       <div className="gk-row">
-        <Select value={mode} options={MODES} onChange={setMode} title="What to ask of the captures" />
+        <Select
+          value={mode}
+          options={MODES}
+          onChange={(next) => {
+            // a preview answers for the filter it was taken of; the moment that filter
+            // changes it describes something nobody is about to apply
+            diff.clearPreview();
+            setMode(next);
+          }}
+          title="What to ask of the captures"
+        />
         <Select
           value={size}
           options={[1, 2, 4].map((n) => ({ value: n as 1 | 2 | 4, label: `${n * 8}-bit` }))}
-          onChange={setSize}
+          onChange={(next) => {
+            diff.clearPreview();
+            setSize(next);
+          }}
         />
         {mode === 'value' && (
           <input
@@ -211,7 +224,10 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
             style={{ width: 100 }}
             placeholder="value"
             value={value}
-            onChange={(e) => setValue(e.target.value)}
+            onChange={(e) => {
+              diff.clearPreview();
+              setValue(e.target.value);
+            }}
             onKeyDown={(e) => e.key === 'Enter' && act((args) => void diff.apply(args.mode, args.size))}
           />
         )}
@@ -220,13 +236,19 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
             <Select
               value={from}
               options={captures.map((c, i) => ({ value: c.id, label: `${CIRCLED[i] ?? i + 1} ${c.tag || c.frame}` }))}
-              onChange={(id) => setPair({ from: id, to })}
+              onChange={(id) => {
+                diff.clearPreview();
+                setPair({ from: id, to });
+              }}
               title="Compare from"
             />
             <Select
               value={to}
               options={captures.map((c, i) => ({ value: c.id, label: `${CIRCLED[i] ?? i + 1} ${c.tag || c.frame}` }))}
-              onChange={(id) => setPair({ from, to: id })}
+              onChange={(id) => {
+                diff.clearPreview();
+                setPair({ from, to: id });
+              }}
               title="Compare to"
             />
           </>
@@ -255,7 +277,8 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
 
       {diff.preview && (
         <span className="gk-hint">
-          would keep {diff.preview.kept} of {diff.preview.kept + diff.preview.removed}
+          would keep {diff.preview.kept} of {diff.preview.kept + diff.preview.removed} {diff.preview.size * 8}-bit
+          addresses
           {hiddenText(diff.preview.hidden)}
         </span>
       )}
@@ -296,9 +319,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
                   onChange={(e) => void diff.mute({ id: mute.id, enabled: e.target.checked })}
                   aria-label={`${mute.source} mute`}
                 />
-                <span className={`gk-tier gk-tier-${mute.source === 'user' ? 'sized' : 'inferred'}`}>
-                  {mute.source}
-                </span>
+                <span className={`gk-tier gk-mute-${mute.source === 'user' ? 'yours' : 'found'}`}>{mute.source}</span>
                 <span className="gk-mono gk-small">
                   {mute.ranges.length === 1
                     ? `0x${mute.ranges[0]!.lo.toString(16)}..0x${mute.ranges[0]!.hi.toString(16)}`
@@ -365,6 +386,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
                 onLabel: label,
                 onBreak: (row) =>
                   attempt(() => transport.request('gba-kit/breakOnWrite', { address: row.address, size: result.size })),
+                onWatch: transport.watch && ((row) => transport.watch!(watchExpression(row, result.size))),
                 onMute: (row) => muteAddresses([row.address], 'muted from the results'),
               }}
             />
@@ -383,16 +405,33 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
  * from. What survives that round trip is an identifier, which is what `labelName` makes.
  */
 export function nameFor(row: DiffRowBody): string {
-  return row.tier === 'sized' && !row.extrapolated && row.path
-    ? labelName(row.path)
-    : `gUnk_${row.address.toString(16).padStart(8, '0')}`;
+  return names(row) ? labelName(row.path!) : `gUnk_${row.address.toString(16).padStart(8, '0')}`;
+}
+
+/**
+ * Whether the program names *this address*, rather than an object it is one byte of.
+ * A path reaching the address is not enough: every byte of one `s32` carries the same
+ * path, so four rows would mint one name at four addresses and the `.sym` export would
+ * carry the identifier four times.
+ */
+function names(row: DiffRowBody): boolean {
+  return row.tier === 'sized' && !row.extrapolated && !row.straddles && !row.pathOffset && row.path !== undefined;
+}
+
+/**
+ * What a row hands the watch pane. Where the program names the address, the typed path
+ * is the variable rather than the address it sits at today; everywhere else a read of
+ * the row's own width says exactly what its column of the matrix says.
+ */
+export function watchExpression(row: DiffRowBody, size: 1 | 2 | 4): string {
+  return names(row) ? row.path! : `u${size * 8}(0x${row.address.toString(16).padStart(8, '0')})`;
 }
 
 /** What each mute source took, named the way the mute list names it. */
 function hiddenText(hidden: MuteTally): string {
-  const parts = Object.entries(hidden)
-    .filter(([, n]) => n > 0)
-    .map(([source, n]) => `${n} hidden by ${SOURCES[source as keyof typeof SOURCES]}`);
+  const parts = (Object.keys(SOURCES) as MuteSource[])
+    .filter((source) => (hidden[source] ?? 0) > 0)
+    .map((source) => `${hidden[source]!} hidden by ${SOURCES[source]}`);
   return parts.length === 0 ? '' : `; ${parts.join(', ')}`;
 }
 

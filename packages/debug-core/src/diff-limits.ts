@@ -15,20 +15,34 @@ export const DIFF_LIMITS = {
   rowsDefault: 512,
   rowsMax: 5000,
   undoDepth: 20,
+  /**
+   * How many captures one session holds. A capture is 288 KB of RAM and a thumbnail,
+   * and the strip names them `①`…`⑳`: past the last circled number a card has no name
+   * to be picked out of the strip by, which is what a capture is chosen by everywhere.
+   */
+  captures: 20,
 } as const;
 
+/** The looks an idle baseline may take, shortest first; the last of them is the cap. */
+const NOISE_LOOKS = [60, 300, 900] as const;
+
 /**
- * How many idle frames a noise baseline runs by default, and at most.
+ * How long an idle baseline watches for: what a panel may offer, what it starts at,
+ * and what a request is refused past.
  *
- * The default is set by how many candidates survive a tag filter, not by how much
- * of the churn mask is found: the mask is 92% of its eventual size by frame 16, yet
- * what the last 8% holds is the mixer's per-note state, which moves at note
- * boundaries rather than every frame and is exactly what survives. On the measured
- * target sixteen frames leave 36 candidates, 32 of them sound; sixty leave 3, which
- * is the answer and two of its neighbours. Sixty costs 250 ms against 80 ms, and
- * three hundred — the cap, and 1.6 s — finds nothing sixty did not.
+ * The default is set by what survives an ordering the panel does not control. What
+ * the churn mask holds saturates early — 3,360 of its eventual 3,476 bytes are found
+ * by frame 60 on the measured target — but the bytes it finds last are the mixer's
+ * per-note state, which moves at note boundaries rather than every frame, so a look
+ * only covers the notes played while it ran. Sixty frames leave 3 candidates when the
+ * baseline runs immediately before three back-to-back captures and 15 — 12 of them
+ * sound state — when the same run takes it afterwards, or 8, 11 and 17 when a second,
+ * three or ten seconds pass between the captures, which is what clicking three buttons
+ * costs. Three hundred leave 3 in every one of those orderings and 6 at a ten-second
+ * gap. It costs 1.2 s against 260 ms, which is a price a once-per-session action can
+ * pay; nine hundred, the cap, finds nothing three hundred did not.
  */
-export const NOISE_FRAMES = { default: 60, max: 300 } as const;
+export const NOISE_FRAMES = { choices: NOISE_LOOKS, default: NOISE_LOOKS[1], max: NOISE_LOOKS[2] } as const;
 
 /** How many addresses a set of half-open ranges covers. */
 export function rangeBytes(ranges: ReadonlyArray<{ lo: number; hi: number }>): number {

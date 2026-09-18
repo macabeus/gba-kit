@@ -248,12 +248,24 @@ describe('session transport', () => {
 
     const retagged = await transport.request('gba-kit/retagCapture', { id: listed.captures[1]!.id, tag: 'C' });
     expect(retagged.captures.map((c) => c.tag)).toEqual(['A', 'C', 'A']);
+
+    // a capture a standing filter compared, forgotten — the panel re-reads the result
+    // straight after, and a matrix of three columns over a strip of two cards is read wrong
+    await transport.request('gba-kit/diffFilter', {
+      mode: { kind: 'changed', from: listed.captures[0]!.id, to: listed.captures[1]!.id },
+      size: 2,
+    });
     const left = await transport.request('gba-kit/forgetCapture', { id: listed.captures[0]!.id });
     expect(left.captures).toHaveLength(2);
+    const reread = await transport.request('gba-kit/diffFilter', {});
+    expect(reread.rows[0]!.values).toHaveLength(2);
+    expect(reread.undoDepth).toBeGreaterThan(0);
+
     // both hosts read a capture id the same way, so neither answers one with a TypeError
     await expect(transport.request('gba-kit/retagCapture', { id: 0, tag: 'x' })).rejects.toThrow(
       /'id' must be a capture id/,
     );
+    await expect(transport.request('gba-kit/capture', { tag: 42 } as never)).rejects.toThrow(/'tag' must be a string/);
     await expect(transport.request('gba-kit/retagCapture', { id: listed.captures[1]!.id } as never)).rejects.toThrow(
       /'tag' must be a string/,
     );

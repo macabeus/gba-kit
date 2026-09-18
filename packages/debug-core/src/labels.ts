@@ -25,7 +25,7 @@ export interface LabelsFile {
 
 /**
  * A typed member path as a name a label can carry: `gEntityInfo[3].xPosBg2` becomes
- * `gEntityInfo_3_xPosBg2`.
+ * `gEntityInfo_3.xPosBg2` — the dots survive, since the importer's names take them.
  *
  * A label is exported as a `.sym` line and read back by the importer below, whose
  * names are C identifiers — so a bracketed path written straight into a label leaves

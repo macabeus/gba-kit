@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { EditableName } from '../components.js';
 import { DiffGroups } from '../panels/DiffRows.js';
-import { MemoryDiffPanel, nameFor } from '../panels/MemoryDiffPanel.js';
+import { MemoryDiffPanel, nameFor, watchExpression } from '../panels/MemoryDiffPanel.js';
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
 import { ScreenPanel } from '../panels/ScreenPanel.js';
 import { SaveStatesView } from '../panels/save-states.js';
@@ -351,5 +351,45 @@ describe('memory diff panel', () => {
     // the row renderer never shows an inferred path as a name, and the action behind it
     // must not either: a label reaches disassembly and `.sym` with no tier to explain it
     expect(rows.map(nameFor)).toEqual(['gEntityInfo_0.xPosBg2', 'gUnk_03000028', 'gUnk_02000818']);
+  });
+
+  /** A byte of `gEntityInfo[0].xPosBg2`, which the same path names and does not name. */
+  const inside: DiffRowBody = { ...rows[0]!, address: 0x03002921, pathOffset: 1 };
+
+  it('a byte inside an object is neither named nor drawn as that object', () => {
+    const html = renderToString(
+      <DiffGroups groups={[]} rows={[inside]} open={new Set()} onToggle={() => {}} total={1} actions={actions} />,
+    );
+    // four bytes of one word carry one path: leading with the name would draw four rows
+    // that look like one, and labelling them would put one identifier at four addresses
+    expect(html).toContain('0x03002921');
+    expect(html).toContain('in gEntityInfo[0].xPosBg2 + 0x1');
+    expect(nameFor(inside)).toBe('gUnk_03002921');
+    expect(nameFor(rows[0]!)).toBe('gEntityInfo_0.xPosBg2');
+  });
+
+  it('watches the variable where the program names it, and the memory where it does not', () => {
+    expect(watchExpression(rows[0]!, 4)).toBe('gEntityInfo[0].xPosBg2');
+    expect(watchExpression(inside, 1)).toBe('u8(0x03002921)');
+    // an inferred path is a hypothesis, so what is watched is the address it is about
+    expect(watchExpression(rows[1]!, 2)).toBe('u16(0x03000028)');
+  });
+
+  it('offers a watch only where the host has somewhere to put one', () => {
+    const without = renderToString(
+      <DiffGroups groups={[]} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
+    );
+    expect(without).not.toContain('>Watch<');
+    const with_ = renderToString(
+      <DiffGroups
+        groups={[]}
+        rows={rows}
+        open={new Set()}
+        onToggle={() => {}}
+        total={3}
+        actions={{ ...actions, onWatch: () => {} }}
+      />,
+    );
+    expect(with_).toContain('>Watch<');
   });
 });

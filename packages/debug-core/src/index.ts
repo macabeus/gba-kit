@@ -121,7 +121,6 @@ export {
   MUTE_SOURCES,
   MuteStore,
   discoverNoise,
-  muteBytes,
   type Mute,
   type MuteRange,
   type MuteSource,

@@ -68,13 +68,26 @@ describe.each(Object.entries(PROJECTS))('placementAt on %s', (_name, path) => {
     expect(placementAt(info, at('g_bits', 4), 4).path).toBe('g_bits.after');
   });
 
-  it('a read wider than the object it lands in stops at what does cover it, and says so', () => {
+  it('a read wider than the object it lands in names where it begins and says it runs past', () => {
     const halfword = placementAt(info, at('g_probe', 8), 2);
     expect(halfword.path).toBe('g_probe.flags');
     expect(halfword.straddles).toBeUndefined();
-    // four bytes at a two-byte member are not that member: they are the bytes at the struct
+    // the walk follows the first byte, so four bytes at a two-byte member are still that
+    // member — and the caveat is what says the other half of the read is something else
     const word = placementAt(info, at('g_probe', 8), 4);
+    expect(word.path).toBe('g_probe.flags');
+    expect(word.base).toBe(at('g_probe', 8));
     expect(word.straddles).toBe(true);
+  });
+
+  it('says how far into the object it names an address is', () => {
+    // a path is the same for every byte of what it names, and only `base` tells them apart
+    const start = placementAt(info, at('g_probe', 4), 1);
+    expect(start.path).toBe('g_probe.count');
+    expect(start.base).toBe(at('g_probe', 4));
+    const inside = placementAt(info, at('g_probe', 5), 1);
+    expect(inside.path).toBe('g_probe.count');
+    expect(inside.base).toBe(at('g_probe', 4));
   });
 
   it('calls a declared extent sized', () => {

@@ -29,6 +29,9 @@ import type { EventEntry, TraceEntry } from './rings.js';
 import type { HistoryInfo, Position, Session, SessionState, StopReason } from './session.js';
 import { type SaveStateFile, bytesToBase64 } from './snapshot-codec.js';
 
+/** Where a mute came from, which is also what a client names it by; the type alone, so nothing here reaches the emulator. */
+export type { MuteSource };
+
 /** The most a `gba-kit/importSave` payload can carry, so a client can turn a mis-picked file away before encoding it. */
 export { MAX_SAVE_FILE_SIZE } from './cartridge-save.js';
 
@@ -63,6 +66,12 @@ export interface DiffRowBody {
   symbol?: { name: string; offset: number };
   /** `gEntityInfo[13].xPosBg2`, when a DWARF type reached the address */
   path?: string;
+  /**
+   * How far into what `path` names the address is. Absent means the object begins
+   * here, which is the only case the path *names* the address rather than the one it
+   * is a byte of: four bytes of one `s32` are four rows, and three of them are not it.
+   */
+  pathOffset?: number;
   type?: string;
   /** the other members of a union covering these bytes: no one reading of them is the reading */
   alternatives?: string[];
@@ -328,7 +337,8 @@ export interface GbaKitRequests {
   /** What a filter would leave behind, and what each mute source would take, without committing it. */
   'gba-kit/diffPreview': {
     args: { mode: DiffMode; size: 1 | 2 | 4 };
-    body: { kept: number; removed: number; hidden: MuteTally };
+    /** `size` is what both counts are of: a preview at another width counts other addresses than the standing result does */
+    body: { kept: number; removed: number; hidden: MuteTally; size: 1 | 2 | 4 };
   };
   /**
    * Narrow the candidates and read a page of what is left. `undo` steps back one filter
@@ -506,12 +516,23 @@ export function savedStateInfo(name: string, path: string, meta: SaveStateMeta |
 }
 
 /**
+ * The base64 of each capture's screen, encoded once. A capture's thumbnail never
+ * changes, and every capture, adopt, retag and forget answers with the whole list:
+ * encoding twelve of them again each time is 600 KB of characters per action.
+ */
+const thumbnails = new WeakMap<Capture, ReturnType<typeof screenToJson>>();
+
+/**
  * A capture as a body carries it: the thumbnail base64, the RAM nowhere. Twelve
  * captures are 3.4 MB in the session and 600 KB of thumbnails; sending the RAM with
  * them would be 3.4 MB on every render.
  */
 export function captureInfo(capture: Capture): CaptureInfo {
-  const screen = screenToJson(capture.thumbnail);
+  let screen = thumbnails.get(capture);
+  if (!screen) {
+    screen = screenToJson(capture.thumbnail);
+    thumbnails.set(capture, screen);
+  }
   return {
     id: capture.id,
     tag: capture.tag,
@@ -552,6 +573,10 @@ export function diffRowBody(row: DiffRow): DiffRowBody {
   }
   if (p.path) {
     body.path = p.path;
+    const offset = p.address - (p.base ?? p.address);
+    if (offset > 0) {
+      body.pathOffset = offset;
+    }
   }
   if (p.type) {
     body.type = p.type.name;
@@ -697,9 +722,11 @@ export function rewindFrameCount(raw: unknown): number {
 export const DIFF = {
   rowsDefault: DIFF_LIMITS.rowsDefault,
   rowsMax: DIFF_LIMITS.rowsMax,
-  undoDepth: DIFF_LIMITS.undoDepth,
   noiseFramesDefault: NOISE_FRAMES.default,
   noiseFramesMax: NOISE_FRAMES.max,
+  /** the looks a panel offers, so what it lists and what a request takes cannot drift apart */
+  noiseChoices: NOISE_FRAMES.choices,
+  captures: DIFF_LIMITS.captures,
 } as const;
 
 /** The `id` of a capture a request names: an id the session could have issued, so a missing field is refused here rather than inside the store. */
