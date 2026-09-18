@@ -185,7 +185,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
       <div className="gk-row">
         <Button
           onClick={() => void diff.capture(nextName.trim() || undefined)}
-          disabled={!stopped || busy}
+          disabled={busy}
           kind="primary"
           title="Keep RAM as it is now"
         >
@@ -199,7 +199,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
           aria-label="Name for the next capture"
           value={nextName}
           onChange={(e) => setNextName(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && stopped && !busy && void diff.capture(nextName.trim() || undefined)}
+          onKeyDown={(e) => e.key === 'Enter' && !busy && void diff.capture(nextName.trim() || undefined)}
           // the name stays after a capture: a run comes back to the same state, and the
           // sentence under the strip reads in the user's words rather than in ①②③
           title="What this capture shows, so the strip reads as the run it describes"
@@ -228,7 +228,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
           title="How long to watch for churn; a longer look leaves fewer candidates standing"
         />
       </div>
-      {!stopped && <span className="gk-muted gk-small">Capturing needs a stopped machine.</span>}
+      {!stopped && <span className="gk-muted gk-small">Looking for background noise needs a stopped machine.</span>}
       {(diff.error ?? problem) && <span className="gk-bad gk-small">{diff.error ?? problem}</span>}
 
       {captures.length === 0 ? (

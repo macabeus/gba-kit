@@ -138,10 +138,15 @@ export function Menu({
   label,
   items,
   disabled,
+  trigger: face,
+  className,
 }: {
   label: string;
   items: Array<{ label: string; onSelect: () => void; disabled?: boolean }>;
   disabled?: boolean;
+  /** what the button shows; the ellipsis when a caller has nothing better to put there */
+  trigger?: ReactNode;
+  className?: string;
 }) {
   const [open, setOpen] = useState(false);
   /** the item to put the focus on once the list is open, since a hidden one takes none */
@@ -170,7 +175,7 @@ export function Menu({
       <button
         type="button"
         ref={trigger}
-        className="gk-button gk-icon-button"
+        className={`gk-button gk-icon-button${className ? ` ${className}` : ''}`}
         disabled={disabled}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -192,7 +197,7 @@ export function Menu({
           setFocusAt(e.key === 'ArrowDown' ? 0 : items.length - 1);
         }}
       >
-        <Icon name="ellipsis" />
+        {face ?? <Icon name="ellipsis" />}
       </button>
       <div
         className="gk-menu-list"

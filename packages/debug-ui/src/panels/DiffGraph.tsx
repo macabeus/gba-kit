@@ -27,9 +27,9 @@ import {
   useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
-import { Button, Icon, Screenshot } from '../components.js';
+import { Menu, Screenshot } from '../components.js';
 import { CIRCLED } from './DiffRows.js';
 
 export type Relation = 'same' | 'changed' | 'increased' | 'decreased' | 'any';
@@ -42,13 +42,15 @@ export interface GraphEdge {
 }
 
 /** Every relation an arrow can carry: how it is picked, and how it reads in a sentence. */
-export const RELATIONS: Array<{ value: Relation; label: string; word: string }> = [
-  { value: 'changed', label: '≠ changed', word: 'changed' },
-  { value: 'same', label: '= same', word: 'stayed the same' },
-  { value: 'increased', label: '↑ went up', word: 'went up' },
-  { value: 'decreased', label: '↓ went down', word: 'went down' },
-  { value: 'any', label: '· anything', word: 'did anything' },
+export const RELATIONS: Array<{ value: Relation; sign: string; label: string; word: string }> = [
+  { value: 'changed', sign: '≠', label: '≠ changed', word: 'changed' },
+  { value: 'same', sign: '=', label: '= same', word: 'stayed the same' },
+  { value: 'increased', sign: '↑', label: '↑ went up', word: 'went up' },
+  { value: 'decreased', sign: '↓', label: '↓ went down', word: 'went down' },
+  { value: 'any', sign: '·', label: '· anything', word: 'did anything' },
 ];
+
+const RELATION_SIGN = new Map(RELATIONS.map((r) => [r.value, r.sign]));
 
 export const RELATION_WORD = new Map(RELATIONS.map((r) => [r.value, r.word]));
 
@@ -75,7 +77,7 @@ export function edgeHandles(fromX: number, toX: number): { sourceHandle: string;
 }
 
 /** Where a capture's node sits when nothing has moved it: a row, in capture order. */
-const laidOut = (at: number): { x: number; y: number } => ({ x: at * 210, y: 0 });
+const laidOut = (at: number): { x: number; y: number } => ({ x: at * 260, y: 0 });
 
 const edgeId = (edge: GraphEdge): string => `${edge.from}->${edge.to}`;
 
@@ -94,6 +96,12 @@ export type CaptureNode = Node<CaptureNodeData, 'capture'>;
 
 function CaptureNodeView({ data }: NodeProps<CaptureNode>) {
   const { capture, at, value, busy, onName, onValue, onForget } = data;
+  const [naming, setNaming] = useState(false);
+  // a value is the rare thing to say about a capture, so its field arrives when it is
+  // asked for and the node stays the size of what it actually carries
+  const [valuing, setValuing] = useState(false);
+  const shown = value !== '' || valuing;
+  const name = capture.tag || `frame ${capture.frame}`;
   return (
     <div className="gk-graph-node">
       <Handle type="target" position={Position.Left} id={HANDLES.targetLeft} />
@@ -106,26 +114,56 @@ function CaptureNodeView({ data }: NodeProps<CaptureNode>) {
       />
       <div className="gk-graph-row">
         <span className="gk-mono gk-small">{CIRCLED[at] ?? `#${at + 1}`}</span>
+        {naming ? (
+          <input
+            className="gk-input nodrag"
+            autoFocus
+            defaultValue={capture.tag}
+            placeholder={`frame ${capture.frame}`}
+            aria-label={`Name capture ${at + 1}`}
+            onBlur={(e) => {
+              setNaming(false);
+              if (e.currentTarget.value.trim() !== capture.tag) {
+                onName(e.currentTarget.value.trim());
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.currentTarget.blur();
+              } else if (e.key === 'Escape') {
+                e.currentTarget.value = capture.tag;
+                e.currentTarget.blur();
+              }
+            }}
+          />
+        ) : (
+          <span className={`gk-graph-title${capture.tag ? '' : ' gk-muted'}`} title={name}>
+            {name}
+          </span>
+        )}
+        <Menu
+          className="nodrag"
+          label={`What to do with capture ${at + 1}`}
+          disabled={busy}
+          items={[
+            { label: 'Rename', onSelect: () => setNaming(true) },
+            shown
+              ? { label: 'Forget the value it held', onSelect: () => (onValue(''), setValuing(false)) }
+              : { label: 'Say a value it held', onSelect: () => setValuing(true) },
+            { label: 'Forget this capture', onSelect: onForget },
+          ]}
+        />
+      </div>
+      {shown && (
         <input
           className="gk-input nodrag"
-          defaultValue={capture.tag}
-          placeholder={`frame ${capture.frame}`}
-          aria-label={`Name capture ${at + 1}`}
-          onBlur={(e) => e.currentTarget.value.trim() !== capture.tag && onName(e.currentTarget.value.trim())}
-          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+          autoFocus={valuing && value === ''}
+          placeholder="a value it held"
+          aria-label={`The value capture ${at + 1} held`}
+          value={value}
+          onChange={(e) => onValue(e.target.value)}
         />
-        <Button kind="icon danger" onClick={onForget} disabled={busy} title="Forget" label={`Forget capture ${at + 1}`}>
-          <Icon name="trash" />
-        </Button>
-      </div>
-      <input
-        className="gk-input nodrag gk-small"
-        placeholder="any value"
-        aria-label={`The value capture ${at + 1} held`}
-        value={value}
-        onChange={(e) => onValue(e.target.value)}
-        title="A value this capture held, for a screen that puts a number on it"
-      />
+      )}
       <Handle type="source" position={Position.Right} id={HANDLES.sourceRight} />
       <Handle type="target" position={Position.Right} id={HANDLES.targetRight} />
     </div>
@@ -158,21 +196,16 @@ function RelationEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, 
           className="gk-graph-label nodrag nopan"
           style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
         >
-          <select
-            className="gk-select"
-            value={relation}
-            onChange={(e) => onRelation(e.target.value as Relation)}
-            aria-label="What the value did along this arrow"
-          >
-            {RELATIONS.map((r) => (
-              <option key={r.value} value={r.value}>
-                {r.label}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="gk-graph-drop" onClick={onDrop} aria-label="Remove this arrow">
-            ×
-          </button>
+          {/* a control wide enough to read the relation in is wider than the gap between
+              two nodes, so the sign is what is drawn and the words are in the menu */}
+          <Menu
+            label={`This arrow: ${RELATIONS.find((r) => r.value === relation)?.word ?? relation}`}
+            trigger={<span className="gk-graph-sign">{RELATION_SIGN.get(relation)}</span>}
+            items={[
+              ...RELATIONS.map((r) => ({ label: r.label, onSelect: () => onRelation(r.value) })),
+              { label: 'Remove this arrow', onSelect: onDrop },
+            ]}
+          />
         </div>
       </EdgeLabelRenderer>
     </>
