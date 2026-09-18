@@ -57,6 +57,26 @@ export interface Capture {
 /** What one link expects of a value between the two captures it joins. */
 export type Relation = 'same' | 'changed' | 'increased' | 'decreased' | 'any';
 
+/**
+ * How much a candidate looks like a variable rather than a byte of something bigger. The
+ * score behind it is an ordering and not a calibrated scale — the reasons a row carries
+ * are what a user reads to disagree with it — so it is reported as one of three words,
+ * which is as much as the weights can honestly claim.
+ */
+export type RankLevel = 'likely' | 'possible' | 'unlikely';
+
+/** What each level is worth explaining as, where a row shows one. */
+export const RANK_LEVELS: Record<RankLevel, string> = {
+  likely: 'Looks like a variable',
+  possible: 'Could be a variable',
+  unlikely: 'Looks like part of something bigger',
+};
+
+/** Which of the three a score falls in. The highest any one criterion is worth is 4, so a row needs two of them to lead. */
+export function rankLevel(score: number): RankLevel {
+  return score >= 7 ? 'likely' : score >= 4 ? 'possible' : 'unlikely';
+}
+
 /** Every relation a link can carry, in the order the panel offers them. */
 export const RELATIONS: readonly Relation[] = ['changed', 'same', 'increased', 'decreased', 'any'];
 

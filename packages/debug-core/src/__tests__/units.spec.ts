@@ -19,7 +19,7 @@ import { ManualHost } from '../host.js';
 import { ioRegisterAt } from '../io.js';
 import { LabelStore, labelName } from '../labels.js';
 import { RAM_REGIONS, stackBoundFor } from '../machine.js';
-import { CandidateMask, MemoryDiff } from '../memory-diff.js';
+import { CandidateMask, MemoryDiff, RANK_LEVELS, rankLevel } from '../memory-diff.js';
 import { MuteStore } from '../memory-noise.js';
 import { LOG, TILES, diffRowBody, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
 import { decodeTake, encodeTake, recordingToScript, toSegments } from '../recorder.js';
@@ -815,6 +815,18 @@ describe('memory diff', () => {
       ...arcs.map(([from, to]) => ({ from, to, relation: 'same' as const })),
     ],
     values: [],
+  });
+
+  it('the odds are three words, and a row needs more than one criterion to lead', () => {
+    // the most any one criterion is worth is 4, so a row that is merely in quiet memory
+    // cannot claim the top word on that alone
+    expect(rankLevel(0)).toBe('unlikely');
+    expect(rankLevel(3)).toBe('unlikely');
+    expect(rankLevel(4)).toBe('possible');
+    expect(rankLevel(6)).toBe('possible');
+    expect(rankLevel(7)).toBe('likely');
+    expect(rankLevel(10)).toBe('likely');
+    expect(Object.keys(RANK_LEVELS)).toEqual(['likely', 'possible', 'unlikely']);
   });
 
   it('an arc back to an earlier capture is what separates a value from what merely churns', () => {
