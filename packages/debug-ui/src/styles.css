@@ -566,6 +566,22 @@
 .gk-diff-tag {
   font-size: 11px;
 }
+/* a tag is a field to fill in, so an untagged capture looks like one rather than a caption */
+button.gk-diff-tag {
+  width: 100%;
+  padding: 1px 4px;
+  border: 1px dashed var(--gk-border);
+  border-radius: 2px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+button.gk-diff-tag:hover:not(:disabled) {
+  border-color: var(--gk-accent);
+}
 .gk-matrix-cell {
   font-variant-numeric: tabular-nums;
 }

@@ -15,12 +15,40 @@ import type { DiffRowBody, MuteSource, MuteTally, SavedStateInfo } from '@gba-ki
 import { DIFF, labelName } from '@gba-kit/debug-core/protocol';
 import { useState } from 'react';
 
-import { Button, EditableName, Empty, Icon, Menu, Screenshot, Select, parseNumber } from '../components.js';
+import { Button, Empty, Icon, Menu, Screenshot, Select, parseNumber } from '../components.js';
 import { useDebugState, useMemoryDiff, useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
 import { CIRCLED, DiffGroups, tagClass } from './DiffRows.js';
 
 type Mode = 'value' | 'changed' | 'unchanged' | 'increased' | 'decreased' | 'tags';
+
+/**
+ * Why the filter as set up has no question to ask, or null. A tag filter compares
+ * captures by tag, so on a strip nobody has tagged there is nothing to compare — which
+ * belongs on screen while the captures and their tags are right there, rather than as an
+ * error after the button.
+ */
+export function blockedReason(mode: Mode, tags: string[]): string | null {
+  if (mode === 'value') {
+    return null;
+  }
+  if (tags.length < 2) {
+    return mode === 'tags'
+      ? 'Tag pattern compares captures by tag: capture the same screen in two states.'
+      : 'This compares two captures: take another one.';
+  }
+  if (mode !== 'tags') {
+    return null;
+  }
+  const named = new Set(tags.filter((t) => t !== ''));
+  if (named.size === 0) {
+    return `Tag pattern compares captures by tag, and none of these ${tags.length} is tagged. Tag the ones showing the same thing the same way — 'slot A', 'slot B', 'slot A'.`;
+  }
+  if (named.size === 1) {
+    return `Tag pattern needs two different tags; every tagged capture is '${[...named][0]}'.`;
+  }
+  return null;
+}
 
 const MODES: Array<{ value: Mode; label: string }> = [
   { value: 'tags', label: 'Tag pattern' },
@@ -56,6 +84,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [mutesOpen, setMutesOpen] = useState(false);
   const [frames, setFrames] = useState<number>(DIFF.noiseFramesDefault);
+  const [nextTag, setNextTag] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
 
   const captures = diff.captures;
@@ -83,6 +112,8 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
     }
     return { mode: { kind: mode, from, to }, size };
   };
+
+  const blocked = blockedReason(mode, tags);
 
   const act = (what: (args: { mode: Parameters<typeof diff.apply>[0]; size: 1 | 2 | 4 }) => void): void => {
     const args = filter();
@@ -146,7 +177,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
     <div className="gk-col gk-pad">
       <div className="gk-row">
         <Button
-          onClick={() => void diff.capture()}
+          onClick={() => void diff.capture(nextTag.trim() || undefined)}
           disabled={!stopped || busy}
           kind="primary"
           title="Keep RAM as it is now"
@@ -154,6 +185,18 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
           <Icon name="add" />
           Capture
         </Button>
+        <input
+          className="gk-input"
+          style={{ width: 120 }}
+          placeholder="tag"
+          aria-label="Tag for the next capture"
+          value={nextTag}
+          onChange={(e) => setNextTag(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && stopped && !busy && void diff.capture(nextTag.trim() || undefined)}
+          // the tag stays after a capture: a run tags the same state twice, and typing it
+          // once is the difference between the fast path and three rounds of narrowing
+          title="What this capture shows, so the tag filter can compare it with the others"
+        />
         {adoptable.length > 0 && (
           <Menu
             label="Adopt a save state as a capture"
@@ -256,12 +299,16 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
         )}
         <Button
           onClick={() => act((args) => void diff.runPreview(args.mode, args.size))}
-          disabled={busy}
+          disabled={busy || blocked !== null}
           title="What this would remove, without removing it"
         >
           Preview
         </Button>
-        <Button onClick={() => act((args) => void diff.apply(args.mode, args.size))} disabled={busy} kind="primary">
+        <Button
+          onClick={() => act((args) => void diff.apply(args.mode, args.size))}
+          disabled={busy || blocked !== null}
+          kind="primary"
+        >
           Apply
         </Button>
         <Button
@@ -275,6 +322,8 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
           Reset
         </Button>
       </div>
+
+      {blocked && <span className="gk-hint">{blocked}</span>}
 
       {diff.preview && (
         <span className="gk-hint">
@@ -467,23 +516,44 @@ function CaptureCard({
           {capture.from === 'state' ? ' · from a state' : ''}
         </span>
       </div>
-      <EditableName
-        name={capture.tag || 'untagged'}
-        editing={editing}
-        className="gk-card-name gk-diff-tag"
-        onStop={() => setEditing(false)}
-        onRename={onRetag}
-      />
-      <div className="gk-row gk-card-actions">
-        <Button
-          kind="icon"
+      {editing ? (
+        <input
+          className="gk-input gk-card-name gk-diff-tag"
+          autoFocus
+          defaultValue={capture.tag}
+          placeholder="tag"
+          aria-label={`Tag capture ${at + 1}`}
+          onBlur={(e) => {
+            setEditing(false);
+            const to = e.currentTarget.value.trim();
+            if (to !== capture.tag) {
+              onRetag(to);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.currentTarget.blur();
+            } else if (e.key === 'Escape') {
+              e.currentTarget.value = capture.tag;
+              e.currentTarget.blur();
+            }
+          }}
+        />
+      ) : (
+        // the tag is the control, not a caption beside one: an untagged capture reads as
+        // the thing to fill in, since the filter this panel opens on cannot run without it
+        <button
+          type="button"
+          className={`gk-card-name gk-diff-tag${capture.tag ? '' : ' gk-muted'}`}
           onClick={() => setEditing(true)}
           disabled={busy}
-          title="Tag"
-          label={`Tag capture ${at + 1}`}
+          title={capture.tag ? `Tagged '${capture.tag}'` : 'Say what this capture shows'}
+          aria-label={capture.tag ? `Tag capture ${at + 1}, now '${capture.tag}'` : `Tag capture ${at + 1}`}
         >
-          <Icon name="edit" />
-        </Button>
+          {capture.tag || '+ tag'}
+        </button>
+      )}
+      <div className="gk-row gk-card-actions">
         <Button kind="icon danger" onClick={onForget} disabled={busy} title="Forget" label={`Forget capture ${at + 1}`}>
           <Icon name="trash" />
         </Button>
