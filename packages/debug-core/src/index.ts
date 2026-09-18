@@ -55,7 +55,7 @@ export {
 export { type RewindOptions } from './rewind.js';
 export { type SnapshotDelta } from './delta.js';
 export { type EventEntry, type TimeStamp, type TraceEntry } from './rings.js';
-export { LabelStore, type Label, type LabelsFile } from './labels.js';
+export { LabelStore, labelName, type Label, type LabelsFile } from './labels.js';
 export { freeStateName } from './cartridge-save.js';
 export { type PackedSnapshot, packSnapshot, unpackSnapshot } from './delta.js';
 export {
@@ -103,5 +103,33 @@ export {
   type IoRegisterValue,
 } from './io.js';
 export { filterMemory, searchMemory, type SearchOptions, type SearchRegion } from './memory-search.js';
+export { DIFF_LIMITS, NOISE_FRAMES, rangeBytes } from './diff-limits.js';
+export {
+  CandidateMask,
+  MemoryDiff,
+  type Capture,
+  type DiffContext,
+  type DiffGroup,
+  type DiffEdge,
+  type DiffQuery,
+  type DiffValue,
+  type DiffResult,
+  type DiffRow,
+  type Relation,
+  RANK_LEVELS,
+  type RankLevel,
+  rankLevel,
+  type RamPair,
+  type RamRegion,
+} from './memory-diff.js';
+export {
+  MUTE_SOURCES,
+  MuteStore,
+  discoverNoise,
+  type Mute,
+  type MuteRange,
+  type MuteSource,
+  type Noise,
+} from './memory-noise.js';
 export { ManualHost, timerHost, type Host, type HostFiles } from './host.js';
 export type { FrameMethod, VarNode } from '@gba-kit/debug-info';

@@ -44,8 +44,8 @@ Emulator operations are `gba-kit/*` custom requests, typed in
 recordings (and the `press`/`wait` script they amount to), the palette / tiles /
 tilemap / sprites / backgrounds views, decoded I/O registers, the instruction
 trace and hardware event log, labels (persisted to `.gba-kit/labels.json`,
-importable from `.sym` files), memory search, and a frame/audio stream over a
-pipe the client owns. Every stop, resume and rewind is also a `gba-kit/state`
+importable from `.sym` files), memory search, captures of RAM and the filters that
+compare them, and a frame/audio stream over a pipe the client owns. Every stop, resume and rewind is also a `gba-kit/state`
 event, as is every recording start or stop and every tracing toggle.
 
 ## Launch configuration

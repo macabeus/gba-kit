@@ -6,7 +6,7 @@ import type { Transport } from '../transport.js';
 import { EventsPanel } from './EventsPanel.js';
 import { IoRegistersPanel } from './IoRegistersPanel.js';
 import { LabelsPanel } from './LabelsPanel.js';
-import { MemorySearchPanel } from './MemorySearchPanel.js';
+import { MemoryDiffPanel } from './MemoryDiffPanel.js';
 import { PalettePanel } from './PalettePanel.js';
 import { RecordingPanel } from './RecordingPanel.js';
 import { SaveStatesPanel } from './SaveStatesPanel.js';
@@ -39,7 +39,7 @@ export const PANELS: ReadonlyArray<{ id: PanelId; label: string }> = [
   { id: 'sprites', label: 'Sprites' },
   { id: 'trace', label: 'Trace' },
   { id: 'events', label: 'Events' },
-  { id: 'search', label: 'Memory search' },
+  { id: 'search', label: 'Memory diff' },
   { id: 'labels', label: 'Labels' },
   { id: 'states', label: 'Save states' },
   { id: 'recording', label: 'Recording' },
@@ -111,7 +111,7 @@ export function PanelBody({ id, transport }: { id: PanelId; transport: Transport
     case 'events':
       return <EventsPanel transport={transport} />;
     case 'search':
-      return <MemorySearchPanel transport={transport} />;
+      return <MemoryDiffPanel transport={transport} />;
     case 'labels':
       return <LabelsPanel transport={transport} />;
     case 'states':

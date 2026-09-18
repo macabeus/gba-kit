@@ -22,11 +22,21 @@ import {
   type PpuArguments,
   type SavedStateInfo,
   type StateBody,
+  breakOnWriteBody,
+  captureId,
+  captureIds,
+  captureInfo,
+  captureTag,
+  capturesBody,
+  diffFilterBody,
   entryCount,
   frameBody,
+  mutesBody,
+  noiseFrames,
   ppuBody,
   rewindFrameCount,
   savedStateInfo,
+  setMute,
   takeBody,
 } from '@gba-kit/debug-core/protocol';
 
@@ -307,6 +317,50 @@ export function createSessionTransport(session: Session, options: SessionTranspo
         const { addresses, value, size } = a as A<'gba-kit/filterMemory'>;
         return { addresses: session.filterMemory(addresses, value, size) } as never;
       }
+      case 'gba-kit/captures':
+        return capturesBody(session) as never;
+      case 'gba-kit/capture': {
+        const { tag: raw, state, path } = a as A<'gba-kit/capture'>;
+        // every other capture argument is read through the shared readers, and a tag that
+        // is not text must be refused here too rather than inside the store's `trim`
+        const tag = raw === undefined ? undefined : captureTag(raw);
+        if (state === undefined && path === undefined) {
+          return { capture: captureInfo(session.captureMemory(tag)) } as never;
+        }
+        const key = stateKey(state, path);
+        const text = options.states ? await options.states.load(key) : (memoryStates.get(key)?.text ?? null);
+        if (text === null) {
+          throw new Error(`no such state: ${key}`);
+        }
+        return { capture: captureInfo(session.captureFromState(text, tag)) } as never;
+      }
+      case 'gba-kit/retagCapture': {
+        const { id, tag } = a as A<'gba-kit/retagCapture'>;
+        session.memoryDiff.retag(captureId(id), captureTag(tag));
+        return capturesBody(session) as never;
+      }
+      case 'gba-kit/reorderCaptures': {
+        session.memoryDiff.reorder(captureIds((a as A<'gba-kit/reorderCaptures'>).ids));
+        return capturesBody(session) as never;
+      }
+      case 'gba-kit/forgetCapture': {
+        session.memoryDiff.forget(captureId((a as A<'gba-kit/forgetCapture'>).id));
+        return capturesBody(session) as never;
+      }
+      case 'gba-kit/discoverNoise': {
+        const noise = session.discoverNoise(noiseFrames((a as A<'gba-kit/discoverNoise'>).frames));
+        return { ...mutesBody(session), churnBytes: noise.churnBytes, frames: noise.frames } as never;
+      }
+      case 'gba-kit/mutes':
+        return mutesBody(session) as never;
+      case 'gba-kit/setMute': {
+        setMute(session, a as A<'gba-kit/setMute'>);
+        return mutesBody(session) as never;
+      }
+      case 'gba-kit/diffFilter':
+        return diffFilterBody(session, a as NonNullable<A<'gba-kit/diffFilter'>>) as never;
+      case 'gba-kit/breakOnWrite':
+        return breakOnWriteBody(session, a as A<'gba-kit/breakOnWrite'>) as never;
       case 'gba-kit/eventBreakpoints':
         return {
           kinds: EVENT_BREAKPOINT_KINDS.map((k) => ({ ...k })),

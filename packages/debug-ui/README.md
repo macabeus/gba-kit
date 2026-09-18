@@ -2,20 +2,20 @@
 
 The debugger panels an editor has no native view for, as React components:
 
-| Panel               | What it shows                                                                                   |
-| ------------------- | ----------------------------------------------------------------------------------------------- |
-| `ScreenPanel`       | the display; keyboard and gamepad input; audio; run/pause, frame step, rewind, record           |
-| `PalettePanel`      | the 256 background and 256 sprite colors, with index, RGB and BGR555 of the one under the mouse |
-| `TilesPanel`        | the tiles of any character base at 4 or 8 bpp, painted with a palette bank                      |
-| `TilemapPanel`      | a background's map rendered from its tiles, with the entry under the mouse                      |
-| `SpritesPanel`      | OAM as a table, each sprite painted, in 1D or 2D mapping                                        |
-| `IoRegistersPanel`  | the display, sound-control, DMA, timer, keypad, interrupt and system registers, fields decoded  |
-| `TracePanel`        | the instruction trace ring                                                                      |
-| `EventsPanel`       | the hardware event log: VBlank, HBlank, interrupts, DMA, I/O writes, halts                      |
-| `MemorySearchPanel` | find a value in RAM and narrow the candidates as it changes                                     |
-| `LabelsPanel`       | names for addresses the ELF does not name; import `.sym` files, export                          |
-| `SaveStatesPanel`   | save and load states                                                                            |
-| `RecordingPanel`    | record the buttons pressed, replay them, read them as a script                                  |
+| Panel              | What it shows                                                                                   |
+| ------------------ | ----------------------------------------------------------------------------------------------- |
+| `ScreenPanel`      | the display; keyboard and gamepad input; audio; run/pause, frame step, rewind, record           |
+| `PalettePanel`     | the 256 background and 256 sprite colors, with index, RGB and BGR555 of the one under the mouse |
+| `TilesPanel`       | the tiles of any character base at 4 or 8 bpp, painted with a palette bank                      |
+| `TilemapPanel`     | a background's map rendered from its tiles, with the entry under the mouse                      |
+| `SpritesPanel`     | OAM as a table, each sprite painted, in 1D or 2D mapping                                        |
+| `IoRegistersPanel` | the display, sound-control, DMA, timer, keypad, interrupt and system registers, fields decoded  |
+| `TracePanel`       | the instruction trace ring                                                                      |
+| `EventsPanel`      | the hardware event log: VBlank, HBlank, interrupts, DMA, I/O writes, halts                      |
+| `MemoryDiffPanel`  | capture RAM, compare the captures by tag pattern or by value, and name what changed             |
+| `LabelsPanel`      | names for addresses the ELF does not name; import `.sym` files, export                          |
+| `SaveStatesPanel`  | save and load states                                                                            |
+| `RecordingPanel`   | record the buttons pressed, replay them, read them as a script                                  |
 
 `DebugPanels` puts them behind tabs. Everything talks to the debugger through a
 `Transport`, which the panels never look behind: the VS Code extension

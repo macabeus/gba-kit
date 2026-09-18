@@ -38,7 +38,9 @@ import {
 } from './inspector.js';
 import { type IoRegisterValue, ioRegisterAt, ioSnapshot } from './io.js';
 import { LabelStore, type LabelsFile } from './labels.js';
-import { Machine, romHash } from './machine.js';
+import { Machine, regionOf, romHash } from './machine.js';
+import { type Capture, MemoryDiff, type RamPair } from './memory-diff.js';
+import { type Noise, discoverNoise } from './memory-noise.js';
 import { type SearchOptions, filterMemory, searchMemory } from './memory-search.js';
 import {
   type Screen,
@@ -47,6 +49,7 @@ import {
   type TilesSnapshot,
   backgroundsSnapshot,
   paletteSnapshot,
+  screenFromJson,
   screenToJson,
   spritesSnapshot,
   thumbnailRgba,
@@ -184,6 +187,8 @@ export class Session {
   readonly labels = new LabelStore(() => this.#emit('labels'));
   readonly inspector: Inspector;
   readonly breakpoints = new BreakpointStore();
+  /** The captures and the candidate set of the memory diff; both live only as long as the session. */
+  readonly memoryDiff = new MemoryDiff({ info: () => this.program.debugInfo });
   readonly history: RewindHistory;
   readonly trace: Ring<TraceEntry>;
   readonly events: Ring<EventEntry>;
@@ -830,6 +835,8 @@ export class Session {
     this.history.clear();
     this.trace.clear();
     this.events.clear();
+    // the captures and the mutes describe a machine that no longer exists
+    this.memoryDiff.clear();
     this.#pushKeyframeIfDue();
     this.#stop({ reason: 'restart', address: this.machine.pc });
   }
@@ -962,6 +969,27 @@ export class Session {
     );
     this.#installWatchpoints();
     return list;
+  }
+
+  /**
+   * Watch one more address, keeping everything already watched. A DAP client owns the
+   * data breakpoint list and replaces it wholesale; this is for a view that found an
+   * address and wants to know who writes it, without taking the list away from the
+   * editor. An identical watch is not set twice.
+   */
+  watchAddress(spec: DataBreakpointSpec): DataBreakpoint[] {
+    // a watch the bus can never report is worse than a refusal: it verifies, never
+    // fires, and reads as a breakpoint that proved nobody writes the address
+    const region = regionOf(spec.address);
+    if (region === null || region === 'bios' || region === 'rom') {
+      throw new Error(`0x${(spec.address >>> 0).toString(16)} is ${region ?? 'unmapped'}, which nothing writes`);
+    }
+    const already = this.breakpoints.data.some(
+      (bp) => bp.address === spec.address && bp.length === spec.length && bp.access === spec.access,
+    );
+    return already
+      ? [...this.breakpoints.data]
+      : this.setDataBreakpoints([...this.breakpoints.data.map((bp) => ({ ...bp })), spec]);
   }
 
   /** Put the bus watchpoints of the verified data breakpoints in place (replacing any installed). */
@@ -1788,6 +1816,47 @@ export class Session {
 
   filterMemory(candidates: number[], value: number, size: 1 | 2 | 4): number[] {
     return filterMemory(this.machine, candidates, value, size);
+  }
+
+  // ─── memory diff ───────────────────────────────────────────────────
+
+  /** RAM as it is now, with the screen it was on: a reading of the machine, like every other. */
+  captureMemory(tag?: string): Capture {
+    this.#requireStopped('capture memory');
+    return this.memoryDiff.capture(this.#ram(), this.screen(), this.machine.frame, tag);
+  }
+
+  /**
+   * A save state as a capture. The state carries both RAM regions and the screen it
+   * was saved on, which is everything a capture is, so a state from a session that
+   * ended months ago compares against one taken a second ago. Nothing is loaded: the
+   * machine being debugged does not move.
+   */
+  captureFromState(text: string, tag?: string): Capture {
+    const { snapshot, meta } = decodeSaveState(text);
+    if (meta.romHash && meta.romHash !== this.romHash) {
+      throw new Error('this save state belongs to a different ROM');
+    }
+    const ram: RamPair = { iwram: snapshot.bus.iwram.slice(), ewram: snapshot.bus.ewram.slice() };
+    const thumbnail = meta.thumbnail ? screenFromJson(meta.thumbnail) : this.screen();
+    return this.memoryDiff.capture(ram, thumbnail, meta.frame ?? 0, tag, 'state');
+  }
+
+  /**
+   * What moves on its own here: background churn over a few idle frames, the RAM the
+   * DMA copies into VRAM, OAM and palette, and the live stack. The machine runs and is
+   * put back, so this reads like any other inspection even though it is the only one
+   * that executes anything.
+   */
+  discoverNoise(frames?: number): Noise {
+    this.#requireStopped('look for background noise');
+    const noise = discoverNoise(this.machine, frames);
+    this.memoryDiff.mutes.replaceDiscovered(noise.mutes);
+    return noise;
+  }
+
+  #ram(): RamPair {
+    return { iwram: this.machine.readRam('iwram'), ewram: this.machine.readRam('ewram') };
   }
 
   // ─── trace ─────────────────────────────────────────────────────────

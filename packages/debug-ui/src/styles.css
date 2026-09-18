@@ -531,3 +531,149 @@
 .gk-card-actions {
   justify-content: flex-end;
 }
+
+/* ─── memory diff ─────────────────────────────────────────────────── */
+/* a capture card carries its tag's colour, so `A B A` reads off the strip before any
+   filter runs — and the matrix's column headers carry the same four, since that is
+   where a row reading `0 1 0` is matched against the pattern that was asked for */
+.gk-diff-card {
+  border-left-width: 3px;
+}
+.gk-diff-card.gk-tag-1 {
+  border-left-color: var(--gk-accent);
+}
+.gk-diff-card.gk-tag-2 {
+  border-left-color: var(--gk-good);
+}
+.gk-diff-card.gk-tag-3 {
+  border-left-color: var(--gk-warn);
+}
+.gk-diff-card.gk-tag-4 {
+  border-left-color: var(--gk-bad);
+}
+.gk-diff-tag.gk-tag-1 {
+  color: var(--gk-accent);
+}
+.gk-diff-tag.gk-tag-2 {
+  color: var(--gk-good);
+}
+.gk-diff-tag.gk-tag-3 {
+  color: var(--gk-warn);
+}
+.gk-diff-tag.gk-tag-4 {
+  color: var(--gk-bad);
+}
+.gk-diff-tag {
+  font-size: 11px;
+}
+/* the strip is the query: cards in the order they were taken, with the link between each pair */
+.gk-strip {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.gk-strip-step {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.gk-link {
+  flex: none;
+}
+.gk-dragging {
+  opacity: 0.4;
+}
+
+/* a name is a field to fill in, so an unnamed capture looks like one rather than a caption */
+button.gk-diff-tag {
+  width: 100%;
+  padding: 1px 4px;
+  border: 1px dashed var(--gk-border);
+  border-radius: 2px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+button.gk-diff-tag:hover:not(:disabled) {
+  border-color: var(--gk-accent);
+}
+.gk-matrix-cell {
+  font-variant-numeric: tabular-nums;
+}
+/* three words, three treatments: the odds are read at a glance or not at all */
+.gk-odds {
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: help;
+}
+.gk-odds-likely {
+  color: var(--gk-good);
+  background: rgba(34, 197, 94, 0.12);
+}
+.gk-odds-possible {
+  color: var(--gk-warn);
+  background: rgba(234, 179, 8, 0.12);
+}
+.gk-odds-unlikely {
+  color: var(--gk-muted);
+}
+
+/* the three tiers are three treatments, never the same one with different words */
+.gk-tier {
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.gk-tier-sized {
+  color: var(--gk-good);
+}
+.gk-tier-inferred {
+  color: var(--gk-warn);
+}
+.gk-tier-unnamed {
+  color: var(--gk-dim);
+}
+/* a mute's source is not a tier: it says who asked for it, not how well named anything is */
+.gk-mute-yours {
+  color: var(--gk-fg);
+}
+.gk-mute-found {
+  color: var(--gk-muted);
+}
+tr.gk-tier-sized td:nth-child(2) {
+  color: var(--gk-fg);
+}
+tr.gk-tier-inferred td:nth-child(2),
+tr.gk-tier-unnamed td:nth-child(2) {
+  font-family: var(--gk-mono);
+}
+.gk-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--gk-fg);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--gk-border);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.gk-group-head:hover {
+  background: var(--gk-accent-bg);
+}
+.gk-mute-row {
+  align-items: center;
+  gap: 6px;
+}

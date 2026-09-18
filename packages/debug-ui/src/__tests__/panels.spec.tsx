@@ -2,11 +2,13 @@
  * Panels rendered against a fixed debugger state: what the controls show for a
  * given `StateBody`, with the state hook stood in for (no host, no effects).
  */
-import type { StateBody } from '@gba-kit/debug-core/protocol';
+import type { DiffGroupBody, DiffRowBody, StateBody } from '@gba-kit/debug-core/protocol';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 
 import { EditableName } from '../components.js';
+import { DiffGroups } from '../panels/DiffRows.js';
+import { MemoryDiffPanel, nameFor, querySentence, watchExpression } from '../panels/MemoryDiffPanel.js';
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
 import { ScreenPanel } from '../panels/ScreenPanel.js';
 import { SaveStatesView } from '../panels/save-states.js';
@@ -208,5 +210,214 @@ describe('recording panel', () => {
     expect(renderToString(<RecordingsView takes={takes} onReplay={() => {}} onRemove={() => {}} />)).toContain(
       'codicon-trash',
     );
+  });
+});
+
+describe('memory diff panel', () => {
+  /** One row of each tier, as the session would hand them over. */
+  const rows: DiffRowBody[] = [
+    {
+      address: 0x03002920,
+      group: 'symbol:gEntityInfo',
+      values: [1, 2, 1],
+      formatted: ['1', '2', '1'],
+      tier: 'sized',
+      symbol: { name: 'gEntityInfo', offset: 0 },
+      path: 'gEntityInfo[0].xPosBg2',
+      type: 'u16',
+      rank: 10,
+      reasons: ['2 changed bytes within ±256'],
+    },
+    {
+      address: 0x03000028,
+      group: 'symbol:gMPlayTrack_0',
+      values: [48, 0, 48],
+      tier: 'inferred',
+      symbol: { name: 'gMPlayTrack_0', offset: 0x20 },
+      path: 'gMPlayTrack_0[3]',
+      extrapolated: true,
+      rank: 8,
+      reasons: ['a run of 2 changed bytes'],
+    },
+    { address: 0x02000818, group: 'region:EWRAM', values: [1, 2, 1], tier: 'unattributed', rank: 10, reasons: [] },
+  ];
+  const groups: DiffGroupBody[] = [
+    { key: 'symbol:gEntityInfo', tier: 'sized', label: 'gEntityInfo', rows: 1, topRank: 10 },
+    { key: 'region:EWRAM', tier: 'unattributed', label: 'unattributed EWRAM', rows: 1, topRank: 10 },
+  ];
+  const actions = {
+    tags: ['slot A', 'slot B', 'slot A'],
+    selected: new Set<number>(),
+    onSelect: () => {},
+    onLabel: () => {},
+    onBreak: () => {},
+    onMute: () => {},
+  };
+
+  it('asks for a capture before it has one, and needs a stopped machine to take it', () => {
+    current.state = stoppedAt(0);
+    const stopped = renderToString(<MemoryDiffPanel transport={transport} />);
+    expect(stopped).toContain('Capture RAM on one screen');
+    expect(stopped).not.toContain('Capturing needs a stopped machine');
+    expect(stopped.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).not.toContain('disabled');
+
+    current.state = { ...stoppedAt(0), state: 'running' };
+    const running = renderToString(<MemoryDiffPanel transport={transport} />);
+    expect(running).toContain('Capturing needs a stopped machine');
+    expect(running.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).toContain('disabled');
+  });
+
+  it('says the query in words, so a strip of arrows can be checked by reading it', () => {
+    const strip = [
+      { id: 1, name: 'slot A' },
+      { id: 2, name: 'slot B' },
+      { id: 3, name: 'slot A again' },
+    ];
+    const sentence = querySentence(strip, { 1: 'changed', 2: 'changed' }, { 3: 1 }, { 1: 0 });
+    expect(sentence).toContain('slot A → slot B changed');
+    expect(sentence).toContain('slot B → slot A again changed');
+    expect(sentence).toContain('slot A again is back to what slot A held');
+    expect(sentence).toContain('slot A held 0');
+    // a link nobody set reads as the default the strip draws, not as a gap
+    expect(querySentence(strip, {}, {}, {})).toContain('slot A → slot B changed');
+    expect(querySentence(strip, { 1: 'any' }, {}, {})).toContain('slot A → slot B did anything');
+    expect(querySentence([{ id: 1, name: 'one' }], {}, {}, {})).toContain('two states');
+  });
+
+  it('reports the odds as one of three words, with what earned them behind it', () => {
+    const html = renderToString(
+      <DiffGroups groups={[]} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
+    );
+    // a number gives nobody a way to disagree with the order; the words are what is read,
+    // and the criteria that earned them are what the title carries
+    expect(html).toContain('gk-odds-likely');
+    expect(html).not.toContain('>10<');
+    expect(html).toMatch(/title="Looks like a variable: [^"]+"/);
+  });
+
+  it('gives each tier its own treatment, so an inferred containment cannot read as a name', () => {
+    const html = renderToString(
+      <DiffGroups groups={[]} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
+    );
+    expect(html).toContain('gk-tier-sized');
+    expect(html).toContain('gk-tier-inferred');
+    expect(html).toContain('gk-tier-unnamed');
+    // a sized row leads with the name the program vouches for
+    expect(html).toContain('gEntityInfo[0].xPosBg2');
+    // an inferred one leads with its address, and the symbol is only a landmark
+    expect(html).toContain('0x03000028');
+    expect(html).toContain('near gMPlayTrack_0 + 0x20');
+    expect(html).toContain('nothing states this array has that many elements');
+    // an unattributed one claims nothing at all
+    expect(html).toContain('0x02000818');
+    expect(html).not.toContain('near gNumMusicPlayers');
+    // the matrix is one column per capture, headed by its tag
+    expect(html).toContain('slot A');
+    expect(html).toContain('slot B');
+    expect(html).toContain('aria-rowcount="3"');
+  });
+
+  it('says when the members of a union cover the same bytes, so one reading is not the reading', () => {
+    const union: DiffRowBody = {
+      address: 0x03002928,
+      group: 'symbol:gEntityInfo',
+      values: [1, 2, 1],
+      tier: 'sized',
+      symbol: { name: 'gEntityInfo', offset: 8 },
+      path: 'gEntityInfo[0].unk8.split.unk8',
+      type: 'u8',
+      alternatives: ['all'],
+      rank: 9,
+      reasons: [],
+    };
+    const html = renderToString(
+      <DiffGroups groups={[]} rows={[union]} open={new Set()} onToggle={() => {}} total={1} actions={actions} />,
+    );
+    expect(html).toContain('gEntityInfo[0].unk8.split.unk8');
+    expect(html).toContain('or .all');
+  });
+
+  it('collapses the groups and says what each holds before it is opened', () => {
+    const html = renderToString(
+      <DiffGroups groups={groups} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
+    );
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('unattributed EWRAM');
+    expect(html).toContain('best likely');
+    // nothing is expanded, so no row is rendered yet
+    expect(html).not.toContain('gEntityInfo[0].xPosBg2');
+
+    const open = renderToString(
+      <DiffGroups
+        groups={groups}
+        rows={rows}
+        open={new Set(['symbol:gEntityInfo'])}
+        onToggle={() => {}}
+        total={3}
+        actions={actions}
+      />,
+    );
+    expect(open).toContain('gEntityInfo[0].xPosBg2');
+    expect(open).not.toContain('0x02000818');
+  });
+
+  it('says how many of a group rows this page carries, rather than claiming them all', () => {
+    const many: DiffGroupBody[] = [
+      { key: 'symbol:gEntityInfo', tier: 'sized', label: 'gEntityInfo', rows: 240, topRank: 10 },
+      { key: 'region:EWRAM', tier: 'unattributed', label: 'unattributed EWRAM', rows: 1, topRank: 10 },
+    ];
+    const html = renderToString(
+      <DiffGroups groups={many} rows={rows} open={new Set()} onToggle={() => {}} total={241} actions={actions} />,
+    );
+    // the page carries one of gEntityInfo's 240 rows, and a header that said `240 rows`
+    // over a table of one is what sends a reader looking for the other 239 on screen
+    expect(html).toContain('1 of 240 rows here');
+    expect(html).toContain('1 row · best likely');
+  });
+
+  it('names an address by a path only where the program states one covering it', () => {
+    // the row renderer never shows an inferred path as a name, and the action behind it
+    // must not either: a label reaches disassembly and `.sym` with no tier to explain it
+    expect(rows.map(nameFor)).toEqual(['gEntityInfo_0.xPosBg2', 'gUnk_03000028', 'gUnk_02000818']);
+  });
+
+  /** A byte of `gEntityInfo[0].xPosBg2`, which the same path names and does not name. */
+  const inside: DiffRowBody = { ...rows[0]!, address: 0x03002921, pathOffset: 1 };
+
+  it('a byte inside an object is neither named nor drawn as that object', () => {
+    const html = renderToString(
+      <DiffGroups groups={[]} rows={[inside]} open={new Set()} onToggle={() => {}} total={1} actions={actions} />,
+    );
+    // four bytes of one word carry one path: leading with the name would draw four rows
+    // that look like one, and labelling them would put one identifier at four addresses
+    expect(html).toContain('0x03002921');
+    expect(html).toContain('in gEntityInfo[0].xPosBg2 + 0x1');
+    expect(nameFor(inside)).toBe('gUnk_03002921');
+    expect(nameFor(rows[0]!)).toBe('gEntityInfo_0.xPosBg2');
+  });
+
+  it('watches the variable where the program names it, and the memory where it does not', () => {
+    expect(watchExpression(rows[0]!, 4)).toBe('gEntityInfo[0].xPosBg2');
+    expect(watchExpression(inside, 1)).toBe('u8(0x03002921)');
+    // an inferred path is a hypothesis, so what is watched is the address it is about
+    expect(watchExpression(rows[1]!, 2)).toBe('u16(0x03000028)');
+  });
+
+  it('offers a watch only where the host has somewhere to put one', () => {
+    const without = renderToString(
+      <DiffGroups groups={[]} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
+    );
+    expect(without).not.toContain('>Watch<');
+    const with_ = renderToString(
+      <DiffGroups
+        groups={[]}
+        rows={rows}
+        open={new Set()}
+        onToggle={() => {}}
+        total={3}
+        actions={{ ...actions, onWatch: () => {} }}
+      />,
+    );
+    expect(with_).toContain('>Watch<');
   });
 });

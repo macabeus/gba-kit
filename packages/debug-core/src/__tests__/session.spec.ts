@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { type Host, type HostFiles, ManualHost } from '../host.js';
 import { Machine } from '../machine.js';
+import { diffRowBody } from '../protocol.js';
 import { Session, type SessionState, type StopInfo } from '../session.js';
 import { decodeSaveState, encodeTypedArrays } from '../snapshot-codec.js';
 
@@ -2062,4 +2063,225 @@ describe('a .sav as a save state', () => {
       expect(() => session.exportSaveFile()).toThrow(/emulates no flash chip/);
     },
   );
+});
+
+describe('the memory diff', () => {
+  /** Every address comes from the ELF at test time; a hard-coded one is a fixture change away from wrong. */
+  function addressOf(session: Session, name: string): number {
+    const address = session.program.symbolAddress(name);
+    if (address === null) {
+      throw new Error(`the fixture has no ${name}`);
+    }
+    return address;
+  }
+
+  function put(session: Session, address: number, value: number): void {
+    const bytes = new Uint8Array(4);
+    new DataView(bytes.buffer).setUint32(0, value, true);
+    session.writeMemory(address, bytes);
+  }
+
+  it('keeps the RAM a capture held while the machine runs on', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const first = session.captureMemory('start');
+    const frame = new Uint8Array(first.ram.iwram);
+    const at = session.frame;
+
+    run(60);
+    session.captureMemory('later');
+    expect(session.frame).toBeGreaterThan(at);
+    // the capture is a copy, not a view of memory that keeps moving under it
+    expect(first.ram.iwram).toEqual(frame);
+    expect(session.memoryDiff.captures().map((c) => c.tag)).toEqual(['start', 'later']);
+    expect(first.frame).toBe(at);
+    expect(first.origin).toBe('machine');
+  });
+
+  /** the strip as the panel draws it: each capture linked to the next, and an arc back to the first. */
+  const backAndForth = (session: { memoryDiff: { captures(): Array<{ id: number }> } }) => {
+    const ids = session.memoryDiff.captures().map((c) => c.id);
+    return {
+      edges: [
+        ...ids.slice(0, -1).map((id, i) => ({ from: id, to: ids[i + 1]!, relation: 'changed' as const })),
+        { from: ids[0]!, to: ids[ids.length - 1]!, relation: 'same' as const },
+      ],
+      values: [],
+    };
+  };
+
+  it('finds the variable whose value came back with the run, and not the one that merely moves', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const counter = addressOf(session, 'g_frame');
+    const samples = addressOf(session, 'g_samples');
+
+    // `g_samples` is written every frame from the frame counter, so it differs across the
+    // arc the strip draws back to ①; only `g_frame` itself is put back
+    put(session, counter, 0x1234);
+    session.captureMemory('A');
+    run(2);
+    put(session, counter, 0x5678);
+    session.captureMemory('B');
+    run(2);
+    put(session, counter, 0x1234);
+    session.captureMemory('A');
+
+    session.memoryDiff.apply(backAndForth(session), 4);
+    const kept = new Set(session.memoryDiff.rows(0, 500).map((r) => r.address));
+    expect(kept.has(counter)).toBe(true);
+    expect(kept.has(samples)).toBe(false);
+  });
+
+  it('places a candidate inside the object the program states holds it', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const samples = addressOf(session, 'g_samples');
+    put(session, samples + 4, 1);
+    session.captureMemory('A');
+    put(session, samples + 4, 2);
+    session.captureMemory('B');
+    put(session, samples + 4, 1);
+    session.captureMemory('A');
+
+    session.memoryDiff.apply(backAndForth(session), 4);
+    const row = session.memoryDiff.rows(0, 500).find((r) => r.address === samples + 4);
+    expect(row?.placement.tier).toBe('sized');
+    expect(row?.placement.path).toBe('g_samples[1]');
+    expect(row?.values).toEqual([1, 2, 1]);
+  });
+
+  it('a byte of an object is not that object: it says how far in it is, and is not read as it', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const samples = addressOf(session, 'g_samples');
+    // one byte of `g_samples[0]` moves; the three around it never do
+    put(session, samples, 0x11223344);
+    session.captureMemory('A');
+    put(session, samples, 0x11223355);
+    session.captureMemory('B');
+    put(session, samples, 0x11223344);
+    session.captureMemory('A');
+
+    session.memoryDiff.apply(backAndForth(session), 1);
+    const [row] = session.memoryDiff.rows(0, 8).map(diffRowBody);
+    expect(row).toMatchObject({ address: samples, tier: 'sized', path: 'g_samples[0]', values: [0x44, 0x55, 0x44] });
+    // the whole element is what `g_samples[0]` names, and one byte of it is not: a value
+    // formatted through the element would say 0x11223344 for a row the filter kept for
+    // its low byte alone, and a label would name four addresses the same thing
+    expect(row!.pathOffset).toBeUndefined();
+    expect(row!.formatted).toBeUndefined();
+
+    session.memoryDiff.reset();
+    session.memoryDiff.apply({ edges: [{ from: 1, to: 2, relation: 'same' }], values: [] }, 1);
+    const inside = session.memoryDiff
+      .rows(0, 5000)
+      .map(diffRowBody)
+      .find((r) => r.address === samples + 2);
+    expect(inside).toMatchObject({ path: 'g_samples[0]', pathOffset: 2 });
+    expect(inside!.formatted).toBeUndefined();
+
+    // at the element's own width the path names the address, and the value reads as the element
+    session.memoryDiff.reset();
+    session.memoryDiff.apply(backAndForth(session), 4);
+    const whole = session.memoryDiff.rows(0, 8).map(diffRowBody)[0];
+    expect(whole).toMatchObject({ address: samples, path: 'g_samples[0]' });
+    expect(whole!.pathOffset).toBeUndefined();
+    expect(whole!.formatted?.[0]).toMatch(/287454020|0x11223344/);
+  });
+
+  it('puts the machine back exactly after looking for background noise', async () => {
+    const { session, run, stops } = await boot('thumb-O0');
+    run(60);
+    const before = {
+      frame: session.frame,
+      pc: session.pc,
+      registers: Uint32Array.from(session.machine.registers),
+      iwram: session.machine.readRam('iwram'),
+      ewram: session.machine.readRam('ewram'),
+      events: session.events.size,
+      stops: stops.length,
+    };
+    session.setButtons(0b11);
+
+    const noise = session.discoverNoise(8);
+
+    expect(noise.frames).toBe(8);
+    expect(session.frame).toBe(before.frame);
+    expect(session.pc).toBe(before.pc);
+    expect(session.machine.registers).toEqual(before.registers);
+    expect(session.machine.readRam('iwram')).toEqual(before.iwram);
+    expect(session.machine.readRam('ewram')).toEqual(before.ewram);
+    // the frames nobody asked to run leave nothing behind: no events, no stops, buttons held
+    expect(session.events.size).toBe(before.events);
+    expect(stops.length).toBe(before.stops);
+    expect(session.buttons).toBe(0b11);
+    // the fixture's own counters move on their own, so the baseline is not empty
+    expect(noise.churnBytes).toBeGreaterThan(0);
+    expect(session.memoryDiff.mutes.all().some((m) => m.source === 'idle')).toBe(true);
+
+    // the live frames at and above the pointer are the same in every capture taken at
+    // the same place; what moves is the abandoned frames below it, so the mute reaches
+    // down to the deepest the run saw the pointer go
+    const stack = session.memoryDiff.mutes.all().find((m) => m.source === 'stack');
+    const sp = session.machine.registers[13]!;
+    expect(stack).toBeDefined();
+    expect(stack!.ranges[0]!.lo).toBeLessThan(sp);
+    expect(stack!.ranges[0]!.hi).toBeGreaterThan(sp);
+    expect(stack!.note).toMatch(/as deep as 8 idle frames saw it go/);
+  });
+
+  it('adopts a save state as a capture without moving the machine', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const live = session.captureMemory('live');
+    const text = session.saveState('here');
+    const at = session.frame;
+
+    run(30);
+    const adopted = session.captureFromState(text, 'from a state');
+
+    expect(adopted.origin).toBe('state');
+    expect(adopted.frame).toBe(at);
+    expect(adopted.ram.iwram).toEqual(live.ram.iwram);
+    expect(adopted.ram.ewram).toEqual(live.ram.ewram);
+    expect(session.frame).toBeGreaterThan(at);
+  });
+
+  it('forgets its captures on a restart, since they are of a machine that is gone', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    session.captureMemory('before');
+    session.discoverNoise(2);
+    expect(session.memoryDiff.captures()).toHaveLength(1);
+
+    session.restart();
+
+    expect(session.memoryDiff.captures()).toEqual([]);
+    expect(session.memoryDiff.mutes.all()).toEqual([]);
+  });
+
+  it('watches one more address without taking the list away from whoever set the others', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    const counter = addressOf(session, 'g_frame');
+    session.setDataBreakpoints([{ address: counter, length: 4, name: 'g_frame', access: 'write' }]);
+
+    const samples = addressOf(session, 'g_samples');
+    const all = session.watchAddress({ address: samples, length: 4, name: 'g_samples', access: 'write' });
+
+    expect(all.map((bp) => bp.address)).toEqual([counter, samples]);
+    // the same watch twice is one watch
+    expect(session.watchAddress({ address: samples, length: 4, name: 'g_samples', access: 'write' })).toHaveLength(2);
+
+    // a watch on memory nothing writes verifies and never fires, which reads as a
+    // breakpoint that proved the address is written by nobody
+    expect(() => session.watchAddress({ address: 0x08000100, length: 4, name: 'in rom', access: 'write' })).toThrow(
+      /is rom, which nothing writes/,
+    );
+    expect(() => session.watchAddress({ address: 0xffffffff, length: 4, name: 'nowhere', access: 'write' })).toThrow(
+      /is unmapped, which nothing writes/,
+    );
+    expect(session.breakpoints.data).toHaveLength(2);
+  });
 });

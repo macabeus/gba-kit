@@ -52,11 +52,21 @@ import {
   type SaveStateMeta,
   type SavedStateInfo,
   type StateBody,
+  breakOnWriteBody,
+  captureId,
+  captureIds,
+  captureInfo,
+  captureTag,
+  capturesBody,
+  diffFilterBody,
   entryCount,
   frameBody,
+  mutesBody,
+  noiseFrames,
   ppuBody,
   rewindFrameCount,
   savedStateInfo,
+  setMute,
   takeBody,
 } from './protocol.js';
 import { FrameStream } from './stream.js';
@@ -1501,6 +1511,55 @@ export class GbaDebugSession extends DebugSession {
         }
         return { addresses: s.filterMemory(a.addresses, value, size) };
       }
+      case 'gba-kit/captures':
+        return capturesBody(s);
+      case 'gba-kit/capture': {
+        const a = args as Args<'gba-kit/capture'>;
+        const tag = optionalString(a?.tag, 'tag');
+        if (a?.state === undefined && a?.path === undefined) {
+          // a capture reads the machine, so it needs it stopped like every other read
+          this.#inspect(response, () => {
+            response.body = { capture: captureInfo(s.captureMemory(tag)) };
+          });
+          return SENT;
+        }
+        const text = await this.#readState(s, { name: a.state, path: a.path });
+        return { capture: captureInfo(s.captureFromState(text, tag)) };
+      }
+      case 'gba-kit/retagCapture': {
+        const a = args as Args<'gba-kit/retagCapture'>;
+        s.memoryDiff.retag(captureId(a.id), captureTag(a.tag));
+        return capturesBody(s);
+      }
+      case 'gba-kit/reorderCaptures': {
+        const a = args as Args<'gba-kit/reorderCaptures'>;
+        s.memoryDiff.reorder(captureIds(a.ids));
+        return capturesBody(s);
+      }
+      case 'gba-kit/forgetCapture': {
+        const a = args as Args<'gba-kit/forgetCapture'>;
+        s.memoryDiff.forget(captureId(a.id));
+        return capturesBody(s);
+      }
+      case 'gba-kit/discoverNoise': {
+        const frames = noiseFrames((args as Args<'gba-kit/discoverNoise'>)?.frames);
+        // this is the one inspection that executes, so it needs the machine stopped; it
+        // puts it back byte for byte, which is why nothing a view already read goes stale
+        this.#inspect(response, () => {
+          const noise = s.discoverNoise(frames);
+          response.body = { ...mutesBody(s), churnBytes: noise.churnBytes, frames: noise.frames };
+        });
+        return SENT;
+      }
+      case 'gba-kit/mutes':
+        return mutesBody(s);
+      case 'gba-kit/setMute':
+        setMute(s, args as Args<'gba-kit/setMute'>);
+        return mutesBody(s);
+      case 'gba-kit/diffFilter':
+        return diffFilterBody(s, (args ?? {}) as NonNullable<Args<'gba-kit/diffFilter'>>);
+      case 'gba-kit/breakOnWrite':
+        return breakOnWriteBody(s, args as Args<'gba-kit/breakOnWrite'>);
       case 'gba-kit/eventBreakpoints':
         return { kinds: EVENT_BREAKPOINT_KINDS.map((k) => ({ ...k })), enabled: [...s.breakpoints.events] };
       default:

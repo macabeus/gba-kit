@@ -129,6 +129,16 @@ export class Machine {
     return this.gba.bus.peek(address, size);
   }
 
+  /**
+   * A RAM region's bytes as a copy, the same ones `peek` gives for it and as free of
+   * side effects, taken from the backing array in one move: a capture of both regions
+   * costs 0.1 ms this way and 5 ms a byte at a time, and an idle baseline takes one
+   * per frame it runs.
+   */
+  readRam(region: keyof typeof RAM_REGIONS): Uint8Array {
+    return this.gba.bus[region].slice();
+  }
+
   /** Little-endian unsigned integer of `size` bytes, or undefined. */
   peekUnsigned(address: number, size: number): number | undefined {
     const b = this.peek(address, size);

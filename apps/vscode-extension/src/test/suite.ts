@@ -144,6 +144,53 @@ export async function run(): Promise<void> {
   const screen = (await session.customRequest('gba-kit/frame')) as { rgba: string };
   assert.equal(Buffer.from(screen.rgba, 'base64').length, 240 * 160 * 4);
 
+  // the memory diff, driven the way the panel drives it: two captures of a machine
+  // whose frame counter moved between them, then the filter that compares them
+  await session.customRequest('gba-kit/capture', { tag: 'before' });
+  await vscode.commands.executeCommand('gba-kit.stepFrame');
+  await session.customRequest('gba-kit/capture', { tag: 'after' });
+  const captures = (await session.customRequest('gba-kit/captures')) as {
+    captures: Array<{ id: number; tag: string }>;
+  };
+  assert.deepEqual(
+    captures.captures.map((c) => c.tag),
+    ['before', 'after'],
+  );
+  const diff = (await session.customRequest('gba-kit/diffFilter', {
+    mode: { kind: 'changed', from: captures.captures[0]!.id, to: captures.captures[1]!.id },
+    size: 4,
+  })) as { total: number; rows: Array<{ address: number; path?: string }> };
+  assert.ok(diff.total > 0, 'a frame of the fixture changes something in RAM');
+  assert.ok(
+    diff.rows.some((r) => r.path === 'g_frame'),
+    `the frame counter is among the changed addresses\n${JSON.stringify(diff.rows.slice(0, 5))}`,
+  );
+
+  // the Watch action a diff row offers, through the command the extension reaches for.
+  // VS Code exposes no API for putting an expression in the watch pane, so what the
+  // capability rests on is this command's shape — and the proof it worked is the
+  // adapter being asked to evaluate the expression as a watch
+  const watched = traffic.length;
+  await vscode.commands.executeCommand('debug.addToWatchExpressions', {
+    variable: { name: 'g_frame', evaluateName: 'g_frame' },
+  });
+  await waitFor<void>('the watch expression to be evaluated', (resolve) => {
+    const timer = setInterval(() => {
+      const seen = traffic
+        .slice(watched)
+        .some(
+          (t) =>
+            t.dir === '\u2192' &&
+            t.message.command === 'evaluate' &&
+            (t.message.arguments as { expression?: string; context?: string } | undefined)?.context === 'watch',
+        );
+      if (seen) {
+        resolve();
+      }
+    }, 100);
+    return { dispose: () => clearInterval(timer) };
+  });
+
   const ended = waitFor<void>('the session to end', (resolve) =>
     vscode.debug.onDidTerminateDebugSession((s) => s.id === session.id && resolve()),
   );
