@@ -1820,9 +1820,14 @@ export class Session {
 
   // ─── memory diff ───────────────────────────────────────────────────
 
-  /** RAM as it is now, with the screen it was on: a reading of the machine, like every other. */
+  /**
+   * RAM as it is now, with the screen it was on: a reading of the machine, like every
+   * other. A running machine is read where it already is — between two frames, since a
+   * run advances one per tick of the host's clock and a request is answered between
+   * them — so capturing does not ask the user to stop first, and the capture is of a
+   * whole frame either way.
+   */
   captureMemory(tag?: string): Capture {
-    this.#requireStopped('capture memory');
     return this.memoryDiff.capture(this.#ram(), this.screen(), this.machine.frame, tag);
   }
 

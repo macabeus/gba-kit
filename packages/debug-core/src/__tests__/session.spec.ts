@@ -2098,6 +2098,21 @@ describe('the memory diff', () => {
     expect(first.origin).toBe('machine');
   });
 
+  it('captures a running machine where it already is, without asking for a stop first', async () => {
+    const h = await boot('thumb-O0');
+    h.run(10);
+    h.session.continue();
+    expect(h.session.state).toBe('running');
+
+    // a run advances one frame per tick of the host's clock and a request is answered
+    // between them, so what a capture reads is a whole frame either way
+    const taken = h.session.captureMemory('while running');
+    expect(taken.frame).toBe(h.session.frame);
+    h.host.tick(FRAME_MS);
+    expect(h.session.frame).toBeGreaterThan(taken.frame);
+    expect(h.session.memoryDiff.captures()).toHaveLength(1);
+  });
+
   /** the strip as the panel draws it: each capture linked to the next, and an arc back to the first. */
   const backAndForth = (session: { memoryDiff: { captures(): Array<{ id: number }> } }) => {
     const ids = session.memoryDiff.captures().map((c) => c.id);

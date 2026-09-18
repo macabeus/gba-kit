@@ -34,6 +34,12 @@ it, which is the exact-value search, now sayable for one capture of several. Lin
 cannot all hold — `①` up to `②`, `②` up to `③`, and `③` the same state as `①` — are
 refused by name rather than answered with no rows.
 
+A capture does not ask the machine to stop first: a run advances one frame per tick of
+the host's clock and a request is answered between them, so a running machine is read
+where it already is and the capture is of a whole frame either way. Looking for
+background noise still needs a stop, since it runs frames of its own and puts the machine
+back.
+
 Captures live in the session and nowhere else: they are never written under `.gba-kit/`,
 and the 288 KB of RAM each holds never crosses to a client, which gets the counts, the
 groups and a page of rows. A save state can be adopted as a capture, since a state

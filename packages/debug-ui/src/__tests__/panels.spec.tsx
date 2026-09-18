@@ -255,17 +255,18 @@ describe('memory diff panel', () => {
     onMute: () => {},
   };
 
-  it('asks for a capture before it has one, and needs a stopped machine to take it', () => {
+  it('asks for a capture before it has one, and takes one without stopping first', () => {
     current.state = stoppedAt(0);
     const stopped = renderToString(<MemoryDiffPanel transport={transport} />);
     expect(stopped).toContain('Capture RAM on one screen');
-    expect(stopped).not.toContain('Capturing needs a stopped machine');
-    expect(stopped.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).not.toContain('disabled');
+    expect(stopped).not.toContain('needs a stopped machine');
 
+    // a capture is read between two frames wherever the machine is, so the button does
+    // not wait for a stop; the noise baseline runs frames itself and still does
     current.state = { ...stoppedAt(0), state: 'running' };
     const running = renderToString(<MemoryDiffPanel transport={transport} />);
-    expect(running).toContain('Capturing needs a stopped machine');
-    expect(running.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).toContain('disabled');
+    expect(running.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).not.toContain('disabled');
+    expect(running).toContain('Looking for background noise needs a stopped machine');
   });
 
   it('an arrow leaves the side its target is on, so its label is never behind a node', () => {
