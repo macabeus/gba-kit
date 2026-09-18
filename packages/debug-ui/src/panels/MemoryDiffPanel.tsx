@@ -74,7 +74,6 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   /** an exact value a capture held, as typed */
   const [typed, setTyped] = useState<Record<number, string>>({});
   const [open, setOpen] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<Set<number>>(new Set());
   const [mutesOpen, setMutesOpen] = useState(false);
   const [frames, setFrames] = useState<number>(DIFF.noiseFramesDefault);
   const [nextName, setNextName] = useState('');
@@ -136,23 +135,10 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
       return next;
     });
 
-  const select = (address: number, on: boolean): void =>
-    setSelected((was) => {
-      const next = new Set(was);
-      if (on) {
-        next.add(address);
-      } else {
-        next.delete(address);
-      }
-      return next;
-    });
-
-  const muteAddresses = (addresses: number[], note: string): void => {
-    if (addresses.length > 0) {
-      const width = diff.result?.size ?? size;
-      void diff.mute({ ranges: addresses.map((a) => ({ lo: a, hi: a + width })), note });
-      setSelected(new Set());
-    }
+  /** Hide an address the results turned up: a mute is a range, and a row is one value wide. */
+  const muteAddress = (address: number, note: string): void => {
+    const width = diff.result?.size ?? size;
+    void diff.mute({ ranges: [{ lo: address, hi: address + width }], note });
   };
 
   /**
@@ -269,12 +255,6 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
               bytes hidden
             </span>
           </button>
-          <Button
-            onClick={() => muteAddresses([...selected], 'muted from the results')}
-            disabled={busy || selected.size === 0}
-          >
-            Mute {selected.size} selected
-          </Button>
         </div>
         {mutesOpen &&
           (diff.mutes.length === 0 ? (
@@ -284,13 +264,6 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
           ) : (
             diff.mutes.map((mute) => (
               <div key={mute.id} className="gk-row gk-mute-row">
-                <input
-                  type="checkbox"
-                  className="gk-check"
-                  checked={mute.enabled}
-                  onChange={(e) => void diff.mute({ id: mute.id, enabled: e.target.checked })}
-                  aria-label={`${mute.source} mute`}
-                />
                 <span className={`gk-tier gk-mute-${mute.source === 'user' ? 'yours' : 'found'}`}>{mute.source}</span>
                 <span className="gk-mono gk-small">
                   {mute.ranges.length === 1
@@ -352,14 +325,12 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
               total={result.total}
               actions={{
                 tags,
-                selected,
                 busy,
-                onSelect: select,
                 onLabel: label,
                 onBreak: (row) =>
                   attempt(() => transport.request('gba-kit/breakOnWrite', { address: row.address, size: result.size })),
                 onWatch: transport.watch && ((row) => transport.watch!(watchExpression(row, result.size))),
-                onMute: (row) => muteAddresses([row.address], 'muted from the results'),
+                onMute: (row) => muteAddress(row.address, 'muted from the results'),
               }}
             />
           )}

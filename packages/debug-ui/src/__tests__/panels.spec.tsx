@@ -248,8 +248,6 @@ describe('memory diff panel', () => {
   ];
   const actions = {
     tags: ['slot A', 'slot B', 'slot A'],
-    selected: new Set<number>(),
-    onSelect: () => {},
     onLabel: () => {},
     onBreak: () => {},
     onMute: () => {},
