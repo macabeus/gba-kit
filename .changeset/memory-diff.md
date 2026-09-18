@@ -28,7 +28,9 @@ Results are grouped by what holds them, in three tiers the panel keeps visually
 distinct: an object the program states an extent for (with its typed member path,
 `gEntityInfo[13].xPosBg2`), a symbol in the same memory that is only the nearest one
 below, and an address nothing names. `placementAt` in `@gba-kit/debug-info` is the new
-inverse of the expression walk that works those out.
+inverse of the expression walk that works those out. The groups are read in the order
+ranking put their rows in, so the one holding the best candidate leads — a larger group
+of rows tied with it is a wider guess, not a better one.
 
 Background noise is muted by address range and never by name: run three hundred idle
 frames and whatever moves on its own is churn, watch the DMA in the same run and every
