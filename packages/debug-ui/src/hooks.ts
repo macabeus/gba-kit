@@ -217,8 +217,7 @@ export function useSaveStates(transport: Transport): {
 }
 
 type DiffFilterBody = GbaKitRequests['gba-kit/diffFilter']['body'];
-type DiffPreviewBody = GbaKitRequests['gba-kit/diffPreview']['body'];
-type DiffMode = GbaKitRequests['gba-kit/diffPreview']['args']['mode'];
+type DiffQuery = NonNullable<NonNullable<GbaKitRequests['gba-kit/diffFilter']['args']>['query']>;
 type SetMuteArgs = GbaKitRequests['gba-kit/setMute']['args'];
 type FilterArgs = NonNullable<GbaKitRequests['gba-kit/diffFilter']['args']>;
 
@@ -235,7 +234,6 @@ export function useMemoryDiff(transport: Transport): {
   captures: CaptureInfo[];
   mutes: MuteBody[];
   result: DiffFilterBody | null;
-  preview: DiffPreviewBody | null;
   /** where the page of rows begins, for a view that says which of them it is showing */
   from: number;
   error: string | null;
@@ -246,10 +244,8 @@ export function useMemoryDiff(transport: Transport): {
   forget: (id: number) => Promise<unknown>;
   findNoise: (frames?: number) => Promise<unknown>;
   mute: (args: SetMuteArgs) => Promise<unknown>;
-  runPreview: (mode: DiffMode, size: 1 | 2 | 4) => Promise<unknown>;
-  clearPreview: () => void;
-  apply: (mode: DiffMode, size: 1 | 2 | 4) => Promise<unknown>;
-  undo: () => Promise<unknown>;
+  reorder: (ids: number[]) => Promise<unknown>;
+  apply: (query: DiffQuery, size: 1 | 2 | 4) => Promise<unknown>;
   reset: () => Promise<unknown>;
   page: (from: number) => Promise<unknown>;
 } {
@@ -258,16 +254,15 @@ export function useMemoryDiff(transport: Transport): {
   const [captures, setCaptures] = useState<CaptureInfo[]>([]);
   const [mutes, setMutes] = useState<MuteBody[]>([]);
   const [result, setResult] = useState<DiffFilterBody | null>(null);
-  const [preview, setPreview] = useState<DiffPreviewBody | null>(null);
   const [from, setFrom] = useState(0);
   const action = useAction();
   const { run } = action;
 
   // a restart boots a different machine and the session dropped what it held of the old
-  // one; a state load keeps every capture and the narrowed candidate set, so what is
-  // read back here is the session's own answer either way rather than an assumption.
-  // A set no filter has narrowed is every address there is, which is not a result
-  // anyone asked for — `undoDepth` is what tells the two apart.
+  // one; a state load keeps every capture and the standing answer, so what is read back
+  // here is the session's own answer either way rather than an assumption. A set no
+  // query has been asked of is every address there is, which is not a result anyone
+  // asked for — `asked` is what tells the two apart.
   useEffect(() => {
     let ignore = false;
     Promise.all([
@@ -279,9 +274,8 @@ export function useMemoryDiff(transport: Transport): {
         if (!ignore) {
           setCaptures(c.captures);
           setMutes(m.mutes);
-          setResult(f.undoDepth > 0 ? f : null);
-          setPreview(null);
-          setFrom(f.undoDepth > 0 ? f.from : 0);
+          setResult(f.asked ? f : null);
+          setFrom(f.asked ? f.from : 0);
         }
       },
       () => undefined,
@@ -296,7 +290,6 @@ export function useMemoryDiff(transport: Transport): {
       run(async () => {
         const body = await transport.request('gba-kit/diffFilter', { ...args, from: at });
         setResult(body);
-        setPreview(null);
         setFrom(body.from);
         return body;
       }),
@@ -326,7 +319,6 @@ export function useMemoryDiff(transport: Transport): {
     captures,
     mutes,
     result,
-    preview,
     from,
     error: action.error,
     busy: action.busy,
@@ -374,11 +366,14 @@ export function useMemoryDiff(transport: Transport): {
         setMutes(list.mutes);
         show(body);
       }),
-    runPreview: (mode, size) =>
-      run(async () => setPreview(await transport.request('gba-kit/diffPreview', { mode, size }))),
-    clearPreview: () => setPreview(null),
-    apply: (mode, size) => filter({ mode, size }),
-    undo: () => filter({ undo: true }),
+    reorder: (ids) =>
+      run(async () => {
+        const list = await transport.request('gba-kit/reorderCaptures', { ids });
+        const body = await reread(0);
+        setCaptures(list.captures);
+        show(body);
+      }),
+    apply: (query, size) => filter({ query, size }),
     reset: () => filter({ reset: true }),
     page: (at) => filter({}, at),
   };

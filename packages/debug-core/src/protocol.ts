@@ -20,7 +20,7 @@ import type { EventBreakpointKind } from './breakpoints.js';
 import { DIFF_LIMITS, NOISE_FRAMES, rangeBytes } from './diff-limits.js';
 import type { IoRegisterValue } from './io.js';
 import type { Label } from './labels.js';
-import type { Capture, DiffGroup, DiffMode, DiffRow } from './memory-diff.js';
+import { type Capture, type DiffGroup, type DiffQuery, type DiffRow, RELATIONS, type Relation } from './memory-diff.js';
 import type { Mute, MuteSource } from './memory-noise.js';
 import type { SearchOptions } from './memory-search.js';
 import { type BackgroundInfo, type SpriteInfo, type TilemapSnapshot, screenToJson } from './ppu.js';
@@ -334,21 +334,18 @@ export interface GbaKitRequests {
     body: { mutes: MuteBody[] };
   };
 
-  /** What a filter would leave behind, and what each mute source would take, without committing it. */
-  'gba-kit/diffPreview': {
-    args: { mode: DiffMode; size: 1 | 2 | 4 };
-    /** `size` is what both counts are of: a preview at another width counts other addresses than the standing result does */
-    body: { kept: number; removed: number; hidden: MuteTally; size: 1 | 2 | 4 };
-  };
+  /** Put the captures in this order, which is the sequence the links are read along. */
+  'gba-kit/reorderCaptures': { args: { ids: number[] }; body: { captures: CaptureInfo[] } };
+
   /**
-   * Narrow the candidates and read a page of what is left. `undo` steps back one filter
-   * instead, `reset` puts every address back, and neither takes a `mode`.
+   * Answer a query and read a page of what it keeps. The query is asked of the whole
+   * address space, so it describes the run rather than narrowing what a previous one
+   * left; `reset` drops the standing answer, and takes no `query`.
    */
   'gba-kit/diffFilter': {
     args?: {
-      mode?: DiffMode;
+      query?: DiffQuery;
       size?: 1 | 2 | 4;
-      undo?: boolean;
       reset?: boolean;
       from?: number;
       limit?: number;
@@ -359,7 +356,8 @@ export interface GbaKitRequests {
       detail: number;
       /** too many candidates to group, rank or order: the rows are a page in address order */
       capped: boolean;
-      undoDepth: number;
+      /** whether a query has been answered at all, so a client can tell an untouched set from a result */
+      asked: boolean;
       size: 1 | 2 | 4;
       hidden: MuteTally;
       groups: DiffGroupBody[];
@@ -653,7 +651,7 @@ export function setMute(session: Session, args: NonNullable<GbaKitRequests['gba-
 }
 
 /**
- * A `gba-kit/diffFilter`, whole: narrow, undo or reset, then the counts, the groups
+ * A `gba-kit/diffFilter`, whole: answer the query or reset, then the counts, the groups
  * and one page of rows. Both hosts answer it from here, so neither can read an
  * argument differently or leave a field out of the body.
  */
@@ -663,15 +661,10 @@ export function diffFilterBody(
 ): GbaKitRequests['gba-kit/diffFilter']['body'] {
   const diff = session.memoryDiff;
   let result;
-  if (args.undo) {
-    result = diff.undo();
-    if (!result) {
-      throw new Error('there is no filter to undo');
-    }
-  } else if (args.reset) {
+  if (args.reset) {
     result = diff.reset();
-  } else if (args.mode !== undefined) {
-    result = diff.apply(diffMode(args.mode), diffSize(args.size));
+  } else if (args.query !== undefined) {
+    result = diff.apply(diffQuery(args.query), diffSize(args.size));
   } else {
     result = diff.result();
   }
@@ -737,6 +730,14 @@ export function captureId(raw: unknown): number {
   return raw as number;
 }
 
+/** The `ids` of a `gba-kit/reorderCaptures`: the order has to be captures, and all of them. */
+export function captureIds(raw: unknown): number[] {
+  if (!Array.isArray(raw)) {
+    throw new Error("'ids' must be an array of capture ids");
+  }
+  return raw.map((id) => captureId(id));
+}
+
 /** The `tag` of a `gba-kit/retagCapture`: what the tag filter matches on, so it has to be text. */
 export function captureTag(raw: unknown): string {
   if (typeof raw !== 'string') {
@@ -754,14 +755,14 @@ export function diffSize(raw: unknown): 1 | 2 | 4 {
 }
 
 /**
- * The `mode` of a memory-diff request, checked down to the capture ids it names: a
- * client sends this, and a filter over 288 KB of someone else's memory is not the
- * place to find out a field was a string.
+ * The `query` of a memory-diff request, checked down to the capture ids it names: a
+ * client sends this, and a filter over 288 KB of someone else's memory is not the place
+ * to find out a field was a string.
  */
-export function diffMode(raw: unknown): DiffMode {
-  const mode = raw as { kind?: unknown; value?: unknown; from?: unknown; to?: unknown; by?: unknown };
-  if (!mode || typeof mode !== 'object') {
-    throw new Error("'mode' must be an object");
+export function diffQuery(raw: unknown): DiffQuery {
+  const query = raw as { edges?: unknown; values?: unknown };
+  if (!query || typeof query !== 'object') {
+    throw new Error("'query' must be an object");
   }
   const number = (value: unknown, what: string): number => {
     if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -769,27 +770,31 @@ export function diffMode(raw: unknown): DiffMode {
     }
     return value;
   };
-  switch (mode.kind) {
-    case 'value':
-      return { kind: 'value', value: number(mode.value, 'value') };
-    case 'tags':
-      return { kind: 'tags' };
-    case 'changed':
-    case 'unchanged':
-      return { kind: mode.kind, from: number(mode.from, 'from'), to: number(mode.to, 'to') };
-    case 'increased':
-    case 'decreased':
-      return {
-        kind: mode.kind,
-        from: number(mode.from, 'from'),
-        to: number(mode.to, 'to'),
-        by: mode.by === undefined ? undefined : number(mode.by, 'by'),
-      };
-    default:
-      throw new Error(
-        `unknown filter '${String(mode.kind)}' (value, changed, unchanged, increased, decreased or tags)`,
-      );
-  }
+  const list = (value: unknown, what: string): unknown[] => {
+    if (value === undefined) {
+      return [];
+    }
+    if (!Array.isArray(value)) {
+      throw new Error(`'${what}' must be an array`);
+    }
+    return value;
+  };
+  const edges = list(query.edges, 'edges').map((raw) => {
+    const edge = raw as { from?: unknown; to?: unknown; relation?: unknown };
+    if (!RELATIONS.includes(edge?.relation as Relation)) {
+      throw new Error(`unknown relation '${String(edge?.relation)}' (${RELATIONS.join(', ')})`);
+    }
+    return {
+      from: number(edge.from, 'from'),
+      to: number(edge.to, 'to'),
+      relation: edge.relation as Relation,
+    };
+  });
+  const values = list(query.values, 'values').map((raw) => {
+    const value = raw as { capture?: unknown; value?: unknown };
+    return { capture: number(value?.capture, 'capture'), value: number(value?.value, 'value') };
+  });
+  return { edges, values };
 }
 
 /** Which page of the rows a memory-diff request asks for, within what one response carries. */

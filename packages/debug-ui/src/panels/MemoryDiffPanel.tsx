@@ -13,51 +13,58 @@
  */
 import type { DiffRowBody, MuteSource, MuteTally, SavedStateInfo } from '@gba-kit/debug-core/protocol';
 import { DIFF, labelName } from '@gba-kit/debug-core/protocol';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { Button, Empty, Icon, Menu, Screenshot, Select, parseNumber } from '../components.js';
 import { useDebugState, useMemoryDiff, useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
-import { CIRCLED, DiffGroups, tagClass } from './DiffRows.js';
+import { CIRCLED, DiffGroups } from './DiffRows.js';
 
-type Mode = 'value' | 'changed' | 'unchanged' | 'increased' | 'decreased' | 'tags';
+type Relation = 'same' | 'changed' | 'increased' | 'decreased' | 'any';
+
+const RELATIONS: Array<{ value: Relation; label: string; word: string }> = [
+  { value: 'changed', label: '≠ changed', word: 'changed' },
+  { value: 'same', label: '= same', word: 'stayed the same' },
+  { value: 'increased', label: '↑ went up', word: 'went up' },
+  { value: 'decreased', label: '↓ went down', word: 'went down' },
+  { value: 'any', label: '· anything', word: 'did anything' },
+];
+
+const RELATION_WORD = new Map(RELATIONS.map((r) => [r.value, r.word]));
+
+/** The default a new link takes: "what changed here" is the question a strip is built to ask. */
+const DEFAULT_RELATION: Relation = 'changed';
 
 /**
- * Why the filter as set up has no question to ask, or null. A tag filter compares
- * captures by tag, so on a strip nobody has tagged there is nothing to compare — which
- * belongs on screen while the captures and their tags are right there, rather than as an
- * error after the button.
+ * The query as one sentence, under the strip that draws it. A diagram is quick to read
+ * wrongly, and a query nobody can say out loud is one nobody can check.
  */
-export function blockedReason(mode: Mode, tags: string[]): string | null {
-  if (mode === 'value') {
-    return null;
+export function querySentence(
+  captures: Array<{ id: number; name: string }>,
+  links: Record<number, Relation>,
+  arcs: Record<number, number>,
+  values: Record<number, number>,
+): string {
+  const at = (id: number): string => {
+    const i = captures.findIndex((c) => c.id === id);
+    return captures[i]?.name || (CIRCLED[i] ?? `#${i + 1}`);
+  };
+  if (captures.length < 2) {
+    return 'Capture the same screen in two states, then say what the value did between them.';
   }
-  if (tags.length < 2) {
-    return mode === 'tags'
-      ? 'Tag pattern compares captures by tag: capture the same screen in two states.'
-      : 'This compares two captures: take another one.';
+  const parts: string[] = [];
+  for (let i = 0; i + 1 < captures.length; i++) {
+    const relation = links[captures[i]!.id] ?? DEFAULT_RELATION;
+    parts.push(`${at(captures[i]!.id)} → ${at(captures[i + 1]!.id)} ${RELATION_WORD.get(relation)}`);
   }
-  if (mode !== 'tags') {
-    return null;
+  for (const [id, sameAs] of Object.entries(arcs)) {
+    parts.push(`${at(Number(id))} is back to what ${at(sameAs)} held`);
   }
-  const named = new Set(tags.filter((t) => t !== ''));
-  if (named.size === 0) {
-    return `Tag pattern compares captures by tag, and none of these ${tags.length} is tagged. Tag the ones showing the same thing the same way — 'slot A', 'slot B', 'slot A'.`;
+  for (const [id, value] of Object.entries(values)) {
+    parts.push(`${at(Number(id))} held ${value}`);
   }
-  if (named.size === 1) {
-    return `Tag pattern needs two different tags; every tagged capture is '${[...named][0]}'.`;
-  }
-  return null;
+  return `Keep addresses where ${parts.join(', ')}.`;
 }
-
-const MODES: Array<{ value: Mode; label: string }> = [
-  { value: 'tags', label: 'Tag pattern' },
-  { value: 'changed', label: 'Changed' },
-  { value: 'unchanged', label: 'Unchanged' },
-  { value: 'increased', label: 'Increased' },
-  { value: 'decreased', label: 'Decreased' },
-  { value: 'value', label: 'Exact value' },
-];
 
 /**
  * What a mute source is called where its byte count is shown. Every source has a name
@@ -76,50 +83,74 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   const stopped = state?.state === 'stopped';
   const diff = useMemoryDiff(transport);
   const saves = useSaveStates(transport);
-  const [mode, setMode] = useState<Mode>('tags');
   const [size, setSize] = useState<1 | 2 | 4>(1);
-  const [value, setValue] = useState('');
-  const [pair, setPair] = useState<{ from: number; to: number }>({ from: 0, to: 0 });
+  /** what each link expects, keyed by the capture on its left */
+  const [links, setLinks] = useState<Record<number, Relation>>({});
+  /** the earlier capture a later one is a repeat of: the arc back over the strip */
+  const [arcs, setArcs] = useState<Record<number, number>>({});
+  /** an exact value a capture held, as typed */
+  const [typed, setTyped] = useState<Record<number, string>>({});
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [mutesOpen, setMutesOpen] = useState(false);
   const [frames, setFrames] = useState<number>(DIFF.noiseFramesDefault);
-  const [nextTag, setNextTag] = useState('');
+  const [nextName, setNextName] = useState('');
+  const [dragging, setDragging] = useState<number | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
   const captures = diff.captures;
   const tags = captures.map((c) => c.tag);
   const busy = diff.busy || saves.busy;
-  const pairwise = mode !== 'tags' && mode !== 'value';
-  // a capture that has been forgotten is no longer one of the two a filter can compare,
-  // so the pair falls back to the ends of the strip rather than naming a card that is gone
-  const held = (id: number): boolean => captures.some((c) => c.id === id);
-  const from = held(pair.from) ? pair.from : (captures[0]?.id ?? 0);
-  const to = held(pair.to) ? pair.to : (captures[captures.length - 1]?.id ?? 0);
 
-  const filter = (): { mode: Parameters<typeof diff.apply>[0]; size: 1 | 2 | 4 } | null => {
-    setProblem(null);
-    if (mode === 'value') {
-      const parsed = parseNumber(value);
-      if (parsed === null) {
-        setProblem('enter a number (decimal or 0x…)');
-        return null;
-      }
-      return { mode: { kind: 'value', value: parsed }, size };
+  const values: Record<number, number> = {};
+  for (const [id, text] of Object.entries(typed)) {
+    const parsed = parseNumber(text);
+    if (parsed !== null && captures.some((c) => c.id === Number(id))) {
+      values[Number(id)] = parsed;
     }
-    if (mode === 'tags') {
-      return { mode: { kind: 'tags' }, size };
-    }
-    return { mode: { kind: mode, from, to }, size };
-  };
+  }
 
-  const blocked = blockedReason(mode, tags);
+  /**
+   * The edges the strip draws. A link between neighbours and an arc back to a capture a
+   * later one repeats are the same kind of thing, so they are built into one list: the
+   * arc is what says "I went back", and without it a chain of `changed` keeps every byte
+   * that merely churns.
+   */
+  const edges = [
+    ...captures.slice(0, -1).map((c, i) => ({
+      from: c.id,
+      to: captures[i + 1]!.id,
+      relation: links[c.id] ?? DEFAULT_RELATION,
+    })),
+    ...Object.entries(arcs)
+      .filter(([id, sameAs]) => captures.some((c) => c.id === Number(id)) && captures.some((c) => c.id === sameAs))
+      .map(([id, sameAs]) => ({ from: sameAs, to: Number(id), relation: 'same' as Relation })),
+  ];
+  const query = { edges, values: Object.entries(values).map(([id, value]) => ({ capture: Number(id), value })) };
 
-  const act = (what: (args: { mode: Parameters<typeof diff.apply>[0]; size: 1 | 2 | 4 }) => void): void => {
-    const args = filter();
-    if (args) {
-      what(args);
+  // the query is a standing description, so the answer follows it: a link changed is a
+  // question changed, and a pass over both regions costs tens of milliseconds
+  const asked = JSON.stringify({ query, size });
+  const lastAsked = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastAsked.current === asked || busy) {
+      return;
     }
+    lastAsked.current = asked;
+    if (captures.length < 2) {
+      void diff.reset();
+      return;
+    }
+    void diff.apply(query, size);
+    // `asked` is the query and the size serialized, so the effect runs when what is being
+    // asked changes rather than when the objects carrying it are rebuilt
+  }, [asked, captures.length, busy, diff, query, size]);
+
+  const move = (id: number, before: number | null): void => {
+    const rest = captures.filter((c) => c.id !== id).map((c) => c.id);
+    const at = before === null ? rest.length : rest.indexOf(before);
+    rest.splice(at < 0 ? rest.length : at, 0, id);
+    void diff.reorder(rest);
   };
 
   const toggle = (key: string): void =>
@@ -177,7 +208,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
     <div className="gk-col gk-pad">
       <div className="gk-row">
         <Button
-          onClick={() => void diff.capture(nextTag.trim() || undefined)}
+          onClick={() => void diff.capture(nextName.trim() || undefined)}
           disabled={!stopped || busy}
           kind="primary"
           title="Keep RAM as it is now"
@@ -188,14 +219,14 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
         <input
           className="gk-input"
           style={{ width: 120 }}
-          placeholder="tag"
-          aria-label="Tag for the next capture"
-          value={nextTag}
-          onChange={(e) => setNextTag(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && stopped && !busy && void diff.capture(nextTag.trim() || undefined)}
-          // the tag stays after a capture: a run tags the same state twice, and typing it
-          // once is the difference between the fast path and three rounds of narrowing
-          title="What this capture shows, so the tag filter can compare it with the others"
+          placeholder="name"
+          aria-label="Name for the next capture"
+          value={nextName}
+          onChange={(e) => setNextName(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && stopped && !busy && void diff.capture(nextName.trim() || undefined)}
+          // the name stays after a capture: a run comes back to the same state, and the
+          // sentence under the strip reads in the user's words rather than in ①②③
+          title="What this capture shows, so the strip reads as the run it describes"
         />
         {adoptable.length > 0 && (
           <Menu
@@ -225,113 +256,67 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
       {(diff.error ?? problem) && <span className="gk-bad gk-small">{diff.error ?? problem}</span>}
 
       {captures.length === 0 ? (
-        <Empty>Capture RAM on one screen, change something, capture again — then compare them.</Empty>
+        <Empty>Capture RAM on one screen, change something, capture again — then say what happened between them.</Empty>
       ) : (
-        <div className="gk-cards">
+        <div className="gk-strip">
           {captures.map((capture, i) => (
-            <CaptureCard
-              key={capture.id}
-              at={i}
-              capture={capture}
-              tags={tags}
-              busy={busy}
-              onRetag={(tag) => void diff.retag(capture.id, tag)}
-              onForget={() => void diff.forget(capture.id)}
-            />
+            <div className="gk-strip-step" key={capture.id}>
+              <CaptureCard
+                at={i}
+                capture={capture}
+                earlier={captures.slice(0, i)}
+                sameAs={arcs[capture.id]}
+                value={typed[capture.id] ?? ''}
+                busy={busy}
+                dragging={dragging === capture.id}
+                onName={(name) => void diff.retag(capture.id, name)}
+                onSameAs={(id) =>
+                  setArcs((was) => {
+                    const next = { ...was };
+                    if (id === undefined) {
+                      delete next[capture.id];
+                    } else {
+                      next[capture.id] = id;
+                    }
+                    return next;
+                  })
+                }
+                onValue={(text) => setTyped((was) => ({ ...was, [capture.id]: text }))}
+                onForget={() => void diff.forget(capture.id)}
+                onDragStart={() => setDragging(capture.id)}
+                onDragEnd={() => setDragging(null)}
+                onDrop={() => dragging !== null && dragging !== capture.id && move(dragging, capture.id)}
+              />
+              {i + 1 < captures.length && (
+                <Select
+                  className="gk-link"
+                  value={links[capture.id] ?? DEFAULT_RELATION}
+                  options={RELATIONS}
+                  onChange={(relation) => setLinks((was) => ({ ...was, [capture.id]: relation }))}
+                  title={`What the value did between ${CIRCLED[i] ?? i + 1} and ${CIRCLED[i + 1] ?? i + 2}`}
+                />
+              )}
+            </div>
           ))}
         </div>
       )}
 
       <div className="gk-row">
         <Select
-          value={mode}
-          options={MODES}
-          onChange={(next) => {
-            // a preview answers for the filter it was taken of; the moment that filter
-            // changes it describes something nobody is about to apply
-            diff.clearPreview();
-            setMode(next);
-          }}
-          title="What to ask of the captures"
-        />
-        <Select
           value={size}
           options={[1, 2, 4].map((n) => ({ value: n as 1 | 2 | 4, label: `${n * 8}-bit` }))}
-          onChange={(next) => {
-            diff.clearPreview();
-            setSize(next);
-          }}
+          onChange={setSize}
+          title="How wide a value to read at each address"
         />
-        {mode === 'value' && (
-          <input
-            className="gk-input"
-            style={{ width: 100 }}
-            placeholder="value"
-            value={value}
-            onChange={(e) => {
-              diff.clearPreview();
-              setValue(e.target.value);
-            }}
-            onKeyDown={(e) => e.key === 'Enter' && act((args) => void diff.apply(args.mode, args.size))}
-          />
-        )}
-        {pairwise && captures.length > 0 && (
-          <>
-            <Select
-              value={from}
-              options={captures.map((c, i) => ({ value: c.id, label: `${CIRCLED[i] ?? i + 1} ${c.tag || c.frame}` }))}
-              onChange={(id) => {
-                diff.clearPreview();
-                setPair({ from: id, to });
-              }}
-              title="Compare from"
-            />
-            <Select
-              value={to}
-              options={captures.map((c, i) => ({ value: c.id, label: `${CIRCLED[i] ?? i + 1} ${c.tag || c.frame}` }))}
-              onChange={(id) => {
-                diff.clearPreview();
-                setPair({ from, to: id });
-              }}
-              title="Compare to"
-            />
-          </>
-        )}
-        <Button
-          onClick={() => act((args) => void diff.runPreview(args.mode, args.size))}
-          disabled={busy || blocked !== null}
-          title="What this would remove, without removing it"
-        >
-          Preview
-        </Button>
-        <Button
-          onClick={() => act((args) => void diff.apply(args.mode, args.size))}
-          disabled={busy || blocked !== null}
-          kind="primary"
-        >
-          Apply
-        </Button>
-        <Button
-          onClick={() => void diff.undo()}
-          disabled={busy || !result || result.undoDepth === 0}
-          title="Put the previous candidates back"
-        >
-          Undo{result && result.undoDepth > 0 ? ` (${result.undoDepth})` : ''}
-        </Button>
-        <Button onClick={() => void diff.reset()} disabled={busy || !result}>
-          Reset
-        </Button>
-      </div>
-
-      {blocked && <span className="gk-hint">{blocked}</span>}
-
-      {diff.preview && (
         <span className="gk-hint">
-          would keep {diff.preview.kept} of {diff.preview.kept + diff.preview.removed} {diff.preview.size * 8}-bit
-          addresses
-          {hiddenText(diff.preview.hidden)}
+          {querySentence(
+            captures.map((c, i) => ({ id: c.id, name: c.tag || (CIRCLED[i] ?? `#${i + 1}`) })),
+            links,
+            arcs,
+            values,
+          )}
         </span>
-      )}
+      </div>
 
       <div className="gk-drawer">
         <div className="gk-row">
@@ -488,21 +473,52 @@ function hiddenText(hidden: MuteTally): string {
 function CaptureCard({
   at,
   capture,
-  tags,
+  earlier,
+  sameAs,
+  value,
   busy,
-  onRetag,
+  dragging,
+  onName,
+  onSameAs,
+  onValue,
   onForget,
+  onDragStart,
+  onDragEnd,
+  onDrop,
 }: {
   at: number;
   capture: { id: number; tag: string; frame: number; from: string; thumbnail: string; width: number; height: number };
-  tags: string[];
+  /** the captures this one could be a repeat of: an arc only ever points back */
+  earlier: Array<{ id: number; tag: string }>;
+  sameAs?: number;
+  value: string;
   busy: boolean;
-  onRetag(tag: string): void;
+  dragging: boolean;
+  onName(name: string): void;
+  onSameAs(id: number | undefined): void;
+  onValue(text: string): void;
   onForget(): void;
+  onDragStart(): void;
+  onDragEnd(): void;
+  onDrop(): void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [naming, setNaming] = useState(false);
+  const label = (id: number): string => {
+    const i = earlier.findIndex((c) => c.id === id);
+    return earlier[i]?.tag || (CIRCLED[i] ?? `#${i + 1}`);
+  };
   return (
-    <div className={`gk-card gk-diff-card ${capture.tag ? tagClass(tags, capture.tag) : ''}`}>
+    <div
+      className={`gk-card gk-diff-card${dragging ? ' gk-dragging' : ''}`}
+      draggable={!busy}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault();
+        onDrop();
+      }}
+    >
       <Screenshot
         rgba={capture.thumbnail}
         width={capture.width}
@@ -516,18 +532,18 @@ function CaptureCard({
           {capture.from === 'state' ? ' · from a state' : ''}
         </span>
       </div>
-      {editing ? (
+      {naming ? (
         <input
           className="gk-input gk-card-name gk-diff-tag"
           autoFocus
           defaultValue={capture.tag}
-          placeholder="tag"
-          aria-label={`Tag capture ${at + 1}`}
+          placeholder="name"
+          aria-label={`Name capture ${at + 1}`}
           onBlur={(e) => {
-            setEditing(false);
+            setNaming(false);
             const to = e.currentTarget.value.trim();
             if (to !== capture.tag) {
-              onRetag(to);
+              onName(to);
             }
           }}
           onKeyDown={(e) => {
@@ -540,19 +556,39 @@ function CaptureCard({
           }}
         />
       ) : (
-        // the tag is the control, not a caption beside one: an untagged capture reads as
-        // the thing to fill in, since the filter this panel opens on cannot run without it
+        // a name is a caption and nothing more: what the filter reads is the links and
+        // the arcs, so an unnamed capture costs nothing but a harder sentence to read
         <button
           type="button"
           className={`gk-card-name gk-diff-tag${capture.tag ? '' : ' gk-muted'}`}
-          onClick={() => setEditing(true)}
+          onClick={() => setNaming(true)}
           disabled={busy}
-          title={capture.tag ? `Tagged '${capture.tag}'` : 'Say what this capture shows'}
-          aria-label={capture.tag ? `Tag capture ${at + 1}, now '${capture.tag}'` : `Tag capture ${at + 1}`}
+          title={capture.tag ? `Called '${capture.tag}'` : 'Name this capture'}
+          aria-label={capture.tag ? `Name capture ${at + 1}, now '${capture.tag}'` : `Name capture ${at + 1}`}
         >
-          {capture.tag || '+ tag'}
+          {capture.tag || '+ name'}
         </button>
       )}
+      {earlier.length > 0 && (
+        <Select
+          className="gk-small"
+          value={sameAs ?? 0}
+          options={[
+            { value: 0, label: 'a new state' },
+            ...earlier.map((c) => ({ value: c.id, label: `same as ${label(c.id)}` })),
+          ]}
+          onChange={(id) => onSameAs(id === 0 ? undefined : id)}
+          title="Whether this capture is a state an earlier one already holds"
+        />
+      )}
+      <input
+        className="gk-input gk-small"
+        placeholder="any value"
+        aria-label={`The value capture ${at + 1} held`}
+        value={value}
+        onChange={(e) => onValue(e.target.value)}
+        title="A value this capture held, when the screen puts a number on it"
+      />
       <div className="gk-row gk-card-actions">
         <Button kind="icon danger" onClick={onForget} disabled={busy} title="Forget" label={`Forget capture ${at + 1}`}>
           <Icon name="trash" />

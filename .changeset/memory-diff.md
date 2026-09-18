@@ -8,15 +8,27 @@
 
 Find the variable behind a feature by capturing RAM and comparing the captures
 
-The `Memory search` tab becomes `Memory diff`, at the same panel id. Searching for a
-value is still one of its modes; the rest of it asks a question an exact value cannot.
-Take a capture with the menu on item A, move to item B, capture, move back, capture —
-tag them `A B A` — and ask for the addresses that are equal wherever the tags are equal
-and different wherever they differ. Everything that merely moves fails that on the first
-pair sharing a tag. On Klonoa's save-file screen, with a second of play between the
-captures, it takes 294,912 addresses to 3 in 29 ms, and the cursor is the top-ranked
-row — writing 0, 1 and 2 to it moves the highlight between the three save slots, and a
-data breakpoint on it names `FileSelectScreenUpdateCursor`.
+The `Memory search` tab becomes `Memory diff`, at the same panel id. Take a capture with
+the menu on item A, move to item B, capture, move back, capture — then say on the strip
+what the value did between them: `changed`, `same`, `went up`, `went down`, or nothing at
+all. The captures are the query. A capture can also be marked as a repeat of an earlier
+one, drawn as an arc back over the strip, and that arc is what does the work: between
+neighbours, "changed, then changed again" is what every churning byte does, and on
+Klonoa's save-file screen with no muting it keeps 3,117 addresses where the arc back to
+the first capture keeps 90.
+
+With the noise baseline as well, the same three captures take 294,912 addresses to 4 in
+29 ms, and the cursor leads them — writing 0, 1 and 2 to it moves the highlight between
+the three save slots, and a data breakpoint on it names `FileSelectScreenUpdateCursor`.
+
+A query is a standing description of the run, not a step in a narrowing: it is answered
+against the whole address space every time, so loosening a link brings addresses back and
+the answer follows the strip as it is edited. That is why there is no `Apply`, no
+`Preview` and no `Undo` — a pass over both regions costs tens of milliseconds, which is
+what makes recomputing affordable. A value can also be held against the capture that saw
+it, which is the exact-value search, now sayable for one capture of several. Links that
+cannot all hold — `①` up to `②`, `②` up to `③`, and `③` the same state as `①` — are
+refused by name rather than answered with no rows.
 
 Captures live in the session and nowhere else: they are never written under `.gba-kit/`,
 and the 288 KB of RAM each holds never crosses to a client, which gets the counts, the
@@ -66,8 +78,8 @@ does not; it is an optional capability of the transport, the way `openText` is, 
 VS Code host offers it and a host with no watch pane shows no such action.
 
 `gba-kit/searchMemory` and `gba-kit/filterMemory` are unchanged and still answered; the
-new engine's exact-value mode is the same implementation reached another way. The new
+new engine reads values out of the captures rather than out of live memory. The new
 requests are `gba-kit/captures`, `capture`, `retagCapture`, `forgetCapture`,
-`discoverNoise`, `mutes`, `setMute`, `diffPreview`, `diffFilter` and `breakOnWrite`.
+`discoverNoise`, `mutes`, `setMute`, `reorderCaptures`, `diffFilter` and `breakOnWrite`.
 `gba-kit/breakOnWrite` refuses an address in ROM, the BIOS or nothing at all, since a
 watch there verifies and then never fires, which reads as proof that nobody writes it.

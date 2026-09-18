@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { EditableName } from '../components.js';
 import { DiffGroups } from '../panels/DiffRows.js';
-import { MemoryDiffPanel, blockedReason, nameFor, watchExpression } from '../panels/MemoryDiffPanel.js';
+import { MemoryDiffPanel, nameFor, querySentence, watchExpression } from '../panels/MemoryDiffPanel.js';
 import { RecordingPanel, RecordingsView } from '../panels/RecordingPanel.js';
 import { ScreenPanel } from '../panels/ScreenPanel.js';
 import { SaveStatesView } from '../panels/save-states.js';
@@ -267,19 +267,21 @@ describe('memory diff panel', () => {
     expect(running.match(/<button[^>]*title="Keep RAM as it is now"[^>]*>/)?.[0]).toContain('disabled');
   });
 
-  it('says why a tag filter cannot run while the tags are still a click away', () => {
-    // the panel opens on the tag filter, so the untagged strip a first run produces is the
-    // state it has to explain rather than refuse after the button
-    expect(blockedReason('tags', ['', '', ''])).toContain('none of these 3 is tagged');
-    expect(blockedReason('tags', ['slot A', 'slot A'])).toContain("every tagged capture is 'slot A'");
-    expect(blockedReason('tags', ['slot A', 'slot B', 'slot A'])).toBeNull();
-    expect(blockedReason('tags', ['slot A'])).toContain('two states');
-    // an untagged capture takes no part in the question, so tagging two of three is enough
-    expect(blockedReason('tags', ['slot A', 'slot B', ''])).toBeNull();
-    // the other filters compare two captures and ask nothing of their tags
-    expect(blockedReason('changed', ['', ''])).toBeNull();
-    expect(blockedReason('changed', [''])).toContain('take another one');
-    expect(blockedReason('value', [])).toBeNull();
+  it('says the query in words, so a strip of arrows can be checked by reading it', () => {
+    const strip = [
+      { id: 1, name: 'slot A' },
+      { id: 2, name: 'slot B' },
+      { id: 3, name: 'slot A again' },
+    ];
+    const sentence = querySentence(strip, { 1: 'changed', 2: 'changed' }, { 3: 1 }, { 1: 0 });
+    expect(sentence).toContain('slot A → slot B changed');
+    expect(sentence).toContain('slot B → slot A again changed');
+    expect(sentence).toContain('slot A again is back to what slot A held');
+    expect(sentence).toContain('slot A held 0');
+    // a link nobody set reads as the default the strip draws, not as a gap
+    expect(querySentence(strip, {}, {}, {})).toContain('slot A → slot B changed');
+    expect(querySentence(strip, { 1: 'any' }, {}, {})).toContain('slot A → slot B did anything');
+    expect(querySentence([{ id: 1, name: 'one' }], {}, {}, {})).toContain('two states');
   });
 
   it('gives each tier its own treatment, so an inferred containment cannot read as a name', () => {

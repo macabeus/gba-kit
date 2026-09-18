@@ -206,13 +206,13 @@ describe('session transport', () => {
     expect(narrowed.addresses.length).toBeLessThanOrEqual(addresses.length);
   });
 
-  it('captures, tags, filters, previews, undoes and forgets, without the RAM ever crossing', async () => {
+  it('captures, names, answers a query and forgets, without the RAM ever crossing', async () => {
     const { session } = await boot();
     const transport = createSessionTransport(session);
     const gKeys = session.evaluate('&g_keys').address!;
 
-    // `g_keys` follows the buttons, so holding A, then B, then A again gives it the
-    // tag pattern and everything that merely counts frames does not
+    // `g_keys` follows the buttons, so holding A, then B, then A again is a value that
+    // changed and came back, which everything that merely counts frames did not do
     for (const [mask, tag] of [
       [1, 'A'],
       [2, 'B'],
@@ -229,10 +229,23 @@ describe('session transport', () => {
     expect(listed.captures[0]).toMatchObject({ from: 'machine', width: 120, height: 80 });
     expect(Object.keys(listed.captures[0]!)).not.toContain('ram');
 
-    const mode = { kind: 'tags' } as const;
-    const preview = await transport.request('gba-kit/diffPreview', { mode, size: 2 });
-    const applied = await transport.request('gba-kit/diffFilter', { mode, size: 2 });
-    expect(applied.total).toBe(preview.kept);
+    const [a, b, c] = listed.captures.map((capture) => capture.id) as [number, number, number];
+    // the arc back to ① is the constraint that does the work: the two links alone keep
+    // everything that merely churns, since "changed, then changed again" is what churn is
+    const query = {
+      edges: [
+        { from: a, to: b, relation: 'changed' },
+        { from: b, to: c, relation: 'changed' },
+        { from: a, to: c, relation: 'same' },
+      ],
+    };
+    const chained = await transport.request('gba-kit/diffFilter', {
+      query: { edges: query.edges.slice(0, 2) },
+      size: 2,
+    });
+    const applied = await transport.request('gba-kit/diffFilter', { query, size: 2 });
+    expect(applied.total).toBeLessThan(chained.total);
+    expect(applied.asked).toBe(true);
     expect(applied.size).toBe(2);
     expect(applied.rows.map((r) => r.address)).toContain(gKeys);
     const found = applied.rows.find((r) => r.address === gKeys)!;
@@ -241,10 +254,31 @@ describe('session transport', () => {
     expect(found.path).toBe('g_keys');
     expect(found.reasons.length).toBeGreaterThan(0);
 
-    const undone = await transport.request('gba-kit/diffFilter', { undo: true });
-    expect(undone.total).toBeGreaterThan(applied.total);
-    expect(undone.undoDepth).toBe(0);
-    await expect(transport.request('gba-kit/diffFilter', { undo: true })).rejects.toThrow(/no filter to undo/);
+    // a query is a standing description, not a step: loosening a link brings rows back
+    const loosened = await transport.request('gba-kit/diffFilter', {
+      query: { edges: [{ from: a, to: b, relation: 'changed' }] },
+      size: 2,
+    });
+    expect(loosened.total).toBeGreaterThan(applied.total);
+
+    // nothing can be both larger than itself and equal to itself
+    await expect(
+      transport.request('gba-kit/diffFilter', {
+        query: {
+          edges: [
+            { from: a, to: b, relation: 'increased' },
+            { from: b, to: c, relation: 'increased' },
+            { from: a, to: c, relation: 'same' },
+          ],
+        },
+        size: 2,
+      }),
+    ).rejects.toThrow(/rises and falls back to itself/);
+
+    const reordered = await transport.request('gba-kit/reorderCaptures', { ids: [c, a, b] });
+    expect(reordered.captures.map((capture) => capture.id)).toEqual([c, a, b]);
+    await expect(transport.request('gba-kit/reorderCaptures', { ids: [c, a] })).rejects.toThrow(/every capture/);
+    await transport.request('gba-kit/reorderCaptures', { ids: [a, b, c] });
 
     const retagged = await transport.request('gba-kit/retagCapture', { id: listed.captures[1]!.id, tag: 'C' });
     expect(retagged.captures.map((c) => c.tag)).toEqual(['A', 'C', 'A']);
@@ -252,14 +286,14 @@ describe('session transport', () => {
     // a capture a standing filter compared, forgotten — the panel re-reads the result
     // straight after, and a matrix of three columns over a strip of two cards is read wrong
     await transport.request('gba-kit/diffFilter', {
-      mode: { kind: 'changed', from: listed.captures[0]!.id, to: listed.captures[1]!.id },
+      query: { edges: [{ from: a, to: b, relation: 'changed' }] },
       size: 2,
     });
     const left = await transport.request('gba-kit/forgetCapture', { id: listed.captures[0]!.id });
     expect(left.captures).toHaveLength(2);
     const reread = await transport.request('gba-kit/diffFilter', {});
     expect(reread.rows[0]!.values).toHaveLength(2);
-    expect(reread.undoDepth).toBeGreaterThan(0);
+    expect(reread.asked).toBe(true);
 
     // both hosts read a capture id the same way, so neither answers one with a TypeError
     await expect(transport.request('gba-kit/retagCapture', { id: 0, tag: 'x' })).rejects.toThrow(
@@ -272,27 +306,42 @@ describe('session transport', () => {
     await expect(transport.request('gba-kit/forgetCapture', { id: 99 })).rejects.toThrow(/no capture 99/);
   });
 
-  it('the exact-value filter answers what searchMemory answers, narrowed by what came before', async () => {
+  it('holds a value against the capture that saw it, and takes several at once', async () => {
     const { session } = await boot();
     const transport = createSessionTransport(session);
-    await transport.request('gba-kit/buttons', { mask: 6 });
-    await transport.request('gba-kit/stepFrame');
-    await transport.request('gba-kit/stepFrame');
     const gKeys = session.evaluate('&g_keys').address!;
 
-    const searched = await transport.request('gba-kit/searchMemory', { value: 6, size: 2 });
-    const filtered = await transport.request('gba-kit/diffFilter', { mode: { kind: 'value', value: 6 }, size: 2 });
-    expect(filtered.total).toBe(searched.addresses.length);
-    expect(filtered.rows.map((r) => r.address)).toContain(gKeys);
+    for (const mask of [6, 1]) {
+      await transport.request('gba-kit/buttons', { mask });
+      await transport.request('gba-kit/stepFrame');
+      await transport.request('gba-kit/stepFrame');
+      await transport.request('gba-kit/capture', {});
+    }
+    const [first, second] = (await transport.request('gba-kit/captures')).captures.map((c) => c.id) as [number, number];
 
-    // a second value filter runs over the candidates already kept rather than over the
-    // whole of RAM, which is what makes an exact-value search iterative
-    await transport.request('gba-kit/buttons', { mask: 1 });
-    await transport.request('gba-kit/stepFrame');
-    await transport.request('gba-kit/stepFrame');
-    const narrowed = await transport.request('gba-kit/diffFilter', { mode: { kind: 'value', value: 1 }, size: 2 });
-    expect(narrowed.total).toBeLessThanOrEqual(filtered.total);
-    expect(narrowed.rows.map((r) => r.address)).toContain(gKeys);
+    // a value belongs to the capture that saw it, so two of them name the run rather than
+    // a state of the machine that has since moved on
+    const one = await transport.request('gba-kit/diffFilter', {
+      query: { values: [{ capture: first, value: 6 }] },
+      size: 2,
+    });
+    expect(one.rows.map((r) => r.address)).toContain(gKeys);
+
+    const both = await transport.request('gba-kit/diffFilter', {
+      query: {
+        values: [
+          { capture: first, value: 6 },
+          { capture: second, value: 1 },
+        ],
+      },
+      size: 2,
+    });
+    expect(both.total).toBeLessThanOrEqual(one.total);
+    expect(both.rows.map((r) => r.address)).toContain(gKeys);
+
+    await expect(
+      transport.request('gba-kit/diffFilter', { query: { values: [{ capture: 999, value: 1 }] }, size: 2 }),
+    ).rejects.toThrow(/no capture 999/);
   });
 
   it('adopts a save state as a capture, and mutes ranges it found by running', async () => {
