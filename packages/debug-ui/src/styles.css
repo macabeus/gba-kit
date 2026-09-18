@@ -568,35 +568,46 @@
 }
 /* the graph: a canvas of captures to place, and arrows to draw between any two */
 .gk-graph {
-  height: 280px;
+  height: 300px;
   border: 1px solid var(--gk-border);
   border-radius: 3px;
 }
 .gk-graph-node {
-  padding: 3px;
+  width: 150px;
+  padding: 4px;
   border: 1px solid var(--gk-border);
   border-radius: 3px;
   background: var(--gk-bg);
 }
 .gk-graph-node canvas {
   display: block;
-  width: 120px;
+  width: 100%;
   height: auto;
   image-rendering: pixelated;
 }
-.gk-graph-name {
-  padding-top: 2px;
-  font-size: 11px;
-  text-align: center;
+.gk-graph-row {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  padding-top: 3px;
 }
-.gk-graph-edge-label {
+.gk-graph-row .gk-input {
+  min-width: 0;
+  flex: 1;
+}
+/* an arrow's label sits above the nodes, since a backward arrow passes behind one */
+.gk-graph-label {
   position: absolute;
+  z-index: 10;
   display: flex;
   gap: 2px;
   align-items: center;
+  padding: 1px;
+  border-radius: 3px;
+  background: var(--gk-bg);
   pointer-events: all;
 }
-.gk-graph-edge-drop {
+.gk-graph-drop {
   border: none;
   background: none;
   color: var(--gk-muted);
@@ -604,46 +615,10 @@
   font-size: 12px;
   line-height: 1;
 }
-.gk-graph-edge-drop:hover {
+.gk-graph-drop:hover {
   color: var(--gk-bad);
 }
 
-/* the strip is the query: cards in the order they were taken, with the link between each pair */
-.gk-strip {
-  display: flex;
-  align-items: flex-start;
-  gap: 4px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-}
-.gk-strip-step {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.gk-link {
-  flex: none;
-}
-.gk-dragging {
-  opacity: 0.4;
-}
-
-/* a name is a field to fill in, so an unnamed capture looks like one rather than a caption */
-button.gk-diff-tag {
-  width: 100%;
-  padding: 1px 4px;
-  border: 1px dashed var(--gk-border);
-  border-radius: 2px;
-  background: none;
-  color: inherit;
-  font: inherit;
-  font-size: 11px;
-  text-align: left;
-  cursor: pointer;
-}
-button.gk-diff-tag:hover:not(:disabled) {
-  border-color: var(--gk-accent);
-}
 .gk-matrix-cell {
   font-variant-numeric: tabular-nums;
 }

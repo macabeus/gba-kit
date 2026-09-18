@@ -15,21 +15,11 @@ import type { DiffRowBody, MuteSource, MuteTally, SavedStateInfo } from '@gba-ki
 import { DIFF, labelName } from '@gba-kit/debug-core/protocol';
 import { useEffect, useRef, useState } from 'react';
 
-import { Button, Empty, Icon, Menu, Screenshot, Select, parseNumber } from '../components.js';
+import { Button, Empty, Icon, Menu, Select, parseNumber } from '../components.js';
 import { useDebugState, useMemoryDiff, useSaveStates } from '../hooks.js';
 import type { Transport } from '../transport.js';
-import { DiffGraph, type GraphEdge, type Relation } from './DiffGraph.js';
+import { DiffGraph, type GraphEdge, RELATION_WORD } from './DiffGraph.js';
 import { CIRCLED, DiffGroups } from './DiffRows.js';
-
-const RELATIONS: Array<{ value: Relation; label: string; word: string }> = [
-  { value: 'changed', label: '≠ changed', word: 'changed' },
-  { value: 'same', label: '= same', word: 'stayed the same' },
-  { value: 'increased', label: '↑ went up', word: 'went up' },
-  { value: 'decreased', label: '↓ went down', word: 'went down' },
-  { value: 'any', label: '· anything', word: 'did anything' },
-];
-
-const RELATION_WORD = new Map(RELATIONS.map((r) => [r.value, r.word]));
 
 /**
  * The query as one sentence, under whichever picture is drawing it. A graph is quick to
@@ -85,13 +75,11 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   const [edges, setEdges] = useState<GraphEdge[]>([]);
   /** an exact value a capture held, as typed */
   const [typed, setTyped] = useState<Record<number, string>>({});
-  const [view, setView] = useState<'strip' | 'graph'>('graph');
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [mutesOpen, setMutesOpen] = useState(false);
   const [frames, setFrames] = useState<number>(DIFF.noiseFramesDefault);
   const [nextName, setNextName] = useState('');
-  const [dragging, setDragging] = useState<number | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
   const captures = diff.captures;
@@ -140,38 +128,6 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
     // `asked` is the query and the size serialized, so the effect runs when what is being
     // asked changes rather than when the objects carrying it are rebuilt
   }, [asked, captures.length, busy, diff, query, size]);
-
-  /** The arrow between two captures, as the strip reads it: one link, either way round. */
-  const between = (a: number, b: number): GraphEdge | undefined =>
-    edges.find((e) => (e.from === a && e.to === b) || (e.from === b && e.to === a));
-
-  const setLink = (a: number, b: number, relation: Relation): void =>
-    setEdges((was) => {
-      const rest = was.filter((e) => !((e.from === a && e.to === b) || (e.from === b && e.to === a)));
-      return [...rest, { from: a, to: b, relation }];
-    });
-
-  /** The capture an arc says this one repeats: a `same` arrow from a capture that is not its neighbour. */
-  const arcInto = (id: number, at: number): number | undefined =>
-    edges.find(
-      (e) => e.to === id && e.relation === 'same' && e.from !== captures[at - 1]?.id && e.from !== captures[at + 1]?.id,
-    )?.from;
-
-  const setArc = (id: number, at: number, from: number | undefined): void =>
-    setEdges((was) => {
-      const rest = was.filter(
-        (e) =>
-          !(e.to === id && e.relation === 'same' && e.from !== captures[at - 1]?.id && e.from !== captures[at + 1]?.id),
-      );
-      return from === undefined ? rest : [...rest, { from, to: id, relation: 'same' }];
-    });
-
-  const move = (id: number, before: number | null): void => {
-    const rest = captures.filter((c) => c.id !== id).map((c) => c.id);
-    const at = before === null ? rest.length : rest.indexOf(before);
-    rest.splice(at < 0 ? rest.length : at, 0, id);
-    void diff.reorder(rest);
-  };
 
   const toggle = (key: string): void =>
     setOpen((was) => {
@@ -277,56 +233,21 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
 
       {captures.length === 0 ? (
         <Empty>Capture RAM on one screen, change something, capture again — then say what happened between them.</Empty>
-      ) : view === 'graph' ? (
-        <DiffGraph captures={captures} edges={edges} onEdges={setEdges} />
       ) : (
-        <div className="gk-strip">
-          {captures.map((capture, i) => {
-            const next = captures[i + 1];
-            const link = next ? between(capture.id, next.id) : undefined;
-            return (
-              <div className="gk-strip-step" key={capture.id}>
-                <CaptureCard
-                  at={i}
-                  capture={capture}
-                  earlier={captures.slice(0, i)}
-                  sameAs={arcInto(capture.id, i)}
-                  value={typed[capture.id] ?? ''}
-                  busy={busy}
-                  dragging={dragging === capture.id}
-                  onName={(name) => void diff.retag(capture.id, name)}
-                  onSameAs={(id) => setArc(capture.id, i, id)}
-                  onValue={(text) => setTyped((was) => ({ ...was, [capture.id]: text }))}
-                  onForget={() => void diff.forget(capture.id)}
-                  onDragStart={() => setDragging(capture.id)}
-                  onDragEnd={() => setDragging(null)}
-                  onDrop={() => dragging !== null && dragging !== capture.id && move(dragging, capture.id)}
-                />
-                {next && (
-                  <Select
-                    className="gk-link"
-                    value={link?.relation ?? 'any'}
-                    options={RELATIONS}
-                    onChange={(relation) => setLink(capture.id, next.id, relation)}
-                    title={`What the value did between ${CIRCLED[i] ?? i + 1} and ${CIRCLED[i + 1] ?? i + 2}`}
-                  />
-                )}
-              </div>
-            );
-          })}
-        </div>
+        <DiffGraph
+          captures={captures}
+          edges={edges}
+          values={typed}
+          busy={busy}
+          onEdges={setEdges}
+          onName={(id, name) => void diff.retag(id, name)}
+          onValue={(id, text) => setTyped((was) => ({ ...was, [id]: text }))}
+          onForget={(id) => void diff.forget(id)}
+          onOrder={(ids) => void diff.reorder(ids)}
+        />
       )}
 
       <div className="gk-row">
-        <Select
-          value={view}
-          options={[
-            { value: 'graph' as const, label: 'Graph' },
-            { value: 'strip' as const, label: 'Strip' },
-          ]}
-          onChange={setView}
-          title="Draw the query as a graph you place, or as the run left to right"
-        />
         <Select
           value={size}
           options={[1, 2, 4].map((n) => ({ value: n as 1 | 2 | 4, label: `${n * 8}-bit` }))}
@@ -486,132 +407,4 @@ function hiddenText(hidden: MuteTally): string {
     .filter((source) => (hidden[source] ?? 0) > 0)
     .map((source) => `${hidden[source]!} hidden by ${SOURCES[source]}`);
   return parts.length === 0 ? '' : `; ${parts.join(', ')}`;
-}
-
-function CaptureCard({
-  at,
-  capture,
-  earlier,
-  sameAs,
-  value,
-  busy,
-  dragging,
-  onName,
-  onSameAs,
-  onValue,
-  onForget,
-  onDragStart,
-  onDragEnd,
-  onDrop,
-}: {
-  at: number;
-  capture: { id: number; tag: string; frame: number; from: string; thumbnail: string; width: number; height: number };
-  /** the captures this one could be a repeat of: an arc only ever points back */
-  earlier: Array<{ id: number; tag: string }>;
-  sameAs?: number;
-  value: string;
-  busy: boolean;
-  dragging: boolean;
-  onName(name: string): void;
-  onSameAs(id: number | undefined): void;
-  onValue(text: string): void;
-  onForget(): void;
-  onDragStart(): void;
-  onDragEnd(): void;
-  onDrop(): void;
-}) {
-  const [naming, setNaming] = useState(false);
-  const label = (id: number): string => {
-    const i = earlier.findIndex((c) => c.id === id);
-    return earlier[i]?.tag || (CIRCLED[i] ?? `#${i + 1}`);
-  };
-  return (
-    <div
-      className={`gk-card gk-diff-card${dragging ? ' gk-dragging' : ''}`}
-      draggable={!busy}
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      onDragOver={(e) => e.preventDefault()}
-      onDrop={(e) => {
-        e.preventDefault();
-        onDrop();
-      }}
-    >
-      <Screenshot
-        rgba={capture.thumbnail}
-        width={capture.width}
-        height={capture.height}
-        label={`the screen at frame ${capture.frame}`}
-      />
-      <div className="gk-row">
-        <span className="gk-mono">{CIRCLED[at] ?? `#${at + 1}`}</span>
-        <span className="gk-muted gk-small">
-          frame {capture.frame}
-          {capture.from === 'state' ? ' · from a state' : ''}
-        </span>
-      </div>
-      {naming ? (
-        <input
-          className="gk-input gk-card-name gk-diff-tag"
-          autoFocus
-          defaultValue={capture.tag}
-          placeholder="name"
-          aria-label={`Name capture ${at + 1}`}
-          onBlur={(e) => {
-            setNaming(false);
-            const to = e.currentTarget.value.trim();
-            if (to !== capture.tag) {
-              onName(to);
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.currentTarget.blur();
-            } else if (e.key === 'Escape') {
-              e.currentTarget.value = capture.tag;
-              e.currentTarget.blur();
-            }
-          }}
-        />
-      ) : (
-        // a name is a caption and nothing more: what the filter reads is the links and
-        // the arcs, so an unnamed capture costs nothing but a harder sentence to read
-        <button
-          type="button"
-          className={`gk-card-name gk-diff-tag${capture.tag ? '' : ' gk-muted'}`}
-          onClick={() => setNaming(true)}
-          disabled={busy}
-          title={capture.tag ? `Called '${capture.tag}'` : 'Name this capture'}
-          aria-label={capture.tag ? `Name capture ${at + 1}, now '${capture.tag}'` : `Name capture ${at + 1}`}
-        >
-          {capture.tag || '+ name'}
-        </button>
-      )}
-      {earlier.length > 0 && (
-        <Select
-          className="gk-small"
-          value={sameAs ?? 0}
-          options={[
-            { value: 0, label: 'a new state' },
-            ...earlier.map((c) => ({ value: c.id, label: `same as ${label(c.id)}` })),
-          ]}
-          onChange={(id) => onSameAs(id === 0 ? undefined : id)}
-          title="Whether this capture is a state an earlier one already holds"
-        />
-      )}
-      <input
-        className="gk-input gk-small"
-        placeholder="any value"
-        aria-label={`The value capture ${at + 1} held`}
-        value={value}
-        onChange={(e) => onValue(e.target.value)}
-        title="A value this capture held, when the screen puts a number on it"
-      />
-      <div className="gk-row gk-card-actions">
-        <Button kind="icon danger" onClick={onForget} disabled={busy} title="Forget" label={`Forget capture ${at + 1}`}>
-          <Icon name="trash" />
-        </Button>
-      </div>
-    </div>
-  );
 }
