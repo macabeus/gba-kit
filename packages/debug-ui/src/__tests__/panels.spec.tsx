@@ -296,8 +296,8 @@ describe('memory diff panel', () => {
     expect(sentence).toContain('slot A → slot B changed');
     expect(sentence).toContain('slot A again is back to what slot A held');
     expect(sentence).toContain('slot A held 0');
-    // an arrow that asks for anything is not worth a clause, and a graph of them asks nothing
-    expect(querySentence(strip, [{ from: 1, to: 2, relation: 'any' }], {})).toContain('keeps every address');
+    // a graph nobody has drawn on asks nothing, and says what to do about it
+    expect(querySentence(strip, [], {})).toContain('Draw an arrow');
     expect(querySentence([{ id: 1, tag: 'one' }], [], {})).toContain('two states');
   });
 

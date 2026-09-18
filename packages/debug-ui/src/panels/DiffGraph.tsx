@@ -32,7 +32,7 @@ import { useEffect, useState } from 'react';
 import { Menu, Screenshot } from '../components.js';
 import { CIRCLED } from './DiffRows.js';
 
-export type Relation = 'same' | 'changed' | 'increased' | 'decreased' | 'any';
+export type Relation = 'same' | 'changed' | 'increased' | 'decreased';
 
 /** One arrow: what the value did between two captures. */
 export interface GraphEdge {
@@ -47,7 +47,6 @@ export const RELATIONS: Array<{ value: Relation; sign: string; label: string; wo
   { value: 'same', sign: '=', label: '= same', word: 'stayed the same' },
   { value: 'increased', sign: '↑', label: '↑ went up', word: 'went up' },
   { value: 'decreased', sign: '↓', label: '↓ went down', word: 'went down' },
-  { value: 'any', sign: '·', label: '· anything', word: 'did anything' },
 ];
 
 const RELATION_SIGN = new Map(RELATIONS.map((r) => [r.value, r.sign]));
