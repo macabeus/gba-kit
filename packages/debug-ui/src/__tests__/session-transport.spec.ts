@@ -380,6 +380,17 @@ describe('session transport', () => {
     await expect(transport.request('gba-kit/breakOnWrite', { address: 0x08000100 })).rejects.toThrow(
       /is rom, which nothing writes/,
     );
+
+    // the editor's Breakpoints view lists no data breakpoint, so what is watched has to be
+    // answerable to whoever set it
+    const listed = await transport.request('gba-kit/watchpoints');
+    expect(listed.watchpoints).toMatchObject([{ address: counter, length: 4, access: 'write', verified: true }]);
+
+    const left = await transport.request('gba-kit/unwatch', { address: counter, length: 4, access: 'write' });
+    expect(left.watchpoints).toEqual([]);
+    // one that is not there is not an error: the list is the answer either way
+    expect((await transport.request('gba-kit/unwatch', { address: counter })).watchpoints).toEqual([]);
+    await expect(transport.request('gba-kit/unwatch', { address: 'x' } as never)).rejects.toThrow(/not an address/);
   });
 
   it('imports and exports symbol files, telling label listeners, and reports a failed save', async () => {

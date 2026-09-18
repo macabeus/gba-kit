@@ -1261,6 +1261,13 @@ describe('emulator requests', () => {
       size: 2,
     });
     expect(watched).toMatchObject({ watched: 1, address: gKeys, length: 2, verified: true });
+    // nothing lists a data breakpoint back to the editor, so the panel that set it asks here
+    const watching = await client.body<GbaKitRequests['gba-kit/watchpoints']['body']>('gba-kit/watchpoints');
+    expect(watching.watchpoints).toMatchObject([{ address: gKeys, length: 2, access: 'write' }]);
+    const after = await client.body<GbaKitRequests['gba-kit/unwatch']['body']>('gba-kit/unwatch', {
+      address: gKeys,
+    });
+    expect(after.watchpoints).toEqual([]);
 
     expect((await client.body<Filter>('gba-kit/diffFilter', { reset: true })).asked).toBe(false);
     expect((await client.body<Filter>('gba-kit/diffFilter', {})).total).toBeGreaterThan(applied.total);
@@ -1390,6 +1397,7 @@ describe('emulator requests', () => {
       ['gba-kit/setMute', { ranges: [{ lo: 8, hi: 4 }] }, /not an address range/],
       ['gba-kit/setMute', { id: 99 }, /no mute 99/],
       ['gba-kit/breakOnWrite', { address: 'x' }, /not an address/],
+      ['gba-kit/unwatch', { address: 'x' }, /not an address/],
       ['gba-kit/breakOnWrite', { address: 0x08000100 }, /is rom, which nothing writes/],
     ];
     for (const [command, args, message] of cases) {

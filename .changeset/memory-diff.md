@@ -40,6 +40,12 @@ where it already is and the capture is of a whole frame either way. Looking for
 background noise still needs a stop, since it runs frames of its own and puts the machine
 back.
 
+**Break on write** on a result sets a watch, and the panel lists what is watched. The
+editor's Breakpoints view lists source and function breakpoints only — VS Code's extension
+API has no data breakpoint to add to it — so a watch set from a panel is shown by whoever
+set it or not at all. `gba-kit/watchpoints` answers what is watched and `gba-kit/unwatch`
+stops one, which also makes it visible when a DAP client replaces the list with its own.
+
 Captures live in the session and nowhere else: they are never written under `.gba-kit/`,
 and the 288 KB of RAM each holds never crosses to a client, which gets the counts, the
 groups and a page of rows. A save state can be adopted as a capture, since a state

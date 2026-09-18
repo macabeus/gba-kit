@@ -5,6 +5,7 @@ import {
   type MuteBody,
   type SavedStateInfo,
   type StateBody,
+  type WatchpointBody,
 } from '@gba-kit/debug-core/protocol';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
@@ -213,6 +214,45 @@ export function useSaveStates(transport: Transport): {
     load: (s) => run(() => transport.request('gba-kit/loadState', { path: s.path })),
     rename: (s, to) => run(() => transport.request('gba-kit/renameState', { path: s.path, to }), refresh),
     remove: (s) => run(() => transport.request('gba-kit/deleteState', { path: s.path }), refresh),
+  };
+}
+
+/**
+ * What is watched for writes, and how to stop. VS Code's Breakpoints view lists source
+ * and function breakpoints only, so a watch set from a panel is shown here or nowhere.
+ */
+export function useWatchpoints(transport: Transport): {
+  watchpoints: WatchpointBody[];
+  refresh: () => void;
+  unwatch: (w: WatchpointBody) => Promise<unknown>;
+} {
+  const state = useDebugState(transport);
+  const epoch = state?.epoch;
+  const [watchpoints, setWatchpoints] = useState<WatchpointBody[]>([]);
+  const { run } = useAction();
+
+  const refresh = useCallback(() => {
+    transport.request('gba-kit/watchpoints').then(
+      (body) => setWatchpoints(body.watchpoints),
+      () => undefined,
+    );
+  }, [transport]);
+
+  // a client that sets its own data breakpoints replaces the list, and a restart drops it
+  useEffect(refresh, [refresh, epoch, state?.revision]);
+
+  return {
+    watchpoints,
+    refresh,
+    unwatch: (w) =>
+      run(async () => {
+        const body = await transport.request('gba-kit/unwatch', {
+          address: w.address,
+          length: w.length,
+          access: w.access,
+        });
+        setWatchpoints(body.watchpoints);
+      }),
   };
 }
 
