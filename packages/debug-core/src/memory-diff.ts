@@ -145,8 +145,7 @@ export class CandidateMask {
   readonly iwram: Uint8Array;
   readonly ewram: Uint8Array;
 
-  /** Use {@link CandidateMask.empty} or {@link CandidateMask.full}; the arrays are the bits themselves. */
-
+  /** Takes the bit arrays themselves; {@link CandidateMask.empty} and {@link CandidateMask.full} size them. */
   constructor(iwram: Uint8Array, ewram: Uint8Array) {
     this.iwram = iwram;
     this.ewram = ewram;
@@ -480,9 +479,9 @@ export class MemoryDiff {
   }
 
   /**
-   * An address survives when, for every pair of captures, its value is equal exactly
-   * when their tags are equal. A sound mixer fails on the first pair that shares a
-   * tag; a menu cursor cannot.
+   * What one mode asks of one address. Everything a mode needs from the captures is
+   * worked out once here and closed over, so the scan is a loop over memory rather
+   * than a loop over the modes.
    */
   #predicate(mode: DiffMode, size: 1 | 2 | 4): (region: RamRegion, offset: number, address: number) => boolean {
     switch (mode.kind) {
@@ -501,9 +500,11 @@ export class MemoryDiff {
         return (region, offset) => found.spans(region, offset, size);
       }
       case 'tags': {
-        // an untagged capture makes no claim about what it should equal, so it takes no
-        // part in the question; two captures tagged the same way ask nothing either, which
-        // is why the filter is refused rather than answered with the whole of RAM
+        // an address survives when its value is equal exactly where the tags are equal: a
+        // sound mixer fails on the first pair that shares a tag; a menu cursor cannot. An
+        // untagged capture makes no claim about what it should equal, so it takes no part
+        // in the question; two captures tagged the same way ask nothing either, which is
+        // why the filter is refused rather than answered with the whole of RAM
         const captures = this.#requireCaptures(2).filter((c) => c.tag !== '');
         const named = new Set(captures.map((c) => c.tag));
         if (named.size < 2) {
@@ -586,11 +587,11 @@ export class MemoryDiff {
   /**
    * The candidates as rows, ranked when there are few enough of them to rank.
    *
-   * Ranking is by how *lonely* a candidate is, not by how well named it is: a first
-   * attempt that awarded a point for sitting inside a named symbol put the right
-   * answer 26th of 39 on the measured target, below twenty-five sound-mixer bytes,
-   * because on a decomp the interesting variable is precisely the unnamed one.
-   * Sparsity put it first.
+   * Ranking is by how *lonely* a candidate is, not by how well named it is. On a
+   * decomp the interesting variable is precisely the one nothing names, so a point
+   * for sitting inside a named symbol buries it: that ordering puts the answer 26th
+   * of 39 on the measured target, below twenty-five sound-mixer bytes. Sparsity puts
+   * it first.
    */
   rows(from: number, limit: number): DiffRow[] {
     const all = this.#detailRows();
@@ -626,8 +627,8 @@ export class MemoryDiff {
   /**
    * Every candidate placed, ranked and ordered — or null when there are more of them
    * than are worth placing, since placing one walks the symbol table and the DWARF and
-   * nobody reads 290,000 ranked rows. Held until the candidates or the captures change,
-   * so asking for the rows and the groups of one result does the work once.
+   * nobody reads 290,000 ranked rows. Held until the candidates, the captures or the
+   * mutes move, so asking for the rows and the groups of one result does the work once.
    */
   #detailRows(): DiffRow[] | null {
     const view = this.#seen();
@@ -704,9 +705,16 @@ export class MemoryDiff {
     }
     if (rank) {
       const { prefix, runs } = rank.per[at.region];
+      // ±256 bytes is a neighbourhood a scalar can be alone in and a buffer cannot: the
+      // structures that survive a filter without being the answer — a sound mixer's
+      // voices, a shadow OAM, a particle array — are hundreds of bytes of neighbours
       const near = prefix[Math.min(runs.length, at.offset + 256)]! - prefix[Math.max(0, at.offset - 256)]!;
       const run = runs[at.offset] || 1;
       const distinct = new Set(rank.tagged.map((i) => values[i]!)).size;
+      // the weights are an ordering, not a calibrated scale: the most any one criterion
+      // is worth is what loneliness pays, so nothing a row is merely named by can carry
+      // it past a candidate sitting on its own — and `reasons` is what a user reads to
+      // disagree with the order, which the total on its own gives no way to do
       let score = 0;
       if (near <= 4) {
         score += 4;

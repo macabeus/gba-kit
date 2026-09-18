@@ -8,7 +8,8 @@
  * shares a tag. What is left is a handful of rows, and the matrix of values across the
  * captures says which of them is the answer faster than any filter expression could.
  *
- * The exact-value search the panel used to be is one of the modes.
+ * An exact-value search is one of the modes, for the states that do put a number on
+ * the screen.
  */
 import type { DiffRowBody, MuteSource, MuteTally, SavedStateInfo } from '@gba-kit/debug-core/protocol';
 import { DIFF, labelName } from '@gba-kit/debug-core/protocol';

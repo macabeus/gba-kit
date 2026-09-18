@@ -8,12 +8,14 @@
  * nothing.
  */
 
-/** How many candidates are worth grouping, ranking and ordering, and how deep undo goes. */
+/** What a result is worth placing, how much of one a response carries, and how far back undo reaches. */
 export const DIFF_LIMITS = {
   /** beyond this a result is a count and a page of addresses: nobody reads 290,000 ranked rows */
   detail: 5000,
+  /** a page of rows, and the most one response may carry — which is every row that was placed */
   rowsDefault: 512,
   rowsMax: 5000,
+  /** how many filters undo reaches back through; each step holds a whole candidate set, at 36 KB */
   undoDepth: 20,
   /**
    * How many captures one session holds. A capture is 288 KB of RAM and a thumbnail,

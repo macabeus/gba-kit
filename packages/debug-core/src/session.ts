@@ -187,7 +187,7 @@ export class Session {
   readonly labels = new LabelStore(() => this.#emit('labels'));
   readonly inspector: Inspector;
   readonly breakpoints = new BreakpointStore();
-  /** The captures and the candidate set of the memory diff; both live only as long as the session (D1). */
+  /** The captures and the candidate set of the memory diff; both live only as long as the session. */
   readonly memoryDiff = new MemoryDiff({ machine: () => this.machine, info: () => this.program.debugInfo });
   readonly history: RewindHistory;
   readonly trace: Ring<TraceEntry>;
