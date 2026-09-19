@@ -47,8 +47,9 @@ name it. The pointers a program declares are read out of the captures instead, i
 the ones that live inside structs and arrays, and an address one of them covers is walked
 through the pointee's type like any object. A pointer is followed only where every
 capture agrees on its value: one that moved between them names different memory in each
-column, which is a name that is wrong somewhere. An object that declares the address
-outranks a pointer merely aimed at it.
+column, which is a name that is wrong somewhere. Only an object that declares an extent
+covering the address outranks a pointer aimed at it — the nearest symbol below is a
+landmark, which declares nothing about the address and so does not displace a name.
 
 **Break on write** on a result sets a watch, and the panel lists what is watched. The
 editor's Breakpoints view lists source and function breakpoints only — VS Code's extension
@@ -62,9 +63,11 @@ groups and a page of rows. A save state can be adopted as a capture, since a sta
 already carries both RAM regions. A session holds twenty of them — as many as the strip
 has circled numbers to name — and says so rather than taking a twenty-first.
 
-Results are grouped by what holds them, in three tiers the panel keeps visually
+Results are grouped by what holds them, in four tiers the panel keeps visually
 distinct: an object the program states an extent for (with its typed member path,
-`gEntityInfo[13].xPosBg2`), a symbol in the same memory that is only the nearest one
+`gEntityInfo[13].xPosBg2`), a pointer that reaches it (`gMenuInfo->cursorIndex`, shown
+with the address the columns were read from, since that name holds only while the
+pointer holds that value), a symbol in the same memory that is only the nearest one
 below, and an address nothing names. `placementAt` in `@gba-kit/debug-info` is the new
 inverse of the expression walk that works those out. The groups are read in the order
 ranking put their rows in, so the one holding the best candidate leads — a larger group

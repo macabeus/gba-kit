@@ -16,8 +16,9 @@ import { describe, expect, it } from 'vitest';
 
 import { DebugInfo } from '../debug-info.js';
 import { LineTable } from '../debug-line.js';
+import type { ValueReader } from '../dwarf/values.js';
 import { ElfFile } from '../elf.js';
-import { PointerIndex, type WordReader, placementAt } from '../placement.js';
+import { PointerIndex, placementAt } from '../placement.js';
 import { SHN_ABS, STB_GLOBAL, STT_NOTYPE, STT_OBJECT, SymbolIndex } from '../symbols.js';
 import { TypeIndex } from '../types.js';
 
@@ -46,35 +47,55 @@ describe.each(Object.entries(PROJECTS))('placementAt on %s', (_name, path) => {
     expect(placementAt(info, at('g_probe', 28), 4).path).toBe('g_probe.tail');
   });
 
+  /** A capture in which one address holds `value` and every other holds nothing. */
+  const holding = (address: number, value: number): ValueReader => ({
+    read(from: number, size: number): Uint8Array {
+      const bytes = new Uint8Array(size);
+      if (from === address && size === 4) {
+        new DataView(bytes.buffer).setUint32(0, value, true);
+      }
+      return bytes;
+    },
+  });
+
   it('follows a pointer to memory no object declares, and only where the captures agree', () => {
     // `g_probe.ptr` is an `int *`: what it points at has no symbol of its own, and exists
     // only while the pointer holds that value — which is why a static lookup never names it
     const held = at('g_probe', 16);
-    const target = at('g_grid3'); // any address a declared object does not cover
-    const reads =
-      (value: number): WordReader =>
-      (address) =>
-        address === held ? value : 0;
-
-    const pointed = target + 0x1000;
-    const agreed = new PointerIndex(info, [reads(pointed), reads(pointed)]);
+    const pointed = at('g_grid3') + 0x1000; // any address a declared object does not cover
+    const agreed = new PointerIndex(info, [holding(held, pointed), holding(held, pointed)]);
     const found = placementAt(info, pointed, 4, agreed);
     expect(found.tier).toBe('through');
     expect(found.path).toBe('*g_probe.ptr');
     expect(found.through).toBe('g_probe.ptr');
 
     // a pointer that moved between the captures names other memory in each column
-    const moved = new PointerIndex(info, [reads(pointed), reads(pointed + 4)]);
+    const moved = new PointerIndex(info, [holding(held, pointed), holding(held, pointed + 4)]);
     expect(placementAt(info, pointed, 4, moved).tier).toBe('unattributed');
     // and a null pointer points at nothing, rather than at the bottom of memory
-    expect(placementAt(info, 0, 4, new PointerIndex(info, [reads(0), reads(0)])).tier).toBe('unattributed');
+    expect(placementAt(info, 0, 4, new PointerIndex(info, [holding(held, 0), holding(held, 0)])).tier).toBe(
+      'unattributed',
+    );
   });
 
   it('prefers what the program declares to what a pointer happens to be aimed at', () => {
     const declared = at('g_probe', 4);
-    const aimed = new PointerIndex(info, [() => declared, () => declared]);
+    const aimed = new PointerIndex(info, [holding(at('g_probe', 16), declared), holding(at('g_probe', 16), declared)]);
     // an object that says it is here outranks a pointer that is merely pointing here
+    expect(placementAt(info, declared, 4, aimed).tier).toBe('sized');
     expect(placementAt(info, declared, 4, aimed).path).toBe('g_probe.count');
+  });
+
+  it('prefers a pointer aimed at an address to a landmark that only sits below it', () => {
+    // `gAbsGlobal` is the nearest symbol below and declares no extent reaching this far,
+    // so it says where the address is and nothing about what is there; the pointer says what
+    const far = at('gAbsGlobal', 0x100);
+    expect(placementAt(info, far, 4).tier).toBe('inferred');
+    const held = at('g_probe', 16);
+    const aimed = new PointerIndex(info, [holding(held, far), holding(held, far)]);
+    const found = placementAt(info, far, 4, aimed);
+    expect(found.tier).toBe('through');
+    expect(found.path).toBe('*g_probe.ptr');
   });
 
   // only one of the two projects declares a pointer to a type it never defines
@@ -84,9 +105,10 @@ describe.each(Object.entries(PROJECTS))('placementAt on %s', (_name, path) => {
       // `struct FwdPay;` is declared and never defined, so there is no size to walk into
       // and nothing to name past the pointer itself
       const fwd = at('g_fwd_ptr');
-      const index = new PointerIndex(info, [() => fwd + 0x2000, () => fwd + 0x2000]);
-      // whatever the static lookup makes of that address, no pointer was followed to it
-      expect(placementAt(info, fwd + 0x2000, 4, index).tier).not.toBe('through');
+      // only `g_fwd_ptr` holds anything, so the index holds what it made of that one pointer
+      const index = new PointerIndex(info, [holding(fwd, fwd + 0x2000), holding(fwd, fwd + 0x2000)]);
+      expect(index.size).toBe(0);
+      expect(index.covering(fwd + 0x2000)).toBeNull();
     },
   );
 

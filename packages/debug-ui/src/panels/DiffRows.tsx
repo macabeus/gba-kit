@@ -1,12 +1,13 @@
 /**
  * The results of a memory diff, grouped by what holds them and collapsed until asked.
  *
- * The three tiers are three visibly different rows, not one row with different text,
+ * The four tiers are four visibly different rows, not one row with different text,
  * because the difference between them is the whole point: `sized` is what the program
- * states, `inferred` is a landmark the nearest symbol happens to provide, and
- * `unnamed` is an address the program says nothing about. An inferred containment
- * dressed up as a variable name would be a lie, and on the measured target it would be
- * the lie told about 83% of the rows.
+ * states, `pointed at` is where one of its own pointers reaches and holds only while it
+ * does, `inferred` is a landmark the nearest symbol happens to provide, and `unnamed` is
+ * an address the program says nothing about. An inferred containment dressed up as a
+ * variable name would be a lie, and on the measured target it would be the lie told
+ * about 83% of the rows.
  */
 import { type DiffGroupBody, type DiffRowBody, RANK_LEVELS, rankLevel } from '@gba-kit/debug-core/protocol';
 
@@ -177,12 +178,15 @@ function DiffRow({ row, actions }: { row: DiffRowBody; actions: DiffRowActions }
  * What a row leads with. A path leads the row only where the object it names begins at
  * the address, since that is the one case it names the address rather than an object
  * the address is a byte of. A `sized` symbol with no type to walk leads with an offset
- * from it, which claims a containment and no name. Everything else leads with the
- * address, and whatever the program does say follows it as a landmark that states in
- * words how far away it is.
+ * from it, which claims a containment and no name. A `through` path leads the same way
+ * and keeps the address beside it, because that name holds only while the pointer holds
+ * that value and the address is what the row's columns were read from. Everything else
+ * leads with the address, and whatever the program does say follows it as a landmark
+ * that states in words how far away it is.
  */
 function Where({ row }: { row: DiffRowBody }) {
-  if (row.tier === 'sized' && row.path && row.pathOffset !== undefined) {
+  const walked = row.tier === 'sized' || row.tier === 'through';
+  if (walked && row.path && row.pathOffset !== undefined) {
     return (
       <span>
         <Hex value={row.address} />
@@ -190,15 +194,22 @@ function Where({ row }: { row: DiffRowBody }) {
       </span>
     );
   }
-  if (row.tier === 'sized' && row.path) {
+  if (walked && row.path) {
     return (
       <span className="gk-mono">
         {row.path}
         {row.type && <span className="gk-muted"> : {row.type}</span>}
+        {row.tier === 'through' && (
+          <span className="gk-muted gk-small">
+            {' at '}
+            <Hex value={row.address} />
+          </span>
+        )}
         {row.alternatives && (
           <Caveat text={`or .${row.alternatives.join(', .')}`} title="a union: these members cover the same bytes" />
         )}
         {row.straddles && <Caveat text="straddles" title="the read crosses out of this object" />}
+        {row.extrapolated && <Caveat text="extrapolated" title="nothing states this array has that many elements" />}
       </span>
     );
   }

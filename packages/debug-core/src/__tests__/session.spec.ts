@@ -2126,11 +2126,10 @@ describe('the memory diff', () => {
     expect(first.origin).toBe('machine');
   });
 
-  it('names memory a pointer reaches, which no object of the program covers', async () => {
+  it('keeps the object a pointer is aimed at named as the object it is', async () => {
     const { session, run } = await boot('thumb-O0');
     run(30);
-    // `g_player.counterRef` points at `g_vblank_count`, which is an object of its own; the
-    // address after it is not, and is reached only by following the pointer
+    // `g_player.counterRef` points at `g_vblank_count`, which is an object of its own
     const counter = addressOf(session, 'g_vblank_count');
     put(session, counter, 1);
     session.captureMemory('A');
@@ -2143,6 +2142,34 @@ describe('the memory diff', () => {
     // the object wins where there is one: a pointer aimed here does not rename it
     expect(row?.placement.tier).toBe('sized');
     expect(row?.placement.path).toBe('g_vblank_count');
+  });
+
+  it('names memory a pointer reaches, which no object of the program covers', async () => {
+    const { session, run } = await boot('thumb-O0');
+    run(30);
+    // nothing the ELF knows reaches this EWRAM address, so only the pointer can name it
+    const target = 0x02001000;
+    session.assign('g_player.counterRef', String(target));
+    put(session, target, 1);
+    session.captureMemory('A');
+    put(session, target, 2);
+    session.captureMemory('B');
+    const [a, b] = session.memoryDiff.captures().map((c) => c.id) as [number, number];
+
+    session.memoryDiff.apply({ edges: [{ from: a, to: b, relation: 'changed' }], values: [] }, 4);
+    const row = session.memoryDiff.rows(0, 500).find((r) => r.address === target);
+    expect(row?.placement.tier).toBe('through');
+    expect(row?.placement.path).toBe('*g_player.counterRef');
+    expect(row?.placement.through).toBe('g_player.counterRef');
+    // and the row carries that name to a host, which is where a user reads it
+    const body = diffRowBody(row!);
+    expect(body.through).toBe('g_player.counterRef');
+    expect(body.path).toBe('*g_player.counterRef');
+
+    // the group is the pointer, since what the rows share is which pointer reached them
+    const group = session.memoryDiff.groups().find((g) => g.key === row!.group);
+    expect(group?.label).toBe('what g_player.counterRef points at');
+    expect(group?.tier).toBe('through');
   });
 
   it('captures a running machine where it already is, without asking for a stop first', async () => {

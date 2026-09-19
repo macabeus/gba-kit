@@ -200,7 +200,7 @@ export class SymbolIndex {
     return new SymbolIndex(symbols, sections, mappings);
   }
 
-  /** Every name the table defines, so a caller can ask what each one is without holding the table. */
+  /** Every name the table defines once, so a caller can walk the table by its names. */
   names(): string[] {
     return [...this.#byName.keys()];
   }

@@ -240,6 +240,17 @@ describe('memory diff panel', () => {
       rank: 8,
       reasons: ['a run of 2 changed bytes'],
     },
+    {
+      address: 0x0200081c,
+      group: 'through:gMenuInfo',
+      values: [1, 2, 1],
+      tier: 'through',
+      through: 'gMenuInfo',
+      path: 'gMenuInfo->cursorIndex',
+      type: 'u8',
+      rank: 9,
+      reasons: [],
+    },
     { address: 0x02000818, group: 'region:EWRAM', values: [1, 2, 1], tier: 'unattributed', rank: 10, reasons: [] },
   ];
   const groups: DiffGroupBody[] = [
@@ -322,13 +333,18 @@ describe('memory diff panel', () => {
 
   it('gives each tier its own treatment, so an inferred containment cannot read as a name', () => {
     const html = renderToString(
-      <DiffGroups groups={[]} rows={rows} open={new Set()} onToggle={() => {}} total={3} actions={actions} />,
+      <DiffGroups groups={[]} rows={rows} open={new Set()} onToggle={() => {}} total={4} actions={actions} />,
     );
     expect(html).toContain('gk-tier-sized');
+    expect(html).toContain('gk-tier-through');
     expect(html).toContain('gk-tier-inferred');
     expect(html).toContain('gk-tier-unnamed');
     // a sized row leads with the name the program vouches for
     expect(html).toContain('gEntityInfo[0].xPosBg2');
+    // a pointed-at one leads with the path too, and keeps the address the columns were
+    // read from, because the name holds only while the pointer holds that value
+    expect(html).toContain('gMenuInfo-&gt;cursorIndex');
+    expect(html).toContain('0x0200081c');
     // an inferred one leads with its address, and the symbol is only a landmark
     expect(html).toContain('0x03000028');
     expect(html).toContain('near gMPlayTrack_0 + 0x20');
@@ -339,7 +355,7 @@ describe('memory diff panel', () => {
     // the matrix is one column per capture, headed by its tag
     expect(html).toContain('slot A');
     expect(html).toContain('slot B');
-    expect(html).toContain('aria-rowcount="3"');
+    expect(html).toContain('aria-rowcount="4"');
   });
 
   it('says when the members of a union cover the same bytes, so one reading is not the reading', () => {
@@ -402,8 +418,10 @@ describe('memory diff panel', () => {
 
   it('names an address by a path only where the program states one covering it', () => {
     // the row renderer never shows an inferred path as a name, and the action behind it
-    // must not either: a label reaches disassembly and `.sym` with no tier to explain it
-    expect(rows.map(nameFor)).toEqual(['gEntityInfo_0.xPosBg2', 'gUnk_03000028', 'gUnk_02000818']);
+    // must not either: a label reaches disassembly and `.sym` with no tier to explain it.
+    // A pointed-at path is not a name for a label either: it names the address only while
+    // the pointer holds that value, and a `.sym` entry outlives any capture
+    expect(rows.map(nameFor)).toEqual(['gEntityInfo_0.xPosBg2', 'gUnk_03000028', 'gUnk_0200081c', 'gUnk_02000818']);
   });
 
   /** A byte of `gEntityInfo[0].xPosBg2`, which the same path names and does not name. */

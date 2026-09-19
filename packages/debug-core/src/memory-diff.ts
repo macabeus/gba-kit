@@ -28,7 +28,6 @@
 import type { DebugInfo, Placement, TypeDesc, ValueReader } from '@gba-kit/debug-info';
 import {
   PointerIndex,
-  type WordReader,
   bitfieldPlacement,
   formatBitfield,
   formatValue,
@@ -710,9 +709,10 @@ export class MemoryDiff {
       return all.slice(from, from + limit);
     }
     const info = this.#context.info();
+    const through = this.#pointers(info);
     return this.#seen()
       .mask.addresses(this.#size, from, limit)
-      .map((address) => this.#row(address, this.#size, info, null, ['too many candidates to rank']));
+      .map((address) => this.#row(address, this.#size, info, null, ['too many candidates to rank'], through));
   }
 
   /**
@@ -778,16 +778,7 @@ export class MemoryDiff {
     if (!info || this.#captures.length === 0) {
       return undefined;
     }
-    const readers = this.#captures.map(
-      (capture): WordReader =>
-        (address) => {
-          const at = locate(address);
-          return at && at.offset + 4 <= capture.ram[at.region].length
-            ? readAt(capture.ram[at.region], at.offset, 4)
-            : null;
-        },
-    );
-    return new PointerIndex(info, readers);
+    return new PointerIndex(info, this.#captures.map(captureReader));
   }
 
   /**

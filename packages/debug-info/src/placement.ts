@@ -17,7 +17,8 @@
  * extent that covers it.
  */
 import type { DebugInfo } from './debug-info.js';
-import { type MemberDesc, type TypeDesc, bitfieldPlacement } from './dwarf/values.js';
+import { type MemberDesc, type TypeDesc, type ValueReader, bitfieldPlacement } from './dwarf/values.js';
+import { STT_FUNC } from './symbols.js';
 
 /** How much the program states about an address, and how much of that is stated rather than guessed. */
 export type Tier = 'sized' | 'inferred' | 'through' | 'unattributed';
@@ -191,26 +192,12 @@ export function pathTo(type: TypeDesc, offset: number, size: number): Walk {
 }
 
 /**
- * What the program says holds `address`, for a read of `size` bytes there.
- *
- * `sized` needs a declared extent covering the address: an `st_size` the assembler
- * wrote, or a DWARF type whose own size covers the offset without the walk having
- * passed an unstated array bound. Everything else a symbol in the same memory claims
- * is `inferred` — usable as a landmark, never as a name — and an address no symbol
- * of its own memory reaches is `unattributed`, which on a decomp is where the
- * interesting variables usually are.
+ * What a pointer reaches, where no object declares an extent covering the address.
+ * Only where none does: an object that says it is here outranks a pointer that happens
+ * to be aimed here. A landmark is not such an object — it declares nothing about the
+ * address, only that it is the nearest name below — so a pointer outranks that.
  */
-/**
- * What a pointer reaches, where nothing the program declares covers the address. Only
- * where nothing does: an object that says it is here outranks a pointer that happens to
- * be aimed here.
- */
-function throughPointer(
-  info: DebugInfo,
-  address: number,
-  size: 1 | 2 | 4,
-  through: PointerIndex | undefined,
-): Placement | null {
+function throughPointer(address: number, size: 1 | 2 | 4, through: PointerIndex | undefined): Placement | null {
   const aim = through?.covering(address);
   if (!aim) {
     return null;
@@ -226,11 +213,15 @@ function throughPointer(
     member: walk.member,
     alternatives: walk.alternatives,
     straddles: walk.straddles || undefined,
+    extrapolated: walk.extrapolated || undefined,
   };
 }
 
-/** One 32-bit word of a machine, or null where nothing is mapped. */
-export type WordReader = (address: number) => number | null;
+/** The pointer a reader holds at `address`, or null where nothing is mapped there. */
+function pointerAt(reader: ValueReader, address: number): number | null {
+  const bytes = reader.read(address, 4);
+  return bytes ? (bytes[0]! | (bytes[1]! << 8) | (bytes[2]! << 16) | (bytes[3]! << 24)) >>> 0 : null;
+}
 
 /**
  * Where the typed pointers of a program are aimed. An address a pointer points at has no
@@ -245,11 +236,15 @@ export type WordReader = (address: number) => number | null;
 export class PointerIndex {
   readonly #aimed: Array<{ name: string; base: number; end: number; pointee: TypeDesc }> = [];
 
-  constructor(info: DebugInfo, readers: readonly WordReader[]) {
+  constructor(info: DebugInfo, readers: readonly ValueReader[]) {
     if (readers.length === 0 || !info.hasTypeInfo) {
       return;
     }
     for (const name of info.symbols.names()) {
+      // a function is code, and code holds no pointer the program declared a type for
+      if (info.symbols.symbol(name)?.type === STT_FUNC) {
+        continue;
+      }
       const type = declaredType(info, name);
       const at = info.symbols.symbolToAddress(name);
       if (!type || at === null) {
@@ -259,10 +254,10 @@ export class PointerIndex {
         if (this.#aimed.length >= POINTER_LIMITS.kept) {
           return;
         }
-        const first = readers[0]!(held.address);
+        const first = pointerAt(readers[0]!, held.address);
         // a pointer that moved between the captures names other memory in each column,
         // which is a name that is wrong somewhere: only one they all agree on is taken
-        if (first === null || first === 0 || readers.some((read) => read(held.address) !== first)) {
+        if (first === null || first === 0 || readers.some((reader) => pointerAt(reader, held.address) !== first)) {
           continue;
         }
         this.#aimed.push({ name: held.name, base: first, end: first + held.pointee.size, pointee: held.pointee });
@@ -272,13 +267,19 @@ export class PointerIndex {
 
   /** The pointer aimed at `address`, if one is, preferring the one that aims closest. */
   covering(address: number): { name: string; base: number; pointee: TypeDesc } | null {
-    let best: { name: string; base: number; pointee: TypeDesc } | null = null;
+    let best: { name: string; base: number; end: number; pointee: TypeDesc } | null = null;
     for (const aim of this.#aimed) {
-      if (address >= aim.base && address < aim.end && (!best || aim.base > best.base)) {
-        best = { name: aim.name, base: aim.base, pointee: aim.pointee };
+      if (address < aim.base || address >= aim.end) {
+        continue;
+      }
+      // the aim starting closest to the address says the most about it, and where two
+      // start together the narrower pointee does; the order the symbol table happens to
+      // be in says nothing about which reading of the bytes is the right one
+      if (!best || aim.base > best.base || (aim.base === best.base && aim.end < best.end)) {
+        best = aim;
       }
     }
-    return best;
+    return best && { name: best.name, base: best.base, pointee: best.pointee };
   }
 
   get size(): number {
@@ -335,24 +336,47 @@ function throughPath(name: string, walk: Walk): string {
   return walk.path.startsWith('.') ? `${name}->${walk.path.slice(1)}` : `${name}[0]${walk.path}`;
 }
 
+/**
+ * What the program says holds `address`, for a read of `size` bytes there.
+ *
+ * `sized` needs a declared extent covering the address: an `st_size` the assembler
+ * wrote, or a DWARF type whose own size covers the offset without the walk having
+ * passed an unstated array bound. Failing that, `through` names it where one of the
+ * program's own pointers reaches it — true only while that pointer holds that value,
+ * which is why `through` takes the captures the value is read from. Everything else a
+ * symbol in the same memory claims is `inferred` — usable as a landmark, never as a
+ * name — and an address no symbol of its own memory reaches is `unattributed`, which
+ * on a decomp is where the interesting variables usually are.
+ *
+ * Only a declared extent displaces a pointer. A landmark does not: it states nothing
+ * about the address beyond being the nearest name below it, often kilobytes below, so
+ * letting it win would throw away the one tier that names the address exactly.
+ */
 export function placementAt(info: DebugInfo, address: number, size: 1 | 2 | 4, through?: PointerIndex): Placement {
   const near = info.symbols.addressToSymbol(address);
   if (!near || regionKey(address - near.offset) !== regionKey(address)) {
-    return throughPointer(info, address, size, through) ?? { address, tier: 'unattributed' };
+    return throughPointer(address, size, through) ?? { address, tier: 'unattributed' };
   }
   const base = address - near.offset;
   const symbol = { name: near.name, base, offset: near.offset };
   const type = declaredType(info, near.name);
   const stSize = info.symbolSize(near.name) ?? 0;
   if (!type) {
-    return { address, tier: near.exact ? 'sized' : 'inferred', symbol };
+    if (near.exact) {
+      return { address, tier: 'sized', symbol };
+    }
+    return throughPointer(address, size, through) ?? { address, tier: 'inferred', symbol };
   }
   const walk = pathTo(type, near.offset, size);
   const declared = (stSize > 0 && near.offset < stSize) || (type.size > 0 && near.offset < type.size);
-  const tier: Tier = near.exact || (declared && !walk.extrapolated) ? 'sized' : 'inferred';
+  const sized = near.exact || (declared && !walk.extrapolated);
+  const reached = sized ? null : throughPointer(address, size, through);
+  if (reached) {
+    return reached;
+  }
   return {
     address,
-    tier,
+    tier: sized ? 'sized' : 'inferred',
     symbol,
     path: near.name + walk.path,
     type: walk.leaf,
