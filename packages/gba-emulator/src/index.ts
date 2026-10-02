@@ -24,6 +24,7 @@ export { TimerController } from './timers.js';
 export { DmaController } from './dma.js';
 export type { DmaMemoryAccess } from './dma.js';
 export { InputController } from './input.js';
+export { SerialPort } from './serial.js';
 export { Apu } from './apu/apu.js';
 
 // Scripting

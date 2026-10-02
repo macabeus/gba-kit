@@ -29,6 +29,7 @@ import type { DmaController } from './dma.js';
 import type { InputController } from './input.js';
 import type { InterruptController } from './interrupts.js';
 import type { EepromSnapshot, SystemBusSnapshot } from './savestate.js';
+import { type SerialPort, isSerialRegister } from './serial.js';
 import type { TimerController } from './timers.js';
 import { BIOS_LATCH_AFTER_BOOT, MMIO } from './types.js';
 import type { WriteOrigin } from './write-source.js';
@@ -161,8 +162,8 @@ const UNUSED = -2;
 /**
  * How each I/O halfword the register file stores reads back: the mask of its readable bits,
  * WRITE_ONLY or UNUSED. A mask of 0 is an unused halfword that reads 0. The registers a subsystem
- * owns (DISPSTAT/VCOUNT, sound, DMA, timers, keypad, interrupts, WAITCNT, POSTFLG) are decoded
- * before this table. GBATEK "GBA I/O Map"; mGBA io.c GBAIORead.
+ * owns (DISPSTAT/VCOUNT, sound, DMA, timers, serial port, keypad, interrupts, WAITCNT, POSTFLG) are
+ * decoded before this table. GBATEK "GBA I/O Map"; mGBA io.c GBAIORead.
  */
 const IO_READ_MASKS = ((): Int32Array => {
   const table = new Int32Array(IO_SIZE >> 1).fill(UNUSED);
@@ -180,13 +181,8 @@ const IO_READ_MASKS = ((): Int32Array => {
   set(0x052, 0x1f1f); // BLDALPHA
   set(0x054, WRITE_ONLY); // BLDY
   set(FIFO_A, WRITE_ONLY, 4); // FIFO_A, FIFO_B
-  // The serial port's registers hold what is written to them; no transfer logic stands behind them.
-  set(0x120, 0xffff, 6); // SIODATA32/SIOMULTI0-3, SIOCNT, SIOMLT_SEND
-  set(0x134, 0xffff); // RCNT
   set(0x136, 0);
-  set(0x140, 0xffff); // JOYCNT
   set(0x142, 0);
-  set(0x150, 0xffff, 5); // JOY_RECV, JOY_TRANS, JOYSTAT
   set(0x15a, 0);
   set(0x206, 0); // the high half of WAITCNT's word
   set(0x20a, 0); // the high half of IME's word
@@ -291,6 +287,7 @@ export class GbaSystemBus implements MemoryBus {
   #input!: InputController;
   #apu!: Apu;
   #display!: DisplayStatus;
+  #serial!: SerialPort;
 
   /** Until a CPU is connected, the bus sees one held in reset: at PC 0 with an empty pipeline. */
   #cpu: BusCpu = { registers: new Uint32Array(16), cpsr: 0xd3, prefetchedOpcode: 0, decodedOpcode: 0 };
@@ -434,6 +431,7 @@ export class GbaSystemBus implements MemoryBus {
     input: InputController;
     apu: Apu;
     display: DisplayStatus;
+    serial: SerialPort;
     cpu: BusCpu;
   }): void {
     this.#interrupts = parts.interrupts;
@@ -442,6 +440,7 @@ export class GbaSystemBus implements MemoryBus {
     this.#input = parts.input;
     this.#apu = parts.apu;
     this.#display = parts.display;
+    this.#serial = parts.serial;
     this.#cpu = parts.cpu;
   }
 
@@ -1290,7 +1289,7 @@ export class GbaSystemBus implements MemoryBus {
   // I/O sits on a 16-bit bus, so every access reaches a register through #ioRead16 and #ioWrite16
   // whatever its width: a byte access drives one byte lane of the halfword, and a word access two
   // halfwords (GBATEK "GBA I/O Map"; mGBA GBAIOWrite8/GBAIOWrite32). A register owned by a
-  // subsystem is decoded by that subsystem; display and serial registers live in mmioRegisters.
+  // subsystem is decoded by that subsystem; display registers live in mmioRegisters.
 
   /** Whether `offset` (into the I/O region) decodes to a register. */
   #isIoMapped(offset: number): boolean {
@@ -1351,6 +1350,9 @@ export class GbaSystemBus implements MemoryBus {
     }
     if (isApuRegister(offset)) {
       return this.#apu.readRegister(offset);
+    }
+    if (isSerialRegister(offset)) {
+      return this.#serial.read16(offset);
     }
     const mask = IO_READ_MASKS[offset >> 1]!;
     if (mask >= 0) {
@@ -1470,6 +1472,11 @@ export class GbaSystemBus implements MemoryBus {
     }
     if (isApuRegister(offset)) {
       this.#apu.writeRegister(offset, this.#storeLatch(offset, value, mask));
+      return;
+    }
+    if (isSerialRegister(offset)) {
+      // JOYCNT mixes acknowledge-on-1 flags with a read/write bit, so the port takes the lanes.
+      this.#serial.write16(offset, value, mask);
       return;
     }
     if (offset >= FIFO_A && offset < FIFO_A + 8) {

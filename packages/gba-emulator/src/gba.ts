@@ -26,6 +26,7 @@ import { InterruptController } from './interrupts.js';
 import { Ppu } from './ppu/ppu.js';
 import type { GbaSnapshot } from './savestate.js';
 import { Scheduler } from './scheduler.js';
+import { SerialPort } from './serial.js';
 import { GbaSystemBus } from './system-bus.js';
 import { TimerController } from './timers.js';
 import {
@@ -92,6 +93,7 @@ export class Gba {
   readonly input: InputController;
   readonly bus: GbaSystemBus;
   readonly display: DisplayStatus;
+  readonly serial: SerialPort;
   readonly ppu: Ppu;
   readonly apu: Apu;
   readonly armCpu: ArmCpu;
@@ -114,6 +116,7 @@ export class Gba {
     this.input = new InputController(this.interrupts);
     this.bus = new GbaSystemBus();
     this.display = new DisplayStatus(this.bus.mmioRegisters, this.interrupts);
+    this.serial = new SerialPort(this.bus.mmioRegisters, this.scheduler, this.interrupts);
     this.ppu = new Ppu();
     this.apu = new Apu();
 
@@ -145,6 +148,7 @@ export class Gba {
       input: this.input,
       apu: this.apu,
       display: this.display,
+      serial: this.serial,
       cpu: this.armCpu,
     });
 
@@ -504,6 +508,7 @@ export class Gba {
     this.interrupts.reattachEvents();
     this.timers.reattachEvents();
     this.dma.reattachEvents();
+    this.serial.reattachEvents();
   }
 
   /** Stop emulation */

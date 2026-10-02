@@ -120,6 +120,8 @@ export const enum EventId {
   Dma3,
   /** An interrupt request reaching the CPU (InterruptController) */
   Irq,
+  /** A Normal-mode serial transfer completing (SerialPort) */
+  Serial,
   /** Sentinel — total count of event types */
   Count,
 }
