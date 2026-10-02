@@ -44,8 +44,8 @@ const TIMER_IRQ_FLAGS = [IrqFlag.Timer0, IrqFlag.Timer1, IrqFlag.Timer2, IrqFlag
  * of READ_OFFSET cycles earlier, while a control write acts at the clock's cycle, which gives the
  * counts the hardware reads (mGBA io.c GBAIORead, `GBATimerUpdateRegister(gba, 0, 2)`, and
  * GBATimerWriteTMCNT_HI; mgba-suite Timing calibration, "Timer IRQ"). An overflow is serviced once
- * a read can see it, READ_OFFSET cycles after it happens, or earlier when a control write comes
- * after it.
+ * a read can see it, READ_OFFSET cycles after it happens, or earlier when a control or reload write
+ * comes after it.
  */
 const READ_OFFSET = 2;
 
@@ -90,9 +90,32 @@ export class TimerController {
     return this.#channels[index]!.reload;
   }
 
-  /** Write timer reload value (TM0CNT_L etc.). Does NOT update running counter. */
+  /**
+   * Write timer reload value (TM0CNT_L etc.). The counter takes it at its next start or overflow.
+   * An overflow in an earlier cycle has already reloaded the old value, so it is serviced first;
+   * one in the write's own cycle takes the new value (mgba-suite "Timer IRQ tests", FFFF: the
+   * timer that overflows as TM0CNT_L is rewritten counts on from the value written).
+   */
   writeReload(index: number, value: number): void {
+    const source = this.#countingTimer(index);
+    if (source >= 0) {
+      this.#serviceOverflowsBefore(source, this.#scheduler.currentCycle - 1);
+    }
     this.#channels[index]!.reload = value & 0xffff;
+  }
+
+  /** The running timer whose prescaler drives timer `index`: itself, or the one a count-up chain starts at; -1 when none runs. */
+  #countingTimer(index: number): number {
+    for (let i = index; i >= 0; i--) {
+      const ch = this.#channels[i]!;
+      if (!ch.enabled) {
+        return -1;
+      }
+      if (!ch.cascade) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   /** Read timer control (TM0CNT_H etc.). */
