@@ -2072,12 +2072,15 @@ describe('a .sav as a save state', () => {
     expect(session.exportSaveFile()).toEqual(sav);
   });
 
-  it.each(['FLASH_V126', 'FLASH512_V130', 'FLASH1M_V103'])(
-    'refuses a %s cartridge in both directions, since no game could read the save back',
-    async (id) => {
-      const session = await sessionFor(id);
-      expect(() => session.importSaveState(savOf(65536), 'x')).toThrow(/emulates no flash chip/);
-      expect(() => session.exportSaveFile()).toThrow(/emulates no flash chip/);
-    },
-  );
+  it.each([
+    ['FLASH_V126', 65536],
+    ['FLASH512_V130', 65536],
+    ['FLASH1M_V103', 131072],
+  ])('puts a %s file in the flash chip, both banks of it, and exports it whole', async (id, size) => {
+    const session = await sessionFor(id);
+    const sav = savOf(size);
+    session.loadState(session.importSaveState(sav, 'x'));
+    expect(session.machine.gba.bus.readBackup()).toEqual(sav);
+    expect(session.exportSaveFile()).toEqual(sav);
+  });
 });

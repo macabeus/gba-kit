@@ -1,16 +1,21 @@
 /**
  * GBA PPU — Layer Compositor
  *
- * Handles:
- * - Priority-based layer sorting (BG + sprites)
- * - Windowing (WIN0, WIN1, OBJ window, outside)
- * - Alpha blending (BLDCNT, BLDALPHA, BLDY)
- * - Brightness increase/decrease
+ * Merges the BG line buffers, the OBJ line and the backdrop into one framebuffer line:
+ * - windows (WIN0, WIN1, OBJ window, outside) select the layers and the colour effect per pixel;
+ * - the top two visible layers are picked by priority (OBJ before BGs of equal priority,
+ *   BGs by index);
+ * - colour special effects (alpha blending, brightness increase/decrease, and the forced
+ *   alpha blend of semi-transparent OBJs) run on the PPU's own channel precision, so every
+ *   result is a colour the hardware can show.
+ *
+ * References: GBATEK "LCD I/O Window Feature", "LCD I/O Color Special Effects";
+ * NanoBoyAdvance src/nba/src/hw/ppu/merge.cc (DrawMergeImpl, OBJ mosaic latch);
+ * mGBA src/gba/renderers/video-software.c.
  */
-import type { GbaSystemBus } from '../system-bus.js';
 import { SCREEN_WIDTH } from '../types.js';
-import { read16 } from './backgrounds.js';
-import type { SpritePixel } from './sprites.js';
+import { color15to32, read16 } from './backgrounds.js';
+import { OBJ_COLOR_MASK, OBJ_MOSAIC, OBJ_PRIORITY_SHIFT, OBJ_SEMI_TRANSPARENT, OBJ_WINDOW } from './sprites.js';
 
 // ─── Blend Mode ──────────────────────────────────────────────────────
 
@@ -21,276 +26,226 @@ const enum BlendMode {
   BrightnessDecrease = 3,
 }
 
-// ─── Layer IDs for BLDCNT ────────────────────────────────────────────
+// ─── Layer IDs (BLDCNT and window control bit numbers) ──────────────
 
 const LAYER_OBJ = 4;
 const LAYER_BD = 5; // backdrop
 
-// ─── Window Flags ────────────────────────────────────────────────────
-
-const WIN_BG0 = 1 << 0;
-const WIN_BG1 = 1 << 1;
-const WIN_BG2 = 1 << 2;
-const WIN_BG3 = 1 << 3;
+/** Window control bit 4 enables OBJ, bit 5 the colour special effect. */
 const WIN_OBJ = 1 << 4;
 const WIN_SFX = 1 << 5;
+/** Every layer and the colour effect: the control of a pixel when no window is enabled. */
+const WIN_ALL = 0x3f;
 
 // ─── Compositing Types ──────────────────────────────────────────────
 
 export interface BgLayer {
   id: number; // 0-3
   priority: number; // 0-3
-  lineBuffer: Uint32Array; // SCREEN_WIDTH, 0 = transparent
+  lineBuffer: Uint32Array; // SCREEN_WIDTH, 0 = transparent, OPAQUE | colour otherwise
 }
 
-// ─── Window Region Evaluation ────────────────────────────────────────
+// ─── Windows ─────────────────────────────────────────────────────────
 
-function evaluateWindows(x: number, line: number, dispcnt: number, sprites: SpritePixel[], bus: GbaSystemBus): number {
-  const mmio = bus.mmioRegisters;
-  const win0Enabled = !!(dispcnt & (1 << 13));
-  const win1Enabled = !!(dispcnt & (1 << 14));
-  const objWinEnabled = !!(dispcnt & (1 << 15));
-
-  // If no windows are enabled, everything is visible with effects
-  if (!win0Enabled && !win1Enabled && !objWinEnabled) {
-    return WIN_BG0 | WIN_BG1 | WIN_BG2 | WIN_BG3 | WIN_OBJ | WIN_SFX;
-  }
-
-  // Check WIN0
-  if (win0Enabled && isInWindow(x, line, mmio, 0x40, 0x44)) {
-    return mmio[0x48]! & 0x3f;
-  }
-
-  // Check WIN1
-  if (win1Enabled && isInWindow(x, line, mmio, 0x42, 0x46)) {
-    return mmio[0x49]! & 0x3f;
-  }
-
-  // Check OBJ window
-  if (objWinEnabled && sprites[x]!.isObjWindow) {
-    return mmio[0x4b]! & 0x3f;
-  }
-
-  // Outside all windows
-  return mmio[0x4a]! & 0x3f;
+/** Which windows the current line uses. */
+export interface WindowState {
+  win0: boolean;
+  win1: boolean;
+  objWin: boolean;
+  /** Per-pixel WIN0/WIN1 coverage (bit 0 WIN0, bit 1 WIN1), horizontal and vertical flip-flops combined. */
+  inside: Uint8Array;
 }
 
-function isInWindow(x: number, line: number, mmio: Uint8Array, hOffset: number, vOffset: number): boolean {
-  const winH = read16(mmio, hOffset);
-  const winV = read16(mmio, vOffset);
-
-  const x1 = (winH >> 8) & 0xff;
-  const x2 = winH & 0xff;
-  const y1 = (winV >> 8) & 0xff;
-  const y2 = winV & 0xff;
-
-  // Vertical check
-  let inY: boolean;
-  if (y1 <= y2) {
-    inY = line >= y1 && line < y2;
-  } else {
-    // Wrapping
-    inY = line >= y1 || line < y2;
-  }
-  if (!inY) {
-    return false;
-  }
-
-  // Horizontal check
-  if (x1 <= x2) {
-    return x >= x1 && x < x2;
-  } else {
-    return x >= x1 || x < x2;
+/**
+ * Fill `out` with each pixel's window control (WININ/WINOUT bits 0-5). Priority: WIN0,
+ * WIN1, OBJ window, outside. GBATEK, LCD I/O Window Feature.
+ */
+export function buildWindowMask(windows: WindowState, obj: Uint32Array, mmio: Uint8Array, out: Uint8Array): void {
+  const win0Control = mmio[0x48]! & 0x3f;
+  const win1Control = mmio[0x49]! & 0x3f;
+  const outsideControl = mmio[0x4a]! & 0x3f;
+  const objWinControl = mmio[0x4b]! & 0x3f;
+  const { win0, win1, objWin, inside } = windows;
+  for (let x = 0; x < SCREEN_WIDTH; x++) {
+    const flags = inside[x]!;
+    if (win0 && flags & 1) {
+      out[x] = win0Control;
+    } else if (win1 && flags & 2) {
+      out[x] = win1Control;
+    } else if (objWin && obj[x]! & OBJ_WINDOW) {
+      out[x] = objWinControl;
+    } else {
+      out[x] = outsideControl;
+    }
   }
 }
 
-// ─── Color Blending ──────────────────────────────────────────────────
+// ─── OBJ Mosaic ──────────────────────────────────────────────────────
 
+/**
+ * Apply horizontal OBJ mosaic on the screen grid. A latch holds the OBJ pixel and is
+ * reloaded at the start of each mosaic block, or whenever the new pixel is not mosaic,
+ * the latched one is not mosaic, or the new one has a better priority
+ * (NBA merge.cc `sprite_pixel_latch`). The OBJ-window bit is not latched.
+ */
+export function applyObjMosaic(obj: Uint32Array, mosaicWidth: number, out: Uint32Array): void {
+  let latch = 0;
+  let counter = 0;
+  for (let x = 0; x < SCREEN_WIDTH; x++) {
+    const pixel = obj[x]!;
+    if (
+      counter === 0 ||
+      !(pixel & OBJ_MOSAIC) ||
+      !(latch & OBJ_MOSAIC) ||
+      ((pixel >> OBJ_PRIORITY_SHIFT) & 3) < ((latch >> OBJ_PRIORITY_SHIFT) & 3)
+    ) {
+      latch = pixel;
+    }
+    out[x] = (latch & ~OBJ_WINDOW) | (pixel & OBJ_WINDOW);
+    if (++counter === mosaicWidth) {
+      counter = 0;
+    }
+  }
+}
+
+// ─── Colour Special Effects ──────────────────────────────────────────
+
+// The effects work on 5-bit red and blue and a 6-bit green whose low bit is the colour's
+// bit 15, rounding to nearest (darkening rounds the amount removed up), and the result
+// drops green's low bit again. NBA merge.cc Blend/Brighten/Darken. Coefficients are in
+// 1/16 steps, capped at 16: GBATEK, LCD I/O Color Special Effects.
+
+function green6(color: number): number {
+  return ((color >> 4) & 0x3e) | ((color >> 15) & 1);
+}
+
+/** Alpha blending: I = MIN(max, I1st*EVA + I2nd*EVB). */
 function blendAlpha(top: number, bot: number, eva: number, evb: number): number {
-  const r1 = top & 0xff;
-  const g1 = (top >> 8) & 0xff;
-  const b1 = (top >> 16) & 0xff;
-  const r2 = bot & 0xff;
-  const g2 = (bot >> 8) & 0xff;
-  const b2 = (bot >> 16) & 0xff;
-
-  const r = Math.min(255, (r1 * eva + r2 * evb) >> 4);
-  const g = Math.min(255, (g1 * eva + g2 * evb) >> 4);
-  const b = Math.min(255, (b1 * eva + b2 * evb) >> 4);
-
-  return 0xff000000 | (b << 16) | (g << 8) | r;
+  const r = Math.min(31, ((top & 0x1f) * eva + (bot & 0x1f) * evb + 8) >> 4);
+  const g = Math.min(63, (green6(top) * eva + green6(bot) * evb + 8) >> 4) >> 1;
+  const b = Math.min(31, (((top >> 10) & 0x1f) * eva + ((bot >> 10) & 0x1f) * evb + 8) >> 4);
+  return (b << 10) | (g << 5) | r;
 }
 
-function blendBrightnessIncrease(color: number, evy: number): number {
-  const r = color & 0xff;
-  const g = (color >> 8) & 0xff;
-  const b = (color >> 16) & 0xff;
-
-  const rr = r + (((255 - r) * evy) >> 4);
-  const gg = g + (((255 - g) * evy) >> 4);
-  const bb = b + (((255 - b) * evy) >> 4);
-
-  return 0xff000000 | (Math.min(255, bb) << 16) | (Math.min(255, gg) << 8) | Math.min(255, rr);
+/** Brightness increase: I = I1st + (max-I1st)*EVY. */
+function brightnessIncrease(color: number, evy: number): number {
+  const r = color & 0x1f;
+  const g = green6(color);
+  const b = (color >> 10) & 0x1f;
+  return (
+    ((b + (((31 - b) * evy + 8) >> 4)) << 10) |
+    (((g + (((63 - g) * evy + 8) >> 4)) >> 1) << 5) |
+    (r + (((31 - r) * evy + 8) >> 4))
+  );
 }
 
-function blendBrightnessDecrease(color: number, evy: number): number {
-  const r = color & 0xff;
-  const g = (color >> 8) & 0xff;
-  const b = (color >> 16) & 0xff;
-
-  const rr = r - ((r * evy) >> 4);
-  const gg = g - ((g * evy) >> 4);
-  const bb = b - ((b * evy) >> 4);
-
-  return 0xff000000 | (Math.max(0, bb) << 16) | (Math.max(0, gg) << 8) | Math.max(0, rr);
+/** Brightness decrease: I = I1st - I1st*EVY. */
+function brightnessDecrease(color: number, evy: number): number {
+  const r = color & 0x1f;
+  const g = green6(color);
+  const b = (color >> 10) & 0x1f;
+  return ((b - ((b * evy + 7) >> 4)) << 10) | (((g - ((g * evy + 7) >> 4)) >> 1) << 5) | (r - ((r * evy + 7) >> 4));
 }
 
 // ─── Main Compositing Function ──────────────────────────────────────
 
 /**
- * Compose all layers for one scanline into the framebuffer.
+ * Compose one scanline into `framebuffer` at `offset`.
+ *
+ * @param layers - the enabled BGs, sorted by priority then index
+ * @param obj - the OBJ line after mosaic, or null when the OBJ layer is off
+ * @param windowMask - each pixel's window control, or null when no window is enabled
  */
 export function compositeScanline(
-  line: number,
-  bgLayers: BgLayer[],
-  sprites: SpritePixel[],
-  bus: GbaSystemBus,
+  layers: BgLayer[],
+  obj: Uint32Array | null,
+  windowMask: Uint8Array | null,
+  mmio: Uint8Array,
+  palette: Uint8Array,
   framebuffer: Uint32Array,
+  offset: number,
 ): void {
-  const mmio = bus.mmioRegisters;
-  const dispcnt = read16(mmio, 0x00);
-
-  // Read blend control
   const bldcnt = read16(mmio, 0x50);
   const blendMode = (bldcnt >> 6) & 0x3;
-  const topTargets = bldcnt & 0x3f; // first target layers
-  const botTargets = (bldcnt >> 8) & 0x3f; // second target layers
-
-  // Alpha coefficients
+  const firstTargets = bldcnt & 0x3f;
+  const secondTargets = (bldcnt >> 8) & 0x3f;
   const bldalpha = read16(mmio, 0x52);
   const eva = Math.min(16, bldalpha & 0x1f);
   const evb = Math.min(16, (bldalpha >> 8) & 0x1f);
-
-  // Brightness coefficient
-  const bldy = Math.min(16, read16(mmio, 0x54) & 0x1f);
-
-  // Backdrop color (palette entry 0)
-  const backdrop = read16(bus.palette, 0);
-  const backdropColor =
-    backdrop === 0
-      ? 0xff000000
-      : 0xff000000 | (((backdrop >> 10) & 0x1f) << 19) | (((backdrop >> 5) & 0x1f) << 11) | ((backdrop & 0x1f) << 3);
-
-  // Sort BG layers by priority, then by BG index (lower wins)
-  const sortedBgs = [...bgLayers].sort((a, b) => {
-    if (a.priority !== b.priority) {
-      return a.priority - b.priority;
-    }
-    return a.id - b.id;
-  });
-
-  const fbOffset = line * SCREEN_WIDTH;
+  const evy = Math.min(16, read16(mmio, 0x54) & 0x1f);
+  const backdrop = read16(palette, 0);
+  const layerCount = layers.length;
 
   for (let x = 0; x < SCREEN_WIDTH; x++) {
-    const winFlags = evaluateWindows(x, line, dispcnt, sprites, bus);
+    const control = windowMask ? windowMask[x]! : WIN_ALL;
 
-    // Build sorted list of visible, non-transparent pixels at this column
-    // Each entry: { color, layerId, isSemiTransparent }
-    let topColor = 0;
+    // The top two BG pixels; the backdrop sits below everything at priority 3.
     let topLayer = LAYER_BD;
-    let botColor = 0;
+    let topColor = backdrop;
+    let topPriority = 3;
     let botLayer = LAYER_BD;
-    let topFound = false;
-    let botFound = false;
-    let isSemiTransparent = false;
-
-    // Interleave BGs and sprites by priority
-    // We iterate through priority levels 0-3, and within each:
-    //   1. Sprites at this priority (OBJ always checked if visible)
-    //   2. BGs at this priority (in BG index order)
-
-    for (let pri = 0; pri <= 3 && !botFound; pri++) {
-      // Check sprites at this priority
-      if (!topFound || !botFound) {
-        const sp = sprites[x]!;
-        if (sp.color !== 0 && sp.priority === pri && !sp.isObjWindow && winFlags & WIN_OBJ) {
-          if (!topFound) {
-            topColor = sp.color;
-            topLayer = LAYER_OBJ;
-            topFound = true;
-            isSemiTransparent = sp.semiTransparent;
-          } else if (!botFound) {
-            botColor = sp.color;
-            botLayer = LAYER_OBJ;
-            botFound = true;
-          }
-        }
+    let botColor = backdrop;
+    let botPriority = 3;
+    let found = 0;
+    for (let i = 0; i < layerCount && found < 2; i++) {
+      const bg = layers[i]!;
+      if (!(control & (1 << bg.id))) {
+        continue;
       }
+      const pixel = bg.lineBuffer[x]!;
+      if (pixel === 0) {
+        continue;
+      }
+      if (found === 0) {
+        topLayer = bg.id;
+        topColor = pixel & 0xffff;
+        topPriority = bg.priority;
+      } else {
+        botLayer = bg.id;
+        botColor = pixel & 0xffff;
+        botPriority = bg.priority;
+      }
+      found++;
+    }
 
-      // Check BGs at this priority
-      for (const bg of sortedBgs) {
-        if (bg.priority !== pri) {
-          continue;
-        }
-        const winBit = 1 << bg.id;
-        if (!(winFlags & winBit)) {
-          continue;
-        }
-        const pixel = bg.lineBuffer[x]!;
-        if (pixel === 0) {
-          continue;
-        }
-
-        if (!topFound) {
-          topColor = pixel;
-          topLayer = bg.id;
-          topFound = true;
-        } else if (!botFound) {
-          botColor = pixel;
-          botLayer = bg.id;
-          botFound = true;
-        }
-        // Once we have top and bottom, we can stop for this pixel
-        if (topFound && botFound) {
-          break;
+    // The OBJ pixel goes in front of a BG of equal or worse priority.
+    let semiTransparent = false;
+    if (obj && control & WIN_OBJ) {
+      const pixel = obj[x]!;
+      const index = pixel & OBJ_COLOR_MASK;
+      if (index !== 0) {
+        const priority = (pixel >> OBJ_PRIORITY_SHIFT) & 3;
+        const color = read16(palette, 0x200 + index * 2);
+        if (priority <= topPriority) {
+          botLayer = topLayer;
+          botColor = topColor;
+          topLayer = LAYER_OBJ;
+          topColor = color;
+          semiTransparent = !!(pixel & OBJ_SEMI_TRANSPARENT);
+        } else if (priority <= botPriority) {
+          botLayer = LAYER_OBJ;
+          botColor = color;
         }
       }
     }
 
-    // If nothing was found on top, use backdrop
-    if (!topFound) {
-      topColor = backdropColor;
-      topLayer = LAYER_BD;
-    }
-    if (!botFound) {
-      botColor = backdropColor;
-      botLayer = LAYER_BD;
-    }
-
-    // Apply blending
-    let finalColor = topColor;
-
-    const canBlend = !!(winFlags & WIN_SFX);
-
-    if (canBlend) {
-      // Semi-transparent sprites always use alpha blending if second target exists
-      if (isSemiTransparent && botTargets & (1 << botLayer)) {
-        finalColor = blendAlpha(topColor, botColor, eva, evb);
-      } else if (blendMode === BlendMode.Alpha) {
-        if (topTargets & (1 << topLayer) && botTargets & (1 << botLayer)) {
-          finalColor = blendAlpha(topColor, botColor, eva, evb);
+    // A semi-transparent OBJ over a 2nd target always alpha-blends, whatever BLDCNT's mode and
+    // the window's effect bit say; otherwise the window's effect bit gates BLDCNT's effect.
+    let color = topColor;
+    if (semiTransparent && secondTargets & (1 << botLayer)) {
+      color = blendAlpha(topColor, botColor, eva, evb);
+    } else if (control & WIN_SFX && firstTargets & (1 << topLayer)) {
+      if (blendMode === BlendMode.Alpha) {
+        if (secondTargets & (1 << botLayer)) {
+          color = blendAlpha(topColor, botColor, eva, evb);
         }
       } else if (blendMode === BlendMode.BrightnessIncrease) {
-        if (topTargets & (1 << topLayer)) {
-          finalColor = blendBrightnessIncrease(topColor, bldy);
-        }
+        color = brightnessIncrease(topColor, evy);
       } else if (blendMode === BlendMode.BrightnessDecrease) {
-        if (topTargets & (1 << topLayer)) {
-          finalColor = blendBrightnessDecrease(topColor, bldy);
-        }
+        color = brightnessDecrease(topColor, evy);
       }
     }
 
-    framebuffer[fbOffset + x] = finalColor;
+    framebuffer[offset + x] = color15to32(color & 0x7fff);
   }
 }

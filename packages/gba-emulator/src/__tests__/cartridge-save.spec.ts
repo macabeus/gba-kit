@@ -6,13 +6,17 @@ import { describe, expect, it } from 'vitest';
 
 import { GbaSystemBus } from '../system-bus.js';
 
+function writeText(rom: Uint8Array, at: number, text: string): void {
+  for (let i = 0; i < text.length; i++) {
+    rom[at + i] = text.charCodeAt(i);
+  }
+}
+
 /** A ROM that declares `id`, with the string word-aligned the way a build puts it there. */
 function romDeclaring(id: string | null, at = 0x400): Uint8Array {
   const rom = new Uint8Array(0x1000);
   if (id !== null) {
-    for (let i = 0; i < id.length; i++) {
-      rom[at + i] = id.charCodeAt(i);
-    }
+    writeText(rom, at, id);
   }
   return rom;
 }
@@ -82,8 +86,21 @@ describe('declared save type', () => {
     expect(busFor(null).save).toEqual({ type: null, id: null });
   });
 
-  it('wants the three version digits, so a bare prefix is not a declaration', () => {
-    expect(busFor('EEPROM_V and then some').save.type).toBeNull();
+  it.each([
+    ['SRAM_V  ', 'sram', 'SRAM_V'],
+    ['FLASH_V ', 'flash512', 'FLASH_V'],
+    ['FLASH1M_V   ', 'flash1m', 'FLASH1M_V'],
+    ['EEPROM_V and then some', 'eeprom', 'EEPROM_V'],
+  ])('reads the bare prefix of %j as %s, as homebrew and test ROMs write it', (text, type, id) => {
+    expect(busFor(text).save).toEqual({ type, id });
+  });
+
+  it('takes the string with version digits over a bare prefix earlier in the ROM', () => {
+    const rom = romDeclaring('SRAM_V  ', 0x100);
+    writeText(rom, 0x400, 'FLASH1M_V103');
+    const bus = new GbaSystemBus();
+    bus.loadRom(rom);
+    expect(bus.save).toEqual({ type: 'flash1m', id: 'FLASH1M_V103' });
   });
 
   it('wants the word alignment a build gives the string', () => {
@@ -106,13 +123,14 @@ describe('declared save type', () => {
   it('backs the 0x0E window for every type but EEPROM, which is serial', () => {
     for (const id of ['SRAM_V113', 'SRAM_F_V102', 'FLASH_V126', 'FLASH1M_V103']) {
       const bus = busFor(id);
-      bus.poke(0x0e000000, Uint8Array.of(0x5a));
-      expect(bus.sram[0], id).toBe(0x5a);
+      expect(bus.poke(0x0e000000, Uint8Array.of(0x5a)), id).toBe(1);
+      expect(bus.read8(0x0e000000), id).toBe(0x5a);
     }
     for (const id of ['EEPROM_V121', null]) {
       const bus = busFor(id);
-      bus.poke(0x0e000000, Uint8Array.of(0x5a));
-      expect(bus.sram[0], String(id)).toBe(0);
+      expect(bus.poke(0x0e000000, Uint8Array.of(0x5a)), String(id)).toBe(0);
+      bus.write8(0x0e000000, 0x5a);
+      expect(bus.read8(0x0e000000), String(id)).toBe(0xff);
     }
   });
 });
@@ -122,6 +140,8 @@ describe('a .sav in and out', () => {
     ['EEPROM_V121', 512],
     ['EEPROM_V121', 8192],
     ['SRAM_V113', 32768],
+    ['FLASH512_V130', 65536],
+    ['FLASH1M_V103', 131072],
   ])('%s keeps a %i byte file byte for byte', (id, size) => {
     const bus = busFor(id);
     const bytes = pattern(size);
@@ -138,10 +158,14 @@ describe('a .sav in and out', () => {
     expect(() => busFor('EEPROM_V121').writeBackup(pattern(32768))).toThrow(/do not fit/);
   });
 
-  it('erases past the end of the file it installs', () => {
-    const bus = busFor('EEPROM_V121');
+  it.each(['EEPROM_V121', 'SRAM_V113', 'FLASH1M_V103'])('%s erases past the end of the file it installs', (id) => {
+    const bus = busFor(id);
     bus.writeBackup(pattern(512));
     expect(bus.readBackup()!.subarray(512, 520)).toEqual(new Uint8Array(8).fill(0xff));
+  });
+
+  it('refuses a file bigger than the flash chip', () => {
+    expect(() => busFor('FLASH512_V130').writeBackup(pattern(131072))).toThrow(/do not fit in 65536/);
   });
 
   it('lets the cartridge say whether the 0x0E window is backed, not a state loaded into it', () => {
@@ -154,13 +178,16 @@ describe('a .sav in and out', () => {
     expect(bus.sram[0]).toBe(0x5a);
   });
 
-  it('forgets the save on reset but keeps the cartridge', () => {
-    const bus = busFor('EEPROM_V121');
-    bus.writeBackup(pattern(512));
-    bus.reset();
-    expect(bus.save).toEqual({ type: 'eeprom', id: 'EEPROM_V121' });
-    expect(bus.readBackup()!.subarray(0, 8)).toEqual(new Uint8Array(8).fill(0xff));
-  });
+  it.each(['EEPROM_V121', 'SRAM_V113', 'FLASH1M_V103'])(
+    '%s forgets the save on reset but keeps the cartridge',
+    (id) => {
+      const bus = busFor(id);
+      bus.writeBackup(pattern(512));
+      bus.reset();
+      expect(bus.save.id).toBe(id);
+      expect(bus.readBackup()!.subarray(0, 8)).toEqual(new Uint8Array(8).fill(0xff));
+    },
+  );
 });
 
 describe('the EEPROM serial order', () => {
@@ -255,5 +282,178 @@ describe('the EEPROM address width', () => {
     sendBits(bus, [1, 1, ...bitsOf(3, 6), 0]);
     bus.writeBackup(bytes);
     expect(readWord(bus, 3, 6)).toEqual(bytes.subarray(24, 32).slice().reverse());
+  });
+});
+
+describe('SRAM', () => {
+  it('reads 0xFF where nothing was written, as the chip ships erased', () => {
+    // jsmolka gba-tests save/sram test 1: "Uninitialized memory"
+    const bus = busFor('SRAM_V113');
+    expect(bus.read8(0x0e000000)).toBe(0xff);
+    expect(bus.read16(0x0e001000)).toBe(0xffff);
+    expect(bus.readBackup()).toEqual(new Uint8Array(32768).fill(0xff));
+  });
+
+  it('is 32 KB, mirrored through the 64 KB window and the 0x0F region', () => {
+    // mGBA GBALoad8/GBAStore8: `address & (GBA_SIZE_SRAM - 1)`; NBA SRAM::Read: `address & 0x7FFF`
+    const bus = busFor('SRAM_V113');
+    bus.write8(0x0e008010, 0x5a);
+    expect(bus.read8(0x0e000010)).toBe(0x5a);
+    expect(bus.read8(0x0e018010)).toBe(0x5a);
+    expect(bus.read8(0x0f000010)).toBe(0x5a);
+    // a byte written through a mirror is in the .sav, which holds the whole chip
+    expect(bus.readBackup()![0x10]).toBe(0x5a);
+  });
+
+  it('restores the first 32 KB of an older 64 KB snapshot', () => {
+    const bus = busFor('SRAM_V113');
+    const snap = bus.serialize();
+    snap.sram = pattern(0x10000);
+    const loaded = busFor('SRAM_V113');
+    loaded.deserialize(snap);
+    expect(loaded.readBackup()).toEqual(pattern(0x8000));
+  });
+});
+
+/** One flash command: the two unlock writes, then the command byte at 5555h. */
+function flashCommand(bus: GbaSystemBus, command: number): void {
+  bus.write8(0x0e005555, 0xaa);
+  bus.write8(0x0e002aaa, 0x55);
+  bus.write8(0x0e005555, command);
+}
+
+function flashProgram(bus: GbaSystemBus, address: number, value: number): void {
+  flashCommand(bus, 0xa0);
+  bus.write8(address, value);
+}
+
+/** Select the bank of a 128 KB chip the window shows. */
+function flashBank(bus: GbaSystemBus, bank: number): void {
+  flashCommand(bus, 0xb0);
+  bus.write8(0x0e000000, bank);
+}
+
+describe('the flash chip', () => {
+  // GBATEK "GBA Cart Backup Flash ROM"; mGBA src/gba/savedata.c GBASavedataReadFlash/WriteFlash
+  it.each([
+    ['FLASH512_V130', 0x32, 0x1b], // Panasonic MN63F805MNP
+    ['FLASH1M_V103', 0x62, 0x13], // Sanyo LE26FV10N1TS
+  ])('%s answers ID mode with manufacturer %#x and device %#x, and leaves it on F0h', (id, manufacturer, device) => {
+    const bus = busFor(id);
+    flashCommand(bus, 0x90);
+    expect(bus.read8(0x0e000000)).toBe(manufacturer);
+    expect(bus.read8(0x0e000001)).toBe(device);
+    expect(bus.read8(0x0e000002)).toBe(0xff);
+    flashCommand(bus, 0xf0);
+    expect(bus.read8(0x0e000000)).toBe(0xff);
+    expect(bus.read8(0x0e000001)).toBe(0xff);
+  });
+
+  it('keeps command bytes out of the save', () => {
+    const bus = busFor('FLASH1M_V103');
+    flashCommand(bus, 0x90);
+    flashCommand(bus, 0xf0);
+    bus.write8(0x0e000123, 0x00);
+    expect(bus.readBackup()).toEqual(new Uint8Array(131072).fill(0xff));
+  });
+
+  it('programs the one byte that follows A0h', () => {
+    const bus = busFor('FLASH512_V130');
+    flashProgram(bus, 0x0e001234, 0x5a);
+    bus.write8(0x0e001235, 0x00);
+    expect(bus.read8(0x0e001234)).toBe(0x5a);
+    expect(bus.read8(0x0e001235)).toBe(0xff);
+  });
+
+  it('only clears bits when it programs, so a byte written twice holds the AND of both', () => {
+    const bus = busFor('FLASH512_V130');
+    flashProgram(bus, 0x0e000040, 0xf0);
+    flashProgram(bus, 0x0e000040, 0x3c);
+    expect(bus.read8(0x0e000040)).toBe(0x30);
+  });
+
+  it('erases the whole chip, both banks, on 80h then 10h', () => {
+    const bus = busFor('FLASH1M_V103');
+    bus.writeBackup(new Uint8Array(131072));
+    flashCommand(bus, 0x80);
+    flashCommand(bus, 0x10);
+    expect(bus.readBackup()).toEqual(new Uint8Array(131072).fill(0xff));
+  });
+
+  it('erases the 4 KB sector 30h is written to, in the bank in view', () => {
+    const bus = busFor('FLASH1M_V103');
+    bus.writeBackup(new Uint8Array(131072));
+    flashBank(bus, 1);
+    flashCommand(bus, 0x80);
+    bus.write8(0x0e005555, 0xaa);
+    bus.write8(0x0e002aaa, 0x55);
+    bus.write8(0x0e003000, 0x30);
+    const after = bus.readBackup()!;
+    expect(after.subarray(0x13000, 0x14000)).toEqual(new Uint8Array(0x1000).fill(0xff));
+    expect(after[0x12fff]).toBe(0);
+    expect(after[0x14000]).toBe(0);
+    expect(after[0x3000]).toBe(0);
+  });
+
+  it('switches a 128 KB chip between its two banks', () => {
+    // jsmolka gba-tests save/flash128 test 12
+    const bus = busFor('FLASH1M_V103');
+    flashProgram(bus, 0x0e000100, 1);
+    flashBank(bus, 1);
+    expect(bus.read8(0x0e000100)).toBe(0xff);
+    flashProgram(bus, 0x0e000100, 2);
+    flashBank(bus, 0);
+    expect(bus.read8(0x0e000100)).toBe(1);
+    expect(bus.readBackup()![0x10100]).toBe(2);
+  });
+
+  it('has the one bank on a 64 KB chip, where B0h is no command', () => {
+    const bus = busFor('FLASH512_V130');
+    flashProgram(bus, 0x0e000100, 1);
+    flashBank(bus, 1);
+    expect(bus.read8(0x0e000100)).toBe(1);
+    expect(bus.readBackup()![0]).toBe(0xff);
+  });
+
+  it('mirrors its bank every 64 KB and in the 0x0F region', () => {
+    // jsmolka gba-tests save/flash64 tests 2 and 3
+    const bus = busFor('FLASH512_V130');
+    flashProgram(bus, 0x0e000020, 1);
+    expect(bus.read8(0x0e010020)).toBe(1);
+    expect(bus.read8(0x0f000020)).toBe(1);
+  });
+
+  it('replicates its byte on every lane of a wide read, ID included', () => {
+    const bus = busFor('FLASH1M_V103');
+    flashCommand(bus, 0x90);
+    expect(bus.read16(0x0e000000)).toBe(0x6262);
+    expect(bus.read32(0x0e000000) >>> 0).toBe(0x62626262);
+  });
+
+  it('keeps a command half sent and the bank in view across a snapshot', () => {
+    const bus = busFor('FLASH1M_V103');
+    flashBank(bus, 1);
+    bus.write8(0x0e005555, 0xaa);
+    bus.write8(0x0e002aaa, 0x55);
+    const loaded = busFor('FLASH1M_V103');
+    loaded.deserialize(bus.serialize());
+    expect(loaded.serialize().flash).toEqual(bus.serialize().flash);
+    // the command byte completes the sequence the snapshot caught half sent
+    loaded.write8(0x0e005555, 0xa0);
+    loaded.write8(0x0e000010, 0x42);
+    expect(loaded.readBackup()![0x10010]).toBe(0x42);
+  });
+
+  it('restores an older snapshot, from before the chip, out of its sram bytes into bank 0', () => {
+    const bus = busFor('FLASH1M_V103');
+    const snap = bus.serialize();
+    delete snap.flash;
+    snap.sram = pattern(0x10000);
+    const loaded = busFor('FLASH1M_V103');
+    loaded.deserialize(snap);
+    const restored = loaded.readBackup()!;
+    expect(restored.subarray(0, 0x10000)).toEqual(pattern(0x10000));
+    expect(restored.subarray(0x10000)).toEqual(new Uint8Array(0x10000).fill(0xff));
+    expect(loaded.read8(0x0e000000)).toBe(pattern(1)[0]);
   });
 });

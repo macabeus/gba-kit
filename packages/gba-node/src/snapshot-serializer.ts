@@ -76,15 +76,12 @@ export function serializeSnapshot(snap: GbaSnapshot): any {
         sendBuffer: snap.bus.eeprom.sendBuffer,
         sendPos: snap.bus.eeprom.sendPos,
       },
+      flash: snap.bus.flash ? { ...snap.bus.flash, data: typedArrayToBase64(snap.bus.flash.data) } : undefined,
     },
     ppu: {
+      ...snap.ppu,
       framebuffer: typedArrayToBase64(snap.ppu.framebuffer),
-      bg2RefX: snap.ppu.bg2RefX,
-      bg2RefY: snap.ppu.bg2RefY,
-      bg3RefX: snap.ppu.bg3RefX,
-      bg3RefY: snap.ppu.bg3RefY,
-      bg2RefLatched: snap.ppu.bg2RefLatched,
-      bg3RefLatched: snap.ppu.bg3RefLatched,
+      objLines: snap.ppu.objLines ? typedArrayToBase64(snap.ppu.objLines) : undefined,
     },
     apu: snap.apu
       ? {
@@ -154,15 +151,14 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
         sendBuffer: data.bus.eeprom.sendBuffer,
         sendPos: data.bus.eeprom.sendPos,
       },
+      // Older states have no flash chip; the bus restores a flash cartridge's bytes from `sram`.
+      flash: data.bus.flash ? { ...data.bus.flash, data: base64ToUint8Array(data.bus.flash.data) } : undefined,
     },
     ppu: {
+      ...data.ppu,
       framebuffer: base64ToUint32Array(data.ppu.framebuffer),
-      bg2RefX: data.ppu.bg2RefX,
-      bg2RefY: data.ppu.bg2RefY,
-      bg3RefX: data.ppu.bg3RefX,
-      bg3RefY: data.ppu.bg3RefY,
-      bg2RefLatched: data.ppu.bg2RefLatched,
-      bg3RefLatched: data.ppu.bg3RefLatched,
+      // Older states have no OBJ lines; the PPU rebuilds them.
+      objLines: data.ppu.objLines ? base64ToUint32Array(data.ppu.objLines) : undefined,
     },
     apu: data.apu
       ? {

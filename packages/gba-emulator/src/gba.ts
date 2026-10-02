@@ -52,10 +52,10 @@ const CARTRIDGE_ENTRY = 0x08000000;
 
 /** PPU rendering interface */
 export interface PpuInterface {
-  /** Render a single scanline */
+  /** Line-start work, at the first cycle of every scanline (0-227) */
+  beginScanline(line: number, bus: GbaSystemBus): void;
+  /** Render a single visible scanline */
   renderScanline(line: number, bus: GbaSystemBus): void;
-  /** Called at VBlank start */
-  onVBlank?(): void;
   /** Get the framebuffer */
   getFramebuffer(): Uint32Array;
   /** Reset */
@@ -153,8 +153,8 @@ export class Gba {
     // Connect APU to DMA for sound FIFO refills
     this.apu.connectDma(this.dma);
 
-    // Wire PPU ref point reload: when the game writes BG2X/BG2Y/BG3X/BG3Y,
-    // the PPU must reload its internal accumulators (for per-scanline affine effects).
+    // Wire PPU ref point reload: when the game writes BG2X/BG2Y/BG3X/BG3Y, the PPU reloads
+    // its internal accumulator at the next line start (for per-scanline affine effects).
     this.ppu.mmioRegisters = this.bus.mmioRegisters;
     this.bus.onBgRefPointWrite = (bgIndex, isX) => {
       this.ppu.reloadBgRefPoint(bgIndex, isX);
@@ -178,7 +178,7 @@ export class Gba {
 
     // Start at line 0, where the V-count comparison runs like on any other line
     this.display.setScanline(0);
-    this.#scheduleHBlank(this.scheduler.currentCycle);
+    this.#beginLine(this.scheduler.currentCycle);
   }
 
   /**
@@ -375,8 +375,12 @@ export class Gba {
 
   // ─── Scanline Timing ──────────────────────────────────────────────
 
-  /** A line began at the cycle `lineStart`: its HBlank comes HBLANK_START_CYCLE later. */
-  #scheduleHBlank(lineStart: number): void {
+  /**
+   * A line began at the cycle `lineStart`: the PPU takes its line-start state (DISPCNT latch, affine
+   * reference points, mosaic counters, the OBJ line), and HBlank comes HBLANK_START_CYCLE later.
+   */
+  #beginLine(lineStart: number): void {
+    this.ppu.beginScanline(this.#currentScanline, this.bus);
     this.scheduler.scheduleAt(EventId.HBlank, lineStart + HBLANK_START_CYCLE, (due) => this.#onHBlank(due));
   }
 
@@ -417,7 +421,7 @@ export class Gba {
       this.#onVBlankStart(due);
     }
 
-    this.#scheduleHBlank(due);
+    this.#beginLine(due);
   }
 
   #onVBlankStart(due: number): void {
@@ -426,9 +430,6 @@ export class Gba {
 
     // Trigger VBlank DMA
     this.dma.trigger(DmaStartTiming.VBlank, due);
-
-    // Notify PPU
-    this.ppu.onVBlank?.();
   }
 
   // ─── Save State ─────────────────────────────────────────────────
@@ -520,6 +521,6 @@ export class Gba {
     this.apu.reset();
     this.#skipBiosBoot();
     this.display.setScanline(0);
-    this.#scheduleHBlank(this.scheduler.currentCycle);
+    this.#beginLine(this.scheduler.currentCycle);
   }
 }

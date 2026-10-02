@@ -19,9 +19,12 @@
  *   0x82  SOUNDCNT_H   DirectSound volume, timer select, FIFO reset
  *   0x84  SOUNDCNT_X   Master enable, channel status
  *   0x88  SOUNDBIAS    Bias + resolution
- *   0x90-0x9F          Wave RAM (16 bytes)
+ *   0x90-0x9F          Wave RAM (the 16-byte bank channel 3 is not playing)
  *   0xA0  FIFO_A       DirectSound FIFO A (write-only, 32-bit)
  *   0xA4  FIFO_B       DirectSound FIFO B (write-only, 32-bit)
+ *
+ * The bus hands writes over at their own width (writeRegister8/16/32), so each byte keeps
+ * its own side effects.
  */
 import type { DmaController } from '../dma.js';
 import type { ApuSnapshot } from '../savestate.js';
@@ -37,6 +40,9 @@ const RING_BUFFER_SIZE = 4096;
 
 /** Default sample rate for output */
 const DEFAULT_SAMPLE_RATE = 32768;
+
+/** Right shift of the PSG mix for SOUNDCNT_H bits 0-1: 25%, 50%, 100%, and 3 (prohibited) as 100% */
+const PSG_RATIO_SHIFT = [4, 3, 2, 2] as const;
 
 // ─── APU Class ───────────────────────────────────────────────────────
 
@@ -140,29 +146,33 @@ export class Apu {
 
   // ─── MMIO Register Access ──────────────────────────────────────────
 
-  /** Read a 16-bit MMIO register (offset relative to 0x04000000) */
-  readRegister(offset: number): number {
+  /**
+   * Read the halfword at `offset` (relative to 0x04000000, even, 0x60-0x9E), with the
+   * write-only and unused bits read as 0 (GBATEK "GBA Sound Channel 1-4", mGBA src/gba/io.c
+   * GBAIOWrite masks). Reads have no side effects.
+   */
+  readRegister16(offset: number): number {
     switch (offset) {
       case 0x60:
         return this.#ch1.readSweep();
       case 0x62:
-        return this.#ch1.readDutyEnvelope();
+        return this.#ch1.readLengthDuty() | (this.#ch1.readEnvelope() << 8);
       case 0x64:
-        return this.#ch1.readFreqControl();
+        return this.#ch1.readFrequencyHigh() << 8;
       case 0x68:
-        return this.#ch2.readDutyEnvelope();
+        return this.#ch2.readLengthDuty() | (this.#ch2.readEnvelope() << 8);
       case 0x6c:
-        return this.#ch2.readFreqControl();
+        return this.#ch2.readFrequencyHigh() << 8;
       case 0x70:
         return this.#ch3.readControl();
       case 0x72:
-        return this.#ch3.readLengthVolume();
+        return this.#ch3.readVolume() << 8;
       case 0x74:
-        return this.#ch3.readFreqControl();
+        return this.#ch3.readFrequencyHigh() << 8;
       case 0x78:
-        return this.#ch4.readEnvelope();
+        return this.#ch4.readEnvelope() << 8;
       case 0x7c:
-        return this.#ch4.readFreqControl();
+        return this.#ch4.readFrequency() | (this.#ch4.readControl() << 8);
       case 0x80:
         return this.#readSoundcntL();
       case 0x82:
@@ -175,18 +185,23 @@ export class Apu {
         // Wave RAM (0x90-0x9F)
         if (offset >= 0x90 && offset <= 0x9f) {
           const ramOffset = offset - 0x90;
-          const lo = this.#ch3.readWaveRam(ramOffset);
-          const hi = this.#ch3.readWaveRam(ramOffset + 1);
-          return lo | (hi << 8);
+          return this.#ch3.readWaveRam(ramOffset) | (this.#ch3.readWaveRam(ramOffset + 1) << 8);
         }
         return 0;
     }
   }
 
-  /** Write a 16-bit MMIO register (offset relative to 0x04000000) */
-  writeRegister(offset: number, value: number): void {
-    if (!this.#masterEnable && offset !== 0x84 && offset !== 0x88) {
-      // When master sound is disabled, only SOUNDCNT_X and SOUNDBIAS are writable
+  /**
+   * Write one byte at `offset` (relative to 0x04000000, 0x60-0xA7). Each byte of a sound
+   * register has its own effect: a store to NRx3 sets frequency bits only, and only the NRx4
+   * byte restarts a channel (mGBA src/gba/io.c GBAIOWrite8, NanoBoyAdvance bus/io.cc).
+   */
+  writeRegister8(offset: number, value: number): void {
+    value &= 0xff;
+    // GBATEK SOUNDCNT_X: while bit 7 is cleared, "all PSG registers at 4000060h..4000081h are
+    // reset to zero" and hold there, while "registers 4000082h and 4000088h are kept
+    // read/write-able". Wave RAM stays writable too (mGBA src/gba/io.c GBAIOWrite32).
+    if (offset < 0x82 && !this.#masterEnable) {
       return;
     }
 
@@ -195,62 +210,113 @@ export class Apu {
         this.#ch1.writeSweep(value);
         break;
       case 0x62:
-        this.#ch1.writeDutyEnvelope(value);
+        this.#ch1.writeLengthDuty(value);
+        break;
+      case 0x63:
+        this.#ch1.writeEnvelope(value);
         break;
       case 0x64:
-        this.#ch1.writeFreqControl(value);
+        this.#ch1.writeFrequencyLow(value);
+        break;
+      case 0x65:
+        this.#ch1.writeFrequencyHigh(value);
         break;
       case 0x68:
-        this.#ch2.writeDutyEnvelope(value);
+        this.#ch2.writeLengthDuty(value);
+        break;
+      case 0x69:
+        this.#ch2.writeEnvelope(value);
         break;
       case 0x6c:
-        this.#ch2.writeFreqControl(value);
+        this.#ch2.writeFrequencyLow(value);
+        break;
+      case 0x6d:
+        this.#ch2.writeFrequencyHigh(value);
         break;
       case 0x70:
         this.#ch3.writeControl(value);
         break;
       case 0x72:
-        this.#ch3.writeLengthVolume(value);
+        this.#ch3.writeLength(value);
+        break;
+      case 0x73:
+        this.#ch3.writeVolume(value);
         break;
       case 0x74:
-        this.#ch3.writeFreqControl(value);
+        this.#ch3.writeFrequencyLow(value);
+        break;
+      case 0x75:
+        this.#ch3.writeFrequencyHigh(value);
         break;
       case 0x78:
+        this.#ch4.writeLength(value);
+        break;
+      case 0x79:
         this.#ch4.writeEnvelope(value);
         break;
       case 0x7c:
-        this.#ch4.writeFreqControl(value);
+        this.#ch4.writeFrequency(value);
+        break;
+      case 0x7d:
+        this.#ch4.writeControl(value);
         break;
       case 0x80:
-        this.#writeSoundcntL(value);
+        this.#psgVolumeRight = value & 7;
+        this.#psgVolumeLeft = (value >> 4) & 7;
+        break;
+      case 0x81:
+        this.#psgEnableRight = value & 0xf;
+        this.#psgEnableLeft = value >> 4;
         break;
       case 0x82:
-        this.#writeSoundcntH(value);
+        this.#writeSoundcntHLow(value);
+        break;
+      case 0x83:
+        this.#writeSoundcntHHigh(value);
         break;
       case 0x84:
         this.#writeSoundcntX(value);
         break;
       case 0x88:
-        this.#writeSoundbias(value);
+        this.#biasLevel = (this.#biasLevel & 0x300) | (value & 0xfe);
+        break;
+      case 0x89:
+        this.#biasLevel = (this.#biasLevel & 0xff) | ((value & 3) << 8);
+        this.#biasResolution = value >> 6;
         break;
       default:
-        // Wave RAM (0x90-0x9F)
         if (offset >= 0x90 && offset <= 0x9f) {
-          const ramOffset = offset - 0x90;
-          this.#ch3.writeWaveRam(ramOffset, value & 0xff);
-          this.#ch3.writeWaveRam(ramOffset + 1, (value >> 8) & 0xff);
+          this.#ch3.writeWaveRam(offset - 0x90, value);
+        } else if (offset >= 0xa0 && offset <= 0xa7) {
+          this.#fifo(offset).writeFifo(offset, value, 1);
         }
         break;
     }
   }
 
-  /** Handle 32-bit FIFO write from DMA or CPU */
-  writeFifo(channel: 0 | 1, value: number): void {
-    if (channel === 0) {
-      this.#dsA.writeFifo(value);
-    } else {
-      this.#dsB.writeFifo(value);
+  /** Write a halfword at an even `offset` (0x60-0xA6): a FIFO takes it whole, a register byte by byte */
+  writeRegister16(offset: number, value: number): void {
+    if (offset >= 0xa0 && offset <= 0xa7) {
+      this.#fifo(offset).writeFifo(offset, value & 0xffff, 2);
+      return;
     }
+    this.writeRegister8(offset, value);
+    this.writeRegister8(offset + 1, value >> 8);
+  }
+
+  /** Write a word at a word-aligned `offset` (0x60-0xA4): a FIFO takes it whole, a register by halfwords */
+  writeRegister32(offset: number, value: number): void {
+    if (offset === 0xa0 || offset === 0xa4) {
+      this.#fifo(offset).writeFifo(0, value, 4);
+      return;
+    }
+    this.writeRegister16(offset, value & 0xffff);
+    this.writeRegister16(offset + 2, value >>> 16);
+  }
+
+  /** FIFO A for 0xA0-0xA3, FIFO B for 0xA4-0xA7 */
+  #fifo(offset: number): DirectSoundChannel {
+    return offset < 0xa4 ? this.#dsA : this.#dsB;
   }
 
   // ─── SOUNDCNT_L (0x80): PSG Volume & Routing ──────────────────────
@@ -264,18 +330,11 @@ export class Apu {
     );
   }
 
-  #writeSoundcntL(value: number): void {
-    this.#psgVolumeRight = value & 7;
-    this.#psgVolumeLeft = (value >> 4) & 7;
-    this.#psgEnableRight = (value >> 8) & 0xf;
-    this.#psgEnableLeft = (value >> 12) & 0xf;
-  }
-
   // ─── SOUNDCNT_H (0x82): DirectSound Control ───────────────────────
 
   #readSoundcntH(): number {
     return (
-      (this.#dsA.fullVolume ? 0 : 0) | // bit 0-1: PSG volume ratio (unused here, stored in mmio)
+      this.#psgMasterVolume |
       (this.#dsA.fullVolume ? 1 << 2 : 0) |
       (this.#dsB.fullVolume ? 1 << 3 : 0) |
       (this.#dsA.enableRight ? 1 << 8 : 0) |
@@ -287,29 +346,27 @@ export class Apu {
     );
   }
 
-  #writeSoundcntH(value: number): void {
+  /** SOUNDCNT_H bits 0-7: PSG volume ratio, DirectSound A/B volume */
+  #writeSoundcntHLow(value: number): void {
     // bits 0-1: PSG volume ratio (0=25%, 1=50%, 2=100%)
-    // (stored in mmioRegisters by system bus for PSG mixing)
     this.#psgMasterVolume = value & 3;
-
     this.#dsA.fullVolume = (value & (1 << 2)) !== 0;
     this.#dsB.fullVolume = (value & (1 << 3)) !== 0;
+  }
 
-    this.#dsA.enableRight = (value & (1 << 8)) !== 0;
-    this.#dsA.enableLeft = (value & (1 << 9)) !== 0;
-    this.#dsA.timerSelect = (value >> 10) & 1;
-
-    // Bit 11: reset FIFO A
-    if (value & (1 << 11)) {
+  /** SOUNDCNT_H bits 8-15: DirectSound routing and timers; bits 11 and 15 reset a FIFO when written as 1 */
+  #writeSoundcntHHigh(value: number): void {
+    this.#dsA.enableRight = (value & (1 << 0)) !== 0;
+    this.#dsA.enableLeft = (value & (1 << 1)) !== 0;
+    this.#dsA.timerSelect = (value >> 2) & 1;
+    if (value & (1 << 3)) {
       this.#dsA.resetFifo();
     }
 
-    this.#dsB.enableRight = (value & (1 << 12)) !== 0;
-    this.#dsB.enableLeft = (value & (1 << 13)) !== 0;
-    this.#dsB.timerSelect = (value >> 14) & 1;
-
-    // Bit 15: reset FIFO B
-    if (value & (1 << 15)) {
+    this.#dsB.enableRight = (value & (1 << 4)) !== 0;
+    this.#dsB.enableLeft = (value & (1 << 5)) !== 0;
+    this.#dsB.timerSelect = (value >> 6) & 1;
+    if (value & (1 << 7)) {
       this.#dsB.resetFifo();
     }
   }
@@ -334,10 +391,11 @@ export class Apu {
     this.#masterEnable = (value & 0x80) !== 0;
 
     if (wasEnabled && !this.#masterEnable) {
-      // Master sound disabled: reset all channels
+      // Master sound off zeroes the PSG registers 0x60-0x81; wave RAM keeps its contents
+      // (NanoBoyAdvance registers.cc SoundControl::Write, ResetWaveRAM::No).
       this.#ch1.reset();
       this.#ch2.reset();
-      this.#ch3.reset();
+      this.#ch3.powerOff();
       this.#ch4.reset();
       this.#psgVolumeRight = 0;
       this.#psgVolumeLeft = 0;
@@ -349,45 +407,41 @@ export class Apu {
   // ─── SOUNDBIAS (0x88) ─────────────────────────────────────────────
 
   #readSoundbias(): number {
-    return (this.#biasLevel & 0x3ff) | (this.#biasResolution << 14);
-  }
-
-  #writeSoundbias(value: number): void {
-    this.#biasLevel = value & 0x3ff;
-    this.#biasResolution = (value >> 14) & 3;
+    return this.#biasLevel | (this.#biasResolution << 14);
   }
 
   // ─── Sample Generation ─────────────────────────────────────────────
 
   /** Advance APU state by the given number of CPU cycles */
   tick(cycles: number): void {
-    if (!this.#masterEnable) {
-      this.#sampleTimer += cycles;
-      while (this.#sampleTimer >= this.#cyclesPerSample) {
-        this.#sampleTimer -= this.#cyclesPerSample;
-        this.#pushSample(0, 0);
+    // Advance in slices that end on sample boundaries, so each sample sees the channels as
+    // they are at its own cycle, however long the caller's batch is.
+    while (cycles > 0) {
+      const slice = Math.min(cycles, Math.max(0, this.#cyclesPerSample - this.#sampleTimer));
+      cycles -= slice;
+
+      if (this.#masterEnable) {
+        this.#ch1.clockTimer(slice);
+        this.#ch2.clockTimer(slice);
+        this.#ch3.clockTimer(slice);
+        this.#ch4.clockTimer(slice);
+
+        this.#frameSequencerTimer += slice;
+        while (this.#frameSequencerTimer >= FRAME_SEQUENCER_PERIOD) {
+          this.#frameSequencerTimer -= FRAME_SEQUENCER_PERIOD;
+          this.#clockFrameSequencer();
+        }
       }
-      return;
-    }
 
-    // Clock PSG timers
-    this.#ch1.clockTimer(cycles);
-    this.#ch2.clockTimer(cycles);
-    this.#ch3.clockTimer(cycles);
-    this.#ch4.clockTimer(cycles);
-
-    // Frame sequencer
-    this.#frameSequencerTimer += cycles;
-    while (this.#frameSequencerTimer >= FRAME_SEQUENCER_PERIOD) {
-      this.#frameSequencerTimer -= FRAME_SEQUENCER_PERIOD;
-      this.#clockFrameSequencer();
-    }
-
-    // Output sample
-    this.#sampleTimer += cycles;
-    while (this.#sampleTimer >= this.#cyclesPerSample) {
-      this.#sampleTimer -= this.#cyclesPerSample;
-      this.#generateSample();
+      this.#sampleTimer += slice;
+      if (this.#sampleTimer >= this.#cyclesPerSample) {
+        this.#sampleTimer -= this.#cyclesPerSample;
+        if (this.#masterEnable) {
+          this.#generateSample();
+        } else {
+          this.#pushSample(0, 0);
+        }
+      }
     }
   }
 
@@ -417,6 +471,12 @@ export class Apu {
     this.#frameSequencerStep = (step + 1) & 7;
   }
 
+  /**
+   * Mix one output sample in the 10-bit DAC's units. GBATEK "Max Output Levels": "Each of the
+   * two FIFOs can span the FULL output range (+/-200h). Each of the four PSGs can span one
+   * QUARTER of the output range (+/-80h)." The sum plus SOUNDBIAS is clipped to 0..3FFh, and
+   * the sink gets it relative to the bias (mGBA src/gba/audio.c _applyBias), 0x200 = 1.0.
+   */
   #generateSample(): void {
     // Get PSG channel outputs (0-15 each)
     const ch1Out = this.#ch1.output;
@@ -454,48 +514,27 @@ export class Apu {
       psgRight += ch4Out;
     }
 
-    // Apply PSG per-side volume (0-7 -> multiply by 1-8)
-    psgLeft *= this.#psgVolumeLeft + 1;
-    psgRight *= this.#psgVolumeRight + 1;
+    // A channel at volume 15, master volume 7 and ratio 100% spans 15 * 8 * 8 >> 2 = 240
+    // (mGBA src/gb/audio.c GBAudioSamplePSG: (sum << 3) * (1 + volume), then
+    // >> (4 - ratio) in src/gba/audio.c GBAAudioSample).
+    const psgShift = PSG_RATIO_SHIFT[this.#psgMasterVolume]!;
+    psgLeft = ((psgLeft << 3) * (this.#psgVolumeLeft + 1)) >> psgShift;
+    psgRight = ((psgRight << 3) * (this.#psgVolumeRight + 1)) >> psgShift;
 
-    // Apply PSG master volume ratio from SOUNDCNT_H bits 0-1
-    // 0=25%, 1=50%, 2=100%, 3=forbidden (treat as 100%)
-    const psgShift = this.#psgMasterVolume >= 2 ? 0 : 2 - this.#psgMasterVolume;
-    psgLeft >>= psgShift;
-    psgRight >>= psgShift;
+    // DirectSound: signed 8-bit samples, << 2 spans -0x200..0x1FC at 100%, half at 50%.
+    const dsA = (this.#dsA.currentSample << 2) >> (this.#dsA.fullVolume ? 0 : 1);
+    const dsB = (this.#dsB.currentSample << 2) >> (this.#dsB.fullVolume ? 0 : 1);
 
-    // DirectSound samples: signed 8-bit (-128..127)
-    const dsASample = this.#dsA.currentSample;
-    const dsBSample = this.#dsB.currentSample;
+    const left = psgLeft + (this.#dsA.enableLeft ? dsA : 0) + (this.#dsB.enableLeft ? dsB : 0);
+    const right = psgRight + (this.#dsA.enableRight ? dsA : 0) + (this.#dsB.enableRight ? dsB : 0);
 
-    // DirectSound volume: 50% or 100%
-    const dsALeft = this.#dsA.enableLeft ? (this.#dsA.fullVolume ? dsASample : dsASample >> 1) : 0;
-    const dsARight = this.#dsA.enableRight ? (this.#dsA.fullVolume ? dsASample : dsASample >> 1) : 0;
-    const dsBLeft = this.#dsB.enableLeft ? (this.#dsB.fullVolume ? dsBSample : dsBSample >> 1) : 0;
-    const dsBRight = this.#dsB.enableRight ? (this.#dsB.fullVolume ? dsBSample : dsBSample >> 1) : 0;
+    this.#pushSample(this.#dacOutput(left), this.#dacOutput(right));
+  }
 
-    // Mix: PSG range ~0..960, DirectSound range ~-128..127
-    // Normalize PSG to roughly same scale as DirectSound: PSG max = 15*8*4 = 480
-    // SOUNDBIAS adds a DC offset; final range is 0..0x3FF (10-bit)
-    let left = psgLeft / 4 + dsALeft + dsBLeft;
-    let right = psgRight / 4 + dsARight + dsBRight;
-
-    // Apply bias
-    left += this.#biasLevel;
-    right += this.#biasLevel;
-
-    // Clamp to 10-bit range (0..0x3FF)
-    left = Math.max(0, Math.min(0x3ff, left));
-    right = Math.max(0, Math.min(0x3ff, right));
-
-    // Convert to float [-1.0, 1.0]: center at bias, then amplify.
-    // The GBA's 10-bit DAC range (0-0x3FF) with bias at 0x200 maps audio to ±0x200.
-    // DirectSound's max amplitude is ±128, which is only 25% of that range.
-    // Apply 4× gain to bring DirectSound-heavy audio to comfortable levels.
-    const floatLeft = Math.max(-1, Math.min(1, ((left - 0x200) / 0x200) * 4));
-    const floatRight = Math.max(-1, Math.min(1, ((right - 0x200) / 0x200) * 4));
-
-    this.#pushSample(floatLeft, floatRight);
+  /** Add SOUNDBIAS, clip to the DAC's 0..3FFh, and scale the level around the bias to the sink's [-1, 1] */
+  #dacOutput(level: number): number {
+    const dac = Math.min(0x3ff, Math.max(0, level + this.#biasLevel));
+    return Math.min(1, Math.max(-1, (dac - this.#biasLevel) / 0x200));
   }
 
   #pushSample(left: number, right: number): void {
@@ -578,7 +617,7 @@ export class Apu {
     this.#psgEnableLeft = snap.psgEnableLeft;
     this.#psgMasterVolume = snap.psgMasterVolume;
     this.#masterEnable = snap.masterEnable;
-    this.#biasLevel = snap.biasLevel;
+    this.#biasLevel = snap.biasLevel & 0x3fe;
     this.#biasResolution = snap.biasResolution;
 
     // Clear the ring buffer (ephemeral audio output)

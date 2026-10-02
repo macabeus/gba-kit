@@ -524,7 +524,8 @@ export class ScriptingEngine {
           address = 0x04000000;
           break;
         case 'sram':
-          data = new Uint8Array(bus.sram);
+          // the 64 KB window as a CPU reads it: SRAM, or the flash bank in view
+          data = bus.peek(0x0e000000, 0x10000).data;
           address = 0x0e000000;
           break;
         default:
