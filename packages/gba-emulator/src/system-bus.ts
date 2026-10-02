@@ -13,12 +13,13 @@
  *   0x06000000-0x06017FFF  VRAM (96 KB)
  *   0x07000000-0x070003FF  OAM (1 KB)
  *   0x08000000-0x09FFFFFF  Game Pak ROM (up to 32 MB)
- *   0x0E000000-0x0E00FFFF  Game Pak SRAM (64 KB)
+ *   0x0E000000-0x0E00FFFF  Game Pak SRAM (32 KB, mirrored) or flash (one 64 KB bank)
  */
 import type { MemoryBus } from '@gba-kit/arm-emulator';
 
 import type { Apu } from './apu/apu.js';
 import type { DmaController } from './dma.js';
+import { ERASED_BYTE, FLASH_BANK_BYTES, GbaFlash } from './flash.js';
 import type { InputController } from './input.js';
 import type { InterruptController } from './interrupts.js';
 import type { EepromSnapshot, SystemBusSnapshot } from './savestate.js';
@@ -65,7 +66,10 @@ export interface CartridgeSave {
   id: string | null;
 }
 
-/** The SDK's save-type strings; no one of them is a prefix of another, so the order is free. */
+/**
+ * The SDK's save-type strings, GBATEK "GBA Cart Backup IDs"; no one of them is a prefix of
+ * another, so the order is free.
+ */
 const SAVE_TYPE_STRINGS: ReadonlyArray<readonly [string, SaveType]> = [
   ['EEPROM_V', 'eeprom'],
   ['SRAM_F_V', 'sram'],
@@ -75,11 +79,17 @@ const SAVE_TYPE_STRINGS: ReadonlyArray<readonly [string, SaveType]> = [
   ['FLASH_V', 'flash512'],
 ];
 
-/** The shortest declaration there could be, so the scan stops once no room is left for one. */
-const MIN_SAVE_ID = Math.min(...SAVE_TYPE_STRINGS.map(([prefix]) => prefix.length)) + 3;
+/** The shortest prefix there is, so the scan stops once no room is left for one. */
+const MIN_SAVE_PREFIX = Math.min(...SAVE_TYPE_STRINGS.map(([prefix]) => prefix.length));
+
+/** The version digits the SDK appends to the prefix (`SRAM_V113`). */
+const SAVE_VERSION_DIGITS = 3;
 
 /** The EEPROM chip's array: 64 Kbit, which a 4 Kbit cartridge uses the first 512 bytes of. */
 const EEPROM_BYTES = 0x2000;
+
+/** The SRAM chip: 32 KB, mirrored through the 64 KB window (mGBA GBA_SIZE_SRAM, NBA SRAM::Read). */
+const SRAM_BYTES = 0x8000;
 
 function matchesAt(rom: Uint8Array, at: number, text: string): boolean {
   for (let i = 0; i < text.length; i++) {
@@ -134,17 +144,17 @@ export class GbaSystemBus implements MemoryBus {
   /** Game Pak ROM — set via loadRom() */
   #rom = new Uint8Array(0);
 
-  /** Game Pak SRAM (64 KB) */
-  readonly sram = new Uint8Array(0x10000);
+  /** Game Pak SRAM (32 KB), erased */
+  readonly sram = new Uint8Array(SRAM_BYTES).fill(ERASED_BYTE);
 
   /** Game Pak EEPROM */
   readonly #eeprom = new GbaEeprom();
 
+  /** Game Pak flash; holds a chip when the ROM declares one */
+  readonly #flash = new GbaFlash();
+
   /** What the cartridge's ROM declares about its save; cartridge identity, like #rom */
   #save: CartridgeSave = { type: null, id: null };
-
-  /** Whether the 0x0E window is backed by a chip: every save type but EEPROM, which is serial */
-  #hasSram = false;
 
   /** WAITCNT register */
   #waitcnt = 0;
@@ -324,24 +334,34 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   /**
-   * The save type from the SDK string the build embeds. The string is word-aligned and
-   * ends in three version digits, and requiring both is what keeps a chance run of
-   * letters elsewhere in the ROM — inside compressed data, most of all — from being
-   * read as a declaration.
+   * The save type from the SDK string the build embeds, and the chip that goes with it.
+   * The string is word-aligned. The SDK ends it in three version digits, and a string that
+   * has them wins over any bare prefix, which keeps a chance run of letters elsewhere in
+   * the ROM — inside compressed data, most of all — from outvoting the declaration. A ROM
+   * whose strings all lack the digits, as homebrew and test ROMs write them (`SRAM_V`),
+   * takes the first bare prefix, the way NanoBoyAdvance matches (loader/rom.cc GetBackupType).
    */
   #detectSaveType(rom: Uint8Array): void {
-    this.#save = { type: null, id: null };
-    for (let i = 0; i + MIN_SAVE_ID <= rom.length; i += 4) {
+    this.#save = this.#findSaveDeclaration(rom);
+    const type = this.#save.type;
+    this.#flash.insert(type === 'flash1m' ? 2 : type === 'flash512' ? 1 : 0);
+  }
+
+  #findSaveDeclaration(rom: Uint8Array): CartridgeSave {
+    let barePrefix: CartridgeSave | null = null;
+    for (let i = 0; i + MIN_SAVE_PREFIX <= rom.length; i += 4) {
       for (const [prefix, type] of SAVE_TYPE_STRINGS) {
-        if (!matchesAt(rom, i, prefix) || !digitsAt(rom, i + prefix.length, 3)) {
+        if (!matchesAt(rom, i, prefix)) {
           continue;
         }
-        this.#save = { type, id: String.fromCharCode(...rom.subarray(i, i + prefix.length + 3)) };
-        this.#hasSram = type !== 'eeprom';
-        return;
+        const end = i + prefix.length;
+        if (digitsAt(rom, end, SAVE_VERSION_DIGITS)) {
+          return { type, id: String.fromCharCode(...rom.subarray(i, end + SAVE_VERSION_DIGITS)) };
+        }
+        barePrefix ??= { type, id: prefix };
       }
     }
-    this.#hasSram = false;
+    return barePrefix ?? { type: null, id: null };
   }
 
   /** What the cartridge's ROM declares about its battery-backed save. */
@@ -359,9 +379,9 @@ export class GbaSystemBus implements MemoryBus {
 
   /**
    * The cartridge's battery-backed memory, whole, in the byte order a `.sav` file uses:
-   * the EEPROM for an EEPROM cartridge, the SRAM window for every other kind. A copy —
-   * unlike a read through the bus, this clocks no serial protocol. Null when the ROM
-   * declares no save, because then there is no chip to read.
+   * the EEPROM, the SRAM or the flash chip with bank 0 first. A copy — unlike a read
+   * through the bus, this clocks no serial protocol and answers no flash command. Null
+   * when the ROM declares no save, because then there is no chip to read.
    */
   readBackup(): Uint8Array | null {
     switch (this.#save.type) {
@@ -369,8 +389,11 @@ export class GbaSystemBus implements MemoryBus {
         return null;
       case 'eeprom':
         return this.#eeprom.read8();
-      default:
+      case 'sram':
         return new Uint8Array(this.sram);
+      case 'flash512':
+      case 'flash1m':
+        return this.#flash.readAll();
     }
   }
 
@@ -383,16 +406,23 @@ export class GbaSystemBus implements MemoryBus {
     if (this.#save.type === null) {
       throw new Error('this ROM declares no save type');
     }
-    const target = this.#save.type === 'eeprom' ? EEPROM_BYTES : this.sram.length;
+    const type = this.#save.type;
+    const target = type === 'eeprom' ? EEPROM_BYTES : type === 'sram' ? this.sram.length : this.#flash.size;
     if (bytes.length > target) {
       throw new Error(`${bytes.length} bytes do not fit in ${target}`);
     }
-    if (this.#save.type === 'eeprom') {
-      this.#eeprom.install(bytes);
-      return;
+    switch (type) {
+      case 'eeprom':
+        this.#eeprom.install(bytes);
+        return;
+      case 'sram':
+        this.sram.fill(ERASED_BYTE);
+        this.sram.set(bytes);
+        return;
+      case 'flash512':
+      case 'flash1m':
+        this.#flash.install(bytes);
     }
-    this.sram.fill(0);
-    this.sram.set(bytes);
   }
 
   // ─── Memory Map Classification ────────────────────────────────────
@@ -447,7 +477,8 @@ export class GbaSystemBus implements MemoryBus {
       }
       case 0x0e:
       case 0x0f:
-        return this.#hasSram ? this.sram[addr & 0xffff]! : null;
+        // what a CPU read returns, which for a flash chip in ID mode is its ID
+        return this.#hasSaveWindow() ? this.#readSave8(addr) : null;
       default:
         return null; // EEPROM (a protocol, not bytes), and everything unmapped
     }
@@ -489,10 +520,13 @@ export class GbaSystemBus implements MemoryBus {
           break;
         case 0x0e:
         case 0x0f:
-          if (!this.#hasSram) {
+          if (this.#save.type === 'sram') {
+            this.sram[addr & (SRAM_BYTES - 1)] = value;
+          } else if (this.#flash.size > 0) {
+            this.#flash.poke8(addr, value); // the bank the window shows, outside the command protocol
+          } else {
             return written;
           }
-          this.sram[addr & 0xffff] = value;
           break;
         default:
           return written;
@@ -604,7 +638,7 @@ export class GbaSystemBus implements MemoryBus {
         return this.#readRom8(address);
       case 0x0e:
       case 0x0f:
-        return this.#hasSram ? this.sram[address & 0xffff]! : 0xff;
+        return this.#readSave8(address);
       default:
         return 0; // Open bus
     }
@@ -647,11 +681,8 @@ export class GbaSystemBus implements MemoryBus {
         return this.#eeprom.read();
       case 0x0e:
       case 0x0f: {
-        if (!this.#hasSram) {
-          return 0xffff;
-        }
-        // SRAM has 8-bit bus: wider reads replicate the byte
-        const byte = this.sram[address & 0xffff]!;
+        // The save chip sits on an 8-bit bus: a wider read returns its byte on every lane
+        const byte = this.#readSave8(address);
         return byte | (byte << 8);
       }
       default:
@@ -698,11 +729,8 @@ export class GbaSystemBus implements MemoryBus {
         return this.#eeprom.read();
       case 0x0e:
       case 0x0f: {
-        if (!this.#hasSram) {
-          return 0xffffffff;
-        }
-        // SRAM has 8-bit bus: wider reads replicate the byte
-        const byte = this.sram[address & 0xffff]!;
+        // The save chip sits on an 8-bit bus: a wider read returns its byte on every lane
+        const byte = this.#readSave8(address);
         return (byte | (byte << 8) | (byte << 16) | (byte << 24)) >>> 0;
       }
       default:
@@ -752,11 +780,7 @@ export class GbaSystemBus implements MemoryBus {
         break;
       case 0x0e:
       case 0x0f:
-        if (this.#hasSram) {
-          this.sram[address & 0xffff] = value;
-        } else {
-          committed = false;
-        }
+        committed = this.#writeSave8(address, value & 0xff);
         break;
       // OAM (0x07) ignores 8-bit writes; ROM/BIOS/unmapped regions are read-only.
       default:
@@ -799,12 +823,8 @@ export class GbaSystemBus implements MemoryBus {
         break;
       case 0x0e:
       case 0x0f:
-        if (this.#hasSram) {
-          // SRAM has 8-bit bus: wider writes only write the low byte
-          this.sram[address & 0xffff] = value & 0xff;
-        } else {
-          committed = false;
-        }
+        // The save chip sits on an 8-bit bus: a wider write hands it the low byte
+        committed = this.#writeSave8(address, value & 0xff);
         break;
       // ROM/BIOS/unmapped regions are read-only.
       default:
@@ -847,12 +867,8 @@ export class GbaSystemBus implements MemoryBus {
         break;
       case 0x0e:
       case 0x0f:
-        if (this.#hasSram) {
-          // SRAM has 8-bit bus: wider writes only write the low byte
-          this.sram[address & 0xffff] = value & 0xff;
-        } else {
-          committed = false;
-        }
+        // The save chip sits on an 8-bit bus: a wider write hands it the low byte
+        committed = this.#writeSave8(address, value & 0xff);
         break;
       // ROM/BIOS/unmapped regions are read-only.
       default:
@@ -862,6 +878,38 @@ export class GbaSystemBus implements MemoryBus {
     if (committed && this.#watchpoints.length > 0) {
       this.#notifyWrite(this.#canonicalAddress(addr), value >>> 0, 4);
     }
+  }
+
+  // ─── Cartridge Save Window (0x0E) ─────────────────────────────────
+
+  /** Whether a chip answers in the 0x0E window: SRAM and flash do, EEPROM is serial on 0x0D. */
+  #hasSaveWindow(): boolean {
+    return this.#save.type === 'sram' || this.#flash.size > 0;
+  }
+
+  /**
+   * The byte the chip behind the 0x0E window drives at `address`: SRAM mirrored every
+   * 32 KB, the flash chip by its protocol, and 0xFF when no chip answers (mGBA GBALoad8,
+   * jsmolka gba-tests save/none).
+   */
+  #readSave8(address: number): number {
+    if (this.#save.type === 'sram') {
+      return this.sram[address & (SRAM_BYTES - 1)]!;
+    }
+    return this.#flash.size > 0 ? this.#flash.read8(address) : 0xff;
+  }
+
+  /** Hand one byte to the chip behind the 0x0E window; false when no chip takes it. */
+  #writeSave8(address: number, value: number): boolean {
+    if (this.#save.type === 'sram') {
+      this.sram[address & (SRAM_BYTES - 1)] = value;
+      return true;
+    }
+    if (this.#flash.size > 0) {
+      this.#flash.write8(address, value);
+      return true;
+    }
+    return false;
   }
 
   // ─── BIOS Access ──────────────────────────────────────────────────
@@ -933,7 +981,7 @@ export class GbaSystemBus implements MemoryBus {
         return (0x07000000 | (address & 0x3ff)) >>> 0;
       case 0x0e:
       case 0x0f:
-        return (0x0e000000 | (address & 0xffff)) >>> 0;
+        return (0x0e000000 | (address & ((this.#save.type === 'sram' ? SRAM_BYTES : FLASH_BANK_BYTES) - 1))) >>> 0;
       default:
         return address >>> 0;
     }
@@ -1251,11 +1299,12 @@ export class GbaSystemBus implements MemoryBus {
       oam: new Uint8Array(this.oam),
       sram: new Uint8Array(this.sram),
       mmioRegisters: new Uint8Array(this.mmioRegisters),
-      hasSram: this.#hasSram,
+      hasSram: this.#hasSaveWindow(),
       waitcnt: this.#waitcnt,
       postflg: this.#postflg,
       lastBiosRead: this.#lastBiosRead,
       eeprom: this.#eeprom.serialize(),
+      flash: this.#flash.serialize(),
     };
   }
 
@@ -1266,10 +1315,12 @@ export class GbaSystemBus implements MemoryBus {
     this.palette.set(snap.palette);
     this.vram.set(snap.vram);
     this.oam.set(snap.oam);
-    this.sram.set(snap.sram);
+    this.sram.set(snap.sram.subarray(0, SRAM_BYTES));
     this.mmioRegisters.set(snap.mmioRegisters);
     // `snap.hasSram` is passed over: what is behind the 0x0E window is the cartridge's to
-    // say, like #rom, and a state of a cartridge without one must not take this one's away
+    // say, like #rom, and a state of a cartridge without one must not take this one's away.
+    // A snapshot from before the flash chip kept a flash cartridge's bytes in `sram`.
+    this.#flash.deserialize(snap.flash ?? { data: snap.sram, unlock: 0, command: 0, bank: 0 });
     this.#waitcnt = snap.waitcnt;
     this.#postflg = snap.postflg;
     this.#lastBiosRead = snap.lastBiosRead;
@@ -1283,8 +1334,9 @@ export class GbaSystemBus implements MemoryBus {
     this.palette.fill(0);
     this.vram.fill(0);
     this.oam.fill(0);
-    this.sram.fill(0);
+    this.sram.fill(ERASED_BYTE);
     this.#eeprom.reset();
+    this.#flash.reset();
     this.mmioRegisters.set(powerOnIoRegisters());
     this.#waitcnt = 0;
     this.#postflg = 0;

@@ -108,12 +108,25 @@ export interface EepromSnapshot {
   sendPos: number;
 }
 
+/** The cartridge's flash chip (`flash.ts`). */
+export interface FlashSnapshot {
+  /** The whole chip, bank 0 first: 64 KB or 128 KB, empty on a cartridge without flash. */
+  data: Uint8Array;
+  /** How far into an unlock sequence the chip is (0 to 2). */
+  unlock: number;
+  /** The command in effect, by its command byte (0 for none). */
+  command: number;
+  /** The bank the 0x0E window shows. */
+  bank: number;
+}
+
 export interface SystemBusSnapshot {
   ewram: Uint8Array;
   iwram: Uint8Array;
   palette: Uint8Array;
   vram: Uint8Array;
   oam: Uint8Array;
+  /** The 32 KB SRAM chip. Older snapshots carry 64 KB, the window as it was served; its first 32 KB restore. */
   sram: Uint8Array;
   mmioRegisters: Uint8Array;
   /** Whether the 0x0E window is backed. The cartridge answers for it, so `deserialize` passes over this; it stays in the snapshot for readers that take it from there. */
@@ -122,6 +135,8 @@ export interface SystemBusSnapshot {
   postflg: number;
   lastBiosRead: number;
   eeprom: EepromSnapshot;
+  /** Older snapshots omit it: a flash cartridge's bytes were then in `sram`, which restores into bank 0, in read mode. */
+  flash?: FlashSnapshot;
 }
 
 // ─── PPU ──────────────────────────────────────────────────────────────

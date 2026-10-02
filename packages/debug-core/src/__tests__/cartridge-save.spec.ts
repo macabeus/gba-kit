@@ -18,6 +18,8 @@ describe('which .sav belongs in which cartridge', () => {
     [EEPROM, 512],
     [EEPROM, 8192],
     [SRAM, 32768],
+    [FLASH, 65536],
+    [FLASH1M, 131072],
   ])('takes a %o file of %i bytes', (save, size) => {
     expect(() => checkSaveFile(save, size)).not.toThrow();
   });
@@ -28,21 +30,11 @@ describe('which .sav belongs in which cartridge', () => {
     [EEPROM, 0, 'this ROM declares EEPROM_V121, whose save is 512 or 8192 bytes; this file is 0 bytes'],
     [SRAM, 0, 'this ROM declares SRAM_V113, whose save is 32768 bytes; this file is 0 bytes'],
     [NOTHING, 512, 'this ROM declares no save type, so there is nowhere to put a .sav'],
+    [FLASH, 32768, 'this ROM declares FLASH512_V130, whose save is 65536 bytes; this file is 32768 bytes'],
+    [FLASH, 131072, 'this ROM declares FLASH512_V130, whose save is 65536 bytes; this file is 131072 bytes'],
+    [FLASH1M, 65536, 'this ROM declares FLASH1M_V103, whose save is 131072 bytes; this file is 65536 bytes'],
   ])('refuses %o at %i bytes', (save, size, message) => {
     expect(() => checkSaveFile(save, size)).toThrow(message);
-  });
-
-  it.each([
-    [FLASH, 65536],
-    [FLASH, 32768],
-    [FLASH, 0],
-    [FLASH1M, 131072],
-    [FLASH1M, 65536],
-  ])('refuses %o at %i bytes, because no game could read it back', (save, size) => {
-    expect(() => checkSaveFile(save, size)).toThrow(
-      `this ROM declares ${save.id}, a flash chip; gba-kit backs the cartridge with plain ` +
-        'memory and emulates no flash chip, so a game cannot read a flash .sav back',
-    );
   });
 });
 
@@ -51,6 +43,8 @@ describe('how big the exported file is', () => {
     [SRAM, 0, 32768],
     [EEPROM, 512, 512],
     [EEPROM, 8192, 8192],
+    [FLASH, 0, 65536],
+    [FLASH1M, 0, 131072],
   ])('gives %o with a %i byte chip %i bytes', (save, eepromBytes, size) => {
     expect(saveFileSize(save, eepromBytes)).toBe(size);
   });
@@ -64,10 +58,6 @@ describe('how big the exported file is', () => {
 
   it('has nothing to export from a ROM that declares no save', () => {
     expect(() => saveFileSize(NOTHING, 0)).toThrow('this ROM declares no save type, so it has no save to export');
-  });
-
-  it.each([FLASH, FLASH1M])('has nothing worth exporting from %o, which the game never wrote', (save) => {
-    expect(() => saveFileSize(save, 0)).toThrow(/emulates no flash chip/);
   });
 
   it('answers with the size the declaration gives, not the array in memory', () => {

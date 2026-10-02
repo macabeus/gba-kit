@@ -74,6 +74,7 @@ export function serializeSnapshot(snap: GbaSnapshot): any {
         sendBuffer: snap.bus.eeprom.sendBuffer,
         sendPos: snap.bus.eeprom.sendPos,
       },
+      flash: snap.bus.flash ? { ...snap.bus.flash, data: typedArrayToBase64(snap.bus.flash.data) } : undefined,
     },
     ppu: {
       ...snap.ppu,
@@ -144,6 +145,8 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
         sendBuffer: data.bus.eeprom.sendBuffer,
         sendPos: data.bus.eeprom.sendPos,
       },
+      // Older states have no flash chip; the bus restores a flash cartridge's bytes from `sram`.
+      flash: data.bus.flash ? { ...data.bus.flash, data: base64ToUint8Array(data.bus.flash.data) } : undefined,
     },
     ppu: {
       ...data.ppu,

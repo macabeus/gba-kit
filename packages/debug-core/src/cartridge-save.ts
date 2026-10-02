@@ -10,7 +10,7 @@
  */
 import type { CartridgeSave, SaveType } from '@gba-kit/gba-emulator';
 
-/** The `.sav` sizes each declared save type has; the flash ones bound what a file could be, since no flash save is taken. */
+/** The `.sav` sizes each declared save type has. */
 export const SAVE_FILE_SIZES: Record<SaveType, readonly number[]> = {
   eeprom: [512, 8192], // 4 Kbit and 64 Kbit, which the chip's address width tells apart, not the file
   sram: [32768],
@@ -23,20 +23,6 @@ export const MAX_SAVE_FILE_SIZE = Math.max(...Object.values(SAVE_FILE_SIZES).fla
 
 /** How many states may share a name before `freeStateName` gives up looking for a free one. */
 const MAX_SAME_NAME = 999;
-
-/**
- * gba-kit serves the 0x0E window as plain memory and emulates no flash chip: the
- * identify sequence a flash driver starts with is not answered, so the game reads save
- * bytes where a chip ID should be, gives up, and never reads the save at all — while
- * the command bytes it wrote land in the save as data. A 1 Mbit chip is further out of
- * reach still: two banks of 64 KB, where there is one window and no bank register.
- */
-function refuseFlash(save: CartridgeSave): never {
-  throw new Error(
-    `this ROM declares ${save.id}, a flash chip; gba-kit backs the cartridge with plain ` +
-      'memory and emulates no flash chip, so a game cannot read a flash .sav back',
-  );
-}
 
 /** `512 or 8192 bytes`: the sizes a type's file is allowed to be, as a message says them. */
 function sizesOf(type: SaveType): string {
@@ -52,9 +38,6 @@ export function checkSaveFile(save: CartridgeSave, byteLength: number): void {
   if (save.type === null) {
     throw new Error('this ROM declares no save type, so there is nowhere to put a .sav');
   }
-  if (save.type === 'flash512' || save.type === 'flash1m') {
-    refuseFlash(save);
-  }
   if (!SAVE_FILE_SIZES[save.type].includes(byteLength)) {
     throw new Error(
       `this ROM declares ${save.id}, whose save is ${sizesOf(save.type)}; this file is ${byteLength} bytes`,
@@ -63,17 +46,14 @@ export function checkSaveFile(save: CartridgeSave, byteLength: number): void {
 }
 
 /**
- * How many bytes of a cartridge's backup memory belong in its `.sav`: the declared
- * type's size, never the array's — the SRAM window is always 64 KB in memory but an
- * `SRAM_V` cartridge's file is 32 KB. An EEPROM's size is not in the string, so the
- * chip answers for it, and while nothing has told it there is no answer to give.
+ * How many bytes of a cartridge's backup memory belong in its `.sav`: the size the
+ * declared type gives SRAM and flash. An EEPROM's size is not in the string, and its
+ * array is 8 KB whichever chip it is, so the chip answers for it, and while nothing has
+ * told it there is no answer to give.
  */
 export function saveFileSize(save: CartridgeSave, eepromSaveBytes: number): number {
   if (save.type === null) {
     throw new Error('this ROM declares no save type, so it has no save to export');
-  }
-  if (save.type === 'flash512' || save.type === 'flash1m') {
-    refuseFlash(save);
   }
   if (save.type !== 'eeprom') {
     return SAVE_FILE_SIZES[save.type][0]!;

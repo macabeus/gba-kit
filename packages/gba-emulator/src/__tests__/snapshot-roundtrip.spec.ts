@@ -16,6 +16,32 @@ import { GbaButton } from '../types.js';
  */
 const TIMER_SPIN = [0xe3a00301, 0xe2800c01, 0xe3a01080, 0xe1c010b2, 0xeafffffe];
 
+/**
+ * ARM, on a cartridge that declares FLASH1M_V103: select flash bank 1, then send the two
+ * unlock writes of a command and spin, so the chip holds a bank and a half-sent command.
+ *
+ *   mov  r0, #0x0E000000
+ *   orr  r1, r0, #0x5500
+ *   orr  r1, r1, #0x55      ; r1 = 0x0E005555
+ *   orr  r2, r0, #0x2A00
+ *   orr  r2, r2, #0xAA      ; r2 = 0x0E002AAA
+ *   mov  r3, #0xAA
+ *   mov  r4, #0x55
+ *   mov  r5, #0xB0
+ *   mov  r6, #1
+ *   strb r3, [r1]
+ *   strb r4, [r2]
+ *   strb r5, [r1]           ; bank select
+ *   strb r6, [r0]           ; bank 1
+ *   strb r3, [r1]
+ *   strb r4, [r2]           ; unlocked: the next write at 5555h is a command
+ *   b    .
+ */
+const FLASH_HALF_COMMAND = [
+  0xe3a0040e, 0xe3801c55, 0xe3811055, 0xe3802c2a, 0xe38220aa, 0xe3a030aa, 0xe3a04055, 0xe3a050b0, 0xe3a06001,
+  0xe5c13000, 0xe5c24000, 0xe5c15000, 0xe5c06000, 0xe5c13000, 0xe5c24000, 0xeafffffe,
+];
+
 function romOf(words: number[]): Uint8Array {
   const rom = new Uint8Array(words.length * 4);
   words.forEach((w, i) => {
@@ -27,9 +53,16 @@ function romOf(words: number[]): Uint8Array {
   return rom;
 }
 
-function boot(words: number[]): Gba {
+function boot(words: number[], saveId?: string): Gba {
+  const code = romOf(words);
+  // the save declaration after the code, word-aligned as a build places it
+  const rom = new Uint8Array(code.length + (saveId?.length ?? 0));
+  rom.set(code);
+  for (let i = 0; i < (saveId?.length ?? 0); i++) {
+    rom[code.length + i] = saveId!.charCodeAt(i);
+  }
   const gba = new Gba();
-  gba.loadRom(romOf(words));
+  gba.loadRom(rom);
   gba.armCpu.cpsr = 0x1f;
   gba.armCpu.registers[15] = 0x08000000;
   return gba;
@@ -249,6 +282,20 @@ describe('snapshot round trip', () => {
     fresh.deserialize(legacy);
     expect(fresh.armCpu.halted).toBe(false);
     expect(fresh.serialize()).toEqual(snap);
+  });
+
+  it("the flash chip's bank and half-sent command survive a restore into a fresh machine", () => {
+    const gba = boot(FLASH_HALF_COMMAND, 'FLASH1M_V103');
+    gba.runFrame();
+    const snap = gba.serialize();
+    expect(snap.bus.flash).toMatchObject({ bank: 1, unlock: 2 });
+    const fresh = boot(FLASH_HALF_COMMAND, 'FLASH1M_V103');
+    fresh.deserialize(snap);
+    expect(fresh.serialize()).toEqual(snap);
+    // the command byte completes, on the restored machine, the sequence the snapshot caught
+    fresh.bus.write8(0x0e005555, 0xa0);
+    fresh.bus.write8(0x0e000010, 0x42);
+    expect(fresh.bus.readBackup()![0x10010]).toBe(0x42);
   });
 
   it('frameCount is restored, and an old snapshot without it reads as 0', () => {
