@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { Gba } from '../gba.js';
-import { GbaButton } from '../types.js';
+import { EventId, GbaButton } from '../types.js';
 
 /**
  * ARM: start timer 0 (prescaler F/1, no IRQ) and spin. The timer overflows about
@@ -163,7 +163,7 @@ describe('snapshot round trip', () => {
     expect(fresh.bus.read16(0x040000de) & 0x0800).toBe(0);
   });
 
-  it('the game pak prefetch buffer is restored; an old snapshot without it restores it empty', () => {
+  it('the timing state is restored: the prefetch buffer and an interrupt still on its way to the CPU', () => {
     // ldr r2, [sp] ; b .-4 from ROM with the prefetch buffer on: every load lets it fetch ahead.
     const program = [0xe59d2000, 0xeafffffd];
     const start = (): Gba => {
@@ -175,7 +175,10 @@ describe('snapshot round trip', () => {
     const gba = start();
     gba.runFrame();
     expect(gba.runFrame(() => gba.armCpu.registers[15] === 0x08000004)).toBe('stopped'); // after a load
+    gba.interrupts.ie = 1;
+    gba.interrupts.requestInterrupt(1); // IME is off: the request only travels to the CPU
     const snap = gba.serialize();
+    expect(snap.scheduler.events[EventId.Irq]!.active).toBe(true);
     expect(snap.bus.prefetchEnd).toBeGreaterThan(0x08000000);
 
     const fresh = start();
@@ -185,11 +188,13 @@ describe('snapshot round trip', () => {
     fresh.runFrame();
     expect(fresh.serialize()).toEqual(gba.serialize());
 
-    const legacy = { ...snap, bus: { ...snap.bus } };
+    // A snapshot from before these existed: no prefetch buffer state, no slot for the IRQ event.
+    const legacy = { ...snap, bus: { ...snap.bus }, scheduler: { ...snap.scheduler } };
     delete legacy.bus.prefetchEnd;
+    legacy.scheduler.events = snap.scheduler.events.slice(0, EventId.Irq);
     const old = start();
     old.deserialize(legacy);
-    expect(old.serialize().bus.prefetchEnd).toBe(0);
+    expect(old.scheduler.isScheduled(EventId.Irq)).toBe(false);
     expect(old.runFrame()).toBe('done');
   });
 

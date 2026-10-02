@@ -66,33 +66,33 @@ export class DisplayStatus {
   }
 
   /**
-   * The LCD moved to `line`: VCOUNT follows, the VBlank flag clears on the last line, and the
-   * V-count comparison runs for the new line, line 0 included.
+   * The LCD moved to `line` at the cycle `at`: VCOUNT follows, the VBlank flag clears on the last
+   * line, and the V-count comparison runs for the new line, line 0 included.
    */
-  setScanline(line: number): void {
+  setScanline(line: number, at?: number): void {
     this.#io[VCOUNT] = line;
     this.#io[VCOUNT + 1] = 0;
     if (line === LAST_SCANLINE) {
       this.#store(this.readDispstat() & ~VBLANK_FLAG);
     }
-    this.#compareVcount();
+    this.#compareVcount(at);
   }
 
-  /** Line 160 began: the VBlank flag sets and the VBlank IRQ is requested when enabled. */
-  enterVBlank(): void {
+  /** Line 160 began at the cycle `at`: the VBlank flag sets and the VBlank IRQ is requested when enabled. */
+  enterVBlank(at?: number): void {
     const stat = this.readDispstat() | VBLANK_FLAG;
     this.#store(stat);
     if (stat & VBLANK_IRQ) {
-      this.#interrupts.requestInterrupt(IrqFlag.VBlank);
+      this.#interrupts.requestInterrupt(IrqFlag.VBlank, at);
     }
   }
 
-  /** HBlank began: the HBlank flag sets and the HBlank IRQ is requested when enabled. */
-  enterHBlank(): void {
+  /** HBlank began at the cycle `at`: the HBlank flag sets and the HBlank IRQ is requested when enabled. */
+  enterHBlank(at?: number): void {
     const stat = this.readDispstat() | HBLANK_FLAG;
     this.#store(stat);
     if (stat & HBLANK_IRQ) {
-      this.#interrupts.requestInterrupt(IrqFlag.HBlank);
+      this.#interrupts.requestInterrupt(IrqFlag.HBlank, at);
     }
   }
 
@@ -105,7 +105,7 @@ export class DisplayStatus {
    * The V-count flag reads 1 while VCOUNT equals LYC. The IRQ is edge-triggered: it is requested
    * when the flag goes from 0 to 1 with the IRQ enabled (NanoBoyAdvance UpdateVerticalCounterFlag).
    */
-  #compareVcount(): void {
+  #compareVcount(at?: number): void {
     const stat = this.readDispstat();
     if (this.#io[VCOUNT] !== stat >>> 8) {
       this.#store(stat & ~VCOUNT_FLAG);
@@ -116,7 +116,7 @@ export class DisplayStatus {
     }
     this.#store(stat | VCOUNT_FLAG);
     if (stat & VCOUNT_IRQ) {
-      this.#interrupts.requestInterrupt(IrqFlag.VCount);
+      this.#interrupts.requestInterrupt(IrqFlag.VCount, at);
     }
   }
 

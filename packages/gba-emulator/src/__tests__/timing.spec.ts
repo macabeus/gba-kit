@@ -1,13 +1,14 @@
 /**
- * The cycle model: wait states from WAITCNT, instruction costs, one clock read mid-run, and DMA
- * timing. The expected numbers come from the
+ * The cycle model: wait states from WAITCNT, instruction costs, one clock read mid-run, DMA and
+ * interrupt timing. The expected numbers come from the
  * hardware where a test ROM measured them (mgba-suite src/timing.c, src/timer-irq.c) and from GBATEK.
  */
 import { describe, expect, it } from 'vitest';
 
 import { Gba } from '../gba.js';
+import { InterruptController } from '../interrupts.js';
 import { Scheduler } from '../scheduler.js';
-import { CYCLES_PER_FRAME, EventId } from '../types.js';
+import { CYCLES_PER_FRAME, EventId, IrqFlag } from '../types.js';
 
 const ROM = 0x08000000;
 const EWRAM = 0x02000000;
@@ -161,7 +162,7 @@ describe('one clock for the whole machine', () => {
   });
 });
 
-describe('DMA timing', () => {
+describe('DMA and interrupt timing', () => {
   it('a DMA starts 3 cycles after it is enabled and holds the bus for its accesses', () => {
     const gba = new Gba();
     for (let i = 0; i < 16; i++) {
@@ -178,5 +179,21 @@ describe('DMA timing', () => {
     expect(gba.bus.read16(IWRAM + 0x11e)).toBe(0x10f);
     // 16 reads and writes of a zero-wait memory, and the 2 internal cycles that end the transfer.
     expect(gba.scheduler.currentCycle - start).toBe(3 + 16 * 2 + 2);
+  });
+
+  it('an interrupt request reaches the CPU 7 cycles after it is raised', () => {
+    const scheduler = new Scheduler();
+    const irq = new InterruptController(scheduler);
+    irq.ie = IrqFlag.Timer0;
+    irq.ime = 1;
+    irq.halted = true;
+    scheduler.tick(100);
+    irq.requestInterrupt(IrqFlag.Timer0, 100);
+    scheduler.tick(6);
+    expect(irq.irqPending()).toBe(false);
+    expect(irq.halted).toBe(true);
+    scheduler.tick(1);
+    expect(irq.irqPending()).toBe(true);
+    expect(irq.halted).toBe(false);
   });
 });

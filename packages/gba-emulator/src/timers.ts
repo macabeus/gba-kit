@@ -190,7 +190,7 @@ export class TimerController {
 
     // Fire IRQ if enabled
     if (ch.irqEnable) {
-      this.#interrupts.requestInterrupt(TIMER_IRQ_FLAGS[index]!);
+      this.#interrupts.requestInterrupt(TIMER_IRQ_FLAGS[index]!, due);
     }
 
     // Notify listeners (DirectSound FIFO)

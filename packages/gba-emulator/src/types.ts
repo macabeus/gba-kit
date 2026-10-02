@@ -110,6 +110,8 @@ export const enum EventId {
   Dma1,
   Dma2,
   Dma3,
+  /** An interrupt request reaching the CPU (InterruptController) */
+  Irq,
   /** Sentinel — total count of event types */
   Count,
 }

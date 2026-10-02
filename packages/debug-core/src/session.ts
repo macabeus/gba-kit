@@ -1341,6 +1341,7 @@ export class Session {
     this.#requireStopped('reverse continue');
     const nowFrame = this.machine.frame;
     const nowInstr = this.#instrInFrame;
+    const nowCycle = this.machine.cycle;
     const earliest = this.history.earliestFrame;
     if (earliest === null || (nowFrame === earliest && nowInstr === 0)) {
       return false;
@@ -1348,7 +1349,7 @@ export class Session {
     const visitsAfter = new Map<Breakpoint | DataBreakpoint, number>();
     let searchFrom = this.history.keyframeAtOrBefore(nowFrame)?.frame ?? earliest;
     for (;;) {
-      const hit = this.#lastHitBetween(searchFrom, nowFrame, nowInstr, visitsAfter);
+      const hit = this.#lastHitBetween(searchFrom, nowFrame, nowInstr, nowCycle, visitsAfter);
       if (hit) {
         this.#replayTo(hit.frame, hit.instruction, hit.cycle);
         this.#finishRewind('breakpoint', `reverse-continued to a breakpoint at frame ${hit.frame}`);
@@ -1370,15 +1371,18 @@ export class Session {
 
   /**
    * The last (frame, instruction) in [`from`, now) where a breakpoint would stop,
-   * evaluated as the forward run evaluates it. A hit count is reconstructed: the
-   * k-th of a breakpoint's V visits in the window saw `hits - after - V + k`,
-   * `after` being its visits between the window and now (`visitsAfter`, which
-   * this call extends with the window's own).
+   * evaluated as the forward run evaluates it. Now is the first poll of `nowFrame`
+   * after `nowInstr` instructions and at or past `nowCycle`: the polls of one halt,
+   * and the interrupt entry that ends it, share an instruction count. A hit count
+   * is reconstructed: the k-th of a breakpoint's V visits in the window saw
+   * `hits - after - V + k`, `after` being its visits between the window and now
+   * (`visitsAfter`, which this call extends with the window's own).
    */
   #lastHitBetween(
     from: number,
     nowFrame: number,
     nowInstr: number,
+    nowCycle: number,
     visitsAfter: Map<Breakpoint | DataBreakpoint, number>,
   ): HistoryPosition | null {
     if (!this.#replayTo(from, 0)) {
@@ -1434,7 +1438,7 @@ export class Session {
             }
           };
           this.machine.runFrame(() => {
-            const now = count >= limit;
+            const now = count >= limit && this.machine.cycle >= nowCycle;
             if (scan.pendingData.length > 0 || scan.eventHit) {
               // A watchpoint or event fired since the last poll: the forward run stops at this one.
               const at = { frame: f, instruction: count, cycle: this.machine.cycle };

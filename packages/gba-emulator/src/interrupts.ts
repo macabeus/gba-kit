@@ -3,8 +3,17 @@
  *
  * Manages IME (master enable), IE (individual enables), and IF (request flags).
  * When an interrupt is requested and enabled, the CPU is signaled to enter IRQ mode.
+ *
+ * The signal takes IRQ_DELAY cycles to reach the CPU: an enabled request wakes a halted CPU, and
+ * becomes an exception the CPU can take, that long after it is raised (mGBA gba.c GBATestIRQ,
+ * GBA_IRQ_DELAY; mgba-suite "Timer IRQ").
  */
 import type { InterruptSnapshot } from './savestate.js';
+import type { Scheduler } from './scheduler.js';
+import { EventId } from './types.js';
+
+/** Cycles from an enabled interrupt request to the CPU seeing it. */
+const IRQ_DELAY = 7;
 
 export class InterruptController {
   /** Master Interrupt Enable (0x04000208) — only bit 0 matters */
@@ -30,16 +39,44 @@ export class InterruptController {
   /** Observer for every interrupt request (an event log's IRQ rows). */
   onRequest: ((flag: number) => void) | null = null;
 
-  /** Request an interrupt by setting bits in IF. */
-  requestInterrupt(flag: number): void {
+  readonly #scheduler: Scheduler;
+
+  constructor(scheduler: Scheduler) {
+    this.#scheduler = scheduler;
+  }
+
+  /**
+   * Request an interrupt by setting bits in IF. `at` is the cycle the hardware raised it, which an
+   * event serviced late passes so the CPU still sees the request IRQ_DELAY cycles after it.
+   */
+  requestInterrupt(flag: number, at: number = this.#scheduler.currentCycle): void {
+    const wasSignalled = (this.ie & this.if_) !== 0;
     this.if_ |= flag;
     this.onRequest?.(flag);
-    // If this interrupt is enabled and master enable is on, wake from halt.
-    // Always wake for ANY enabled interrupt, even during IntrWait.
-    // On real GBA hardware, IntrWait wakes for all IRQs — the BIOS IRQ handler
-    // runs, then the IntrWait loop re-halts if its specific interrupt hasn't fired.
-    // The GBA coordinator handles the re-halt check after the IRQ handler returns.
-    if (this.halted && (this.ie & this.if_) !== 0) {
+    if (!wasSignalled) {
+      this.#signal(at);
+    } else if (!this.#scheduler.isScheduled(EventId.Irq)) {
+      this.#onSignal(); // the CPU already sees an enabled request
+    }
+  }
+
+  /**
+   * IE AND IF just became non-zero at the cycle `at`: the CPU sees it IRQ_DELAY cycles later. An
+   * interrupt the CPU already sees keeps its signal, so a second request adds no delay.
+   */
+  #signal(at: number): void {
+    if ((this.ie & this.if_) !== 0 && !this.#scheduler.isScheduled(EventId.Irq)) {
+      this.#scheduler.scheduleAt(EventId.Irq, at + IRQ_DELAY, () => this.#onSignal());
+    }
+  }
+
+  /**
+   * The request reached the CPU. A halted CPU wakes for any enabled interrupt, even during
+   * IntrWait: on hardware the BIOS IRQ handler runs and the IntrWait loop halts again until its
+   * own interrupt has fired, which the GBA coordinator checks after the handler returns.
+   */
+  #onSignal(): void {
+    if ((this.ie & this.if_) !== 0) {
       this.halted = false;
     }
   }
@@ -49,9 +86,9 @@ export class InterruptController {
     this.if_ &= ~value;
   }
 
-  /** Check if any enabled interrupt is pending and IME is set. */
+  /** Whether the CPU sees an enabled interrupt request with IME set (an IRQ exception unless CPSR.I masks it). */
   irqPending(): boolean {
-    return this.ime !== 0 && (this.ie & this.if_) !== 0;
+    return this.ime !== 0 && (this.ie & this.if_) !== 0 && !this.#scheduler.isScheduled(EventId.Irq);
   }
 
   /** Read IE register (16-bit). */
@@ -59,9 +96,13 @@ export class InterruptController {
     return this.ie & 0x3fff;
   }
 
-  /** Write IE register (16-bit). */
+  /** Write IE register (16-bit). Enabling a pending request signals the CPU like a new request. */
   writeIe(value: number): void {
+    const wasSignalled = (this.ie & this.if_) !== 0;
     this.ie = value & 0x3fff;
+    if (!wasSignalled) {
+      this.#signal(this.#scheduler.currentCycle);
+    }
   }
 
   /** Read IF register (16-bit). */
@@ -104,6 +145,13 @@ export class InterruptController {
     this.intrWaitFlags = snap.intrWaitFlags;
   }
 
+  /** After a snapshot restore: a signal on its way to the CPU keeps its cycle and gets its callback back. */
+  reattachEvents(): void {
+    if (this.#scheduler.isScheduled(EventId.Irq)) {
+      this.#scheduler.reattach(EventId.Irq, () => this.#onSignal());
+    }
+  }
+
   /** Reset all state. */
   reset(): void {
     this.ime = 0;
@@ -111,5 +159,6 @@ export class InterruptController {
     this.if_ = 0;
     this.halted = false;
     this.intrWaitFlags = 0;
+    this.#scheduler.cancel(EventId.Irq);
   }
 }

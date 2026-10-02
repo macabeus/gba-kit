@@ -109,7 +109,7 @@ export class Gba {
 
   constructor() {
     this.scheduler = new Scheduler();
-    this.interrupts = new InterruptController();
+    this.interrupts = new InterruptController(this.scheduler);
     this.timers = new TimerController(this.scheduler, this.interrupts);
     this.dma = new DmaController(this.scheduler, this.interrupts);
     this.input = new InputController(this.interrupts);
@@ -398,7 +398,7 @@ export class Gba {
 
   #onHBlank(due: number): void {
     this.#eventSink?.({ kind: 'hblank', scanline: this.#currentScanline });
-    this.display.enterHBlank();
+    this.display.enterHBlank(due);
 
     // HBlank DMA (PPU already rendered at the start of HDraw)
     if (this.#currentScanline < VISIBLE_SCANLINES) {
@@ -418,7 +418,7 @@ export class Gba {
       this.#currentScanline = 0;
       this.#frameCount++;
     }
-    this.display.setScanline(this.#currentScanline);
+    this.display.setScanline(this.#currentScanline, due);
 
     if (this.#currentScanline === VISIBLE_SCANLINES) {
       this.#onVBlankStart(due);
@@ -429,7 +429,7 @@ export class Gba {
 
   #onVBlankStart(due: number): void {
     this.#eventSink?.({ kind: 'vblank' });
-    this.display.enterVBlank();
+    this.display.enterVBlank(due);
 
     // Trigger VBlank DMA
     this.dma.trigger(DmaStartTiming.VBlank, due);
@@ -502,6 +502,7 @@ export class Gba {
     if (this.scheduler.isScheduled(EventId.HBlankEnd)) {
       this.scheduler.reattach(EventId.HBlankEnd, (due) => this.#onHBlankEnd(due));
     }
+    this.interrupts.reattachEvents();
     this.timers.reattachEvents();
     this.dma.reattachEvents();
   }
