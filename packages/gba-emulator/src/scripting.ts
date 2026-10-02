@@ -1122,6 +1122,17 @@ export class ScriptingEngine {
     );
   }
 
+  /**
+   * The opcode stored at `address`, read the way a debugger reads memory: side-effect free, so no
+   * read watchpoint fires and no EEPROM transaction is clocked.
+   */
+  #peekOpcode(address: number, size: 2 | 4): number {
+    const { data } = this.#gba.bus.peek(address, size);
+    return size === 2
+      ? data[0]! | (data[1]! << 8)
+      : (data[0]! | (data[1]! << 8) | (data[2]! << 16) | (data[3]! << 24)) >>> 0;
+  }
+
   disassemble(
     address: number,
     count?: number,
@@ -1130,17 +1141,16 @@ export class ScriptingEngine {
     const n = count ?? 10;
     const isThumb =
       mode === 'thumb' || (mode === undefined && (address & 1 || (this.cpuCpsr && (this.cpuCpsr() & 0x20) !== 0)));
-    const bus = this.#gba.bus;
     const results: { address: number; instruction: string; bytes: number }[] = [];
     let addr = address & ~(isThumb ? 1 : 3);
 
     for (let i = 0; i < n; i++) {
       if (isThumb) {
-        const opcode = bus.read16(addr);
+        const opcode = this.#peekOpcode(addr, 2);
         results.push({ address: addr, instruction: disassembleThumb(opcode, addr), bytes: 2 });
         addr += 2;
       } else {
-        const opcode = bus.read32(addr);
+        const opcode = this.#peekOpcode(addr, 4);
         results.push({ address: addr, instruction: disassembleArm(opcode, addr), bytes: 4 });
         addr += 4;
       }
@@ -1155,14 +1165,13 @@ export class ScriptingEngine {
   ): { address: number; instruction: string; bytes: number }[] {
     const isThumb =
       mode === 'thumb' || (mode === undefined && (address & 1 || (this.cpuCpsr && (this.cpuCpsr() & 0x20) !== 0)));
-    const bus = this.#gba.bus;
     const results: { address: number; instruction: string; bytes: number }[] = [];
     let addr = address & ~(isThumb ? 1 : 3);
     const maxInstructions = 500;
 
     for (let i = 0; i < maxInstructions; i++) {
       if (isThumb) {
-        const opcode = bus.read16(addr);
+        const opcode = this.#peekOpcode(addr, 2);
         const text = disassembleThumb(opcode, addr);
         results.push({ address: addr, instruction: text, bytes: 2 });
         addr += 2;
@@ -1171,7 +1180,7 @@ export class ScriptingEngine {
           break;
         }
       } else {
-        const opcode = bus.read32(addr);
+        const opcode = this.#peekOpcode(addr, 4);
         const text = disassembleArm(opcode, addr);
         results.push({ address: addr, instruction: text, bytes: 4 });
         addr += 4;

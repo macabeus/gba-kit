@@ -178,6 +178,19 @@ describe('GbaSystemBus write watchpoints', () => {
   });
 });
 
+describe('ScriptingEngine disassembly', () => {
+  it('reads code the way a debugger reads memory: no read watchpoint fires', () => {
+    const gba = new Gba();
+    gba.loadRom(new Uint8Array([0x1e, 0xff, 0x2f, 0xe1])); // bx lr
+    const engine = new ScriptingEngine(gba, stubHost);
+    let hits = 0;
+    gba.bus.addReadWatchpoint(0x08000000, 4, () => hits++);
+    expect(engine.disassemble(0x08000000, 1, 'arm')[0]!.instruction).toMatch(/bx\s+lr/i);
+    expect(engine.disassembleFunction(0x08000000, 'arm')).toHaveLength(1);
+    expect(hits).toBe(0);
+  });
+});
+
 describe('ScriptingEngine watchMemory', () => {
   it('reads Thumb state from the CPU (no reliance on the optional cpuCpsr callback)', () => {
     const gba = new Gba();

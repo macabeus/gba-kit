@@ -259,12 +259,15 @@ export class EmulatorBridge {
     let addr = address;
 
     for (let i = 0; i < count; i++) {
+      // Code is read the way a debugger reads memory: side-effect free, so no read watchpoint
+      // fires and no EEPROM transaction is clocked.
+      const { data } = this.#gba.bus.peek(addr, isThumb ? 2 : 4);
       if (isThumb) {
-        const instr = this.#gba.bus.read16(addr);
+        const instr = data[0]! | (data[1]! << 8);
         result.push({ address: addr, mnemonic: disassembleThumb(instr, addr), isThumb: true });
         addr += 2;
       } else {
-        const instr = this.#gba.bus.read32(addr);
+        const instr = (data[0]! | (data[1]! << 8) | (data[2]! << 16) | (data[3]! << 24)) >>> 0;
         result.push({ address: addr, mnemonic: disassembleArm(instr, addr), isThumb: false });
         addr += 4;
       }
