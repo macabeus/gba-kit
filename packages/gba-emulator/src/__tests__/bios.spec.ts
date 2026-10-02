@@ -169,6 +169,37 @@ describe('GBA BIOS (HLE)', () => {
     expect(mem.read8(dstAddr + 6)).toBe(0xcc);
   });
 
+  it('a call costs the BIOS code it stands for: Div and Sqrt as the hardware measured them', () => {
+    // mgba-suite Timing "BIOS Division" (338), "BIOS Division 2" (78) and "BIOS Sqrt" (104) in
+    // IWRAM, less the 8, 8 and 5 one-cycle instructions around the swi: its fetch, the BIOS's
+    // dispatch, the function, and the return's refill.
+    const div = setupArmCpu([armSwi(0x06), armBx(LR)]);
+    div.cpu.registers[0] = 0x12345678;
+    div.cpu.registers[1] = 0xff;
+    expect(div.cpu.step()).toBe(338 - 8);
+    const div2 = setupArmCpu([armSwi(0x06), armBx(LR)]);
+    div2.cpu.registers[0] = 0xff;
+    div2.cpu.registers[1] = 0x12345678;
+    expect(div2.cpu.step()).toBe(78 - 8);
+    const sqrt = setupArmCpu([armSwi(0x08), armBx(LR)]);
+    sqrt.cpu.registers[0] = 0;
+    expect(sqrt.cpu.step()).toBe(104 - 5);
+  });
+
+  it('a decompression costs per byte it reads and writes', () => {
+    // LZ77UnCompWram of 4 literal bytes, every access 1 cycle (mGBA _unLz77): 20 and the header
+    // load (2); the flag byte (14 + 2); per byte 14 + 18, its load (2) and store (1).
+    const { cpu, mem } = setupArmCpu([armSwi(0x11), armBx(LR)]);
+    mem.write32(0x02000000, 0x00000410);
+    mem.write32(0x02000004, 0x43424100);
+    mem.write8(0x02000008, 0x44);
+    cpu.registers[0] = 0x02000000;
+    cpu.registers[1] = 0x02000100;
+    const dispatch = 42 + 1;
+    expect(cpu.step()).toBe(1 + dispatch + 20 + 2 + 14 + 2 + 4 * (14 + 18 + 2 + 1) + 2);
+    expect(mem.read32(0x02000100)).toBe(0x44434241);
+  });
+
   it('SWI 0x06: Div via Thumb SWI', () => {
     const { cpu } = setupThumbCpu([
       0xdf06, // swi #6

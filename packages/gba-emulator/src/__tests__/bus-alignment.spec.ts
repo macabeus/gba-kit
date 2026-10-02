@@ -94,6 +94,7 @@ describe('DMA addresses', () => {
     gba.bus.write32(0x040000d8, dst);
     gba.bus.write16(0x040000dc, 1);
     gba.bus.write16(0x040000de, control);
+    gba.scheduler.tick(3); // a channel starts 3 cycles after the write that enables it
   }
 
   it('a halfword DMA drops address bit 0, so it reads the even SRAM byte', () => {

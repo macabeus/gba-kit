@@ -1,21 +1,30 @@
 /**
  * GBA Event Scheduler
  *
- * The scheduler coordinates all hardware timing. The CPU runs until
- * the next scheduled event, then the event fires and may schedule
- * further events. This avoids checking timing conditions on every
- * CPU cycle.
+ * The scheduler owns the machine's clock. `currentCycle` is "now": the run loop adds each
+ * instruction's cycles to it as the instruction completes, and a DMA or a BIOS call adds the cycles
+ * it holds the bus, so a timer read, a timer start or an event scheduled from an I/O write sees the
+ * cycle the instruction began at, wherever it falls in the run.
  *
- * Design follows mGBA's event-driven scheduling pattern.
+ * Hardware events wait in one slot per `EventId` and fire once the clock reaches them, earliest
+ * first. The CPU runs until the next event is due, so an event fires at the end of the instruction
+ * during which it came due; its callback receives the cycle it was due at and schedules what follows
+ * from there, so periodic events (scanlines, timer overflows) keep their period however late a long
+ * instruction or DMA makes them.
+ *
+ * Design follows mGBA's event-driven scheduling (src/core/timing.c, `cyclesLate`).
  */
 import type { SchedulerSnapshot } from './savestate.js';
 import { EventId } from './types.js';
+
+/** An event callback; `dueCycle` is the cycle the event was scheduled for (`currentCycle` may be past it). */
+export type EventCallback = (dueCycle: number) => void;
 
 interface ScheduledEvent {
   /** Absolute cycle count when this event fires */
   fireCycle: number;
   /** Callback to execute */
-  callback: () => void;
+  callback: EventCallback;
   /** Whether this event is currently scheduled */
   active: boolean;
 }
@@ -27,6 +36,9 @@ export class Scheduler {
   /** Scheduled events indexed by EventId */
   readonly #events: ScheduledEvent[];
 
+  /** The earliest `fireCycle` of an active event, Infinity when none is. */
+  #nextEventCycle = Infinity;
+
   constructor() {
     this.#events = new Array(EventId.Count);
     for (let i = 0; i < EventId.Count; i++) {
@@ -34,12 +46,28 @@ export class Scheduler {
     }
   }
 
+  /** The cycle the next event is due at, Infinity when nothing is scheduled. */
+  get nextEventCycle(): number {
+    return this.#nextEventCycle;
+  }
+
   /** Schedule an event to fire after `deltaCycles` cycles from now. */
-  schedule(id: EventId, deltaCycles: number, callback: () => void): void {
+  schedule(id: EventId, deltaCycles: number, callback: EventCallback): void {
+    this.scheduleAt(id, this.currentCycle + deltaCycles, callback);
+  }
+
+  /** Schedule an event to fire at the absolute cycle `fireCycle`. */
+  scheduleAt(id: EventId, fireCycle: number, callback: EventCallback): void {
     const event = this.#events[id]!;
-    event.fireCycle = this.currentCycle + deltaCycles;
+    const wasEarliest = event.active && event.fireCycle === this.#nextEventCycle;
+    event.fireCycle = fireCycle;
     event.callback = callback;
     event.active = true;
+    if (wasEarliest) {
+      this.#findNextEvent();
+    } else if (fireCycle < this.#nextEventCycle) {
+      this.#nextEventCycle = fireCycle;
+    }
   }
 
   /**
@@ -47,18 +75,31 @@ export class Scheduler {
    * how a restored snapshot gets its callbacks back: `fireCycle` is state and must
    * survive the round trip exactly, or a restored machine drifts from the original.
    */
-  reattach(id: EventId, callback: () => void): void {
+  reattach(id: EventId, callback: EventCallback): void {
     this.#events[id]!.callback = callback;
   }
 
   /** Cancel a scheduled event. */
   cancel(id: EventId): void {
-    this.#events[id]!.active = false;
+    const event = this.#events[id]!;
+    if (!event.active) {
+      return;
+    }
+    event.active = false;
+    if (event.fireCycle === this.#nextEventCycle) {
+      this.#findNextEvent();
+    }
   }
 
   /** Check if an event is currently scheduled. */
   isScheduled(id: EventId): boolean {
     return this.#events[id]!.active;
+  }
+
+  /** The cycle a scheduled event is due at, Infinity when it is not scheduled. */
+  dueCycle(id: EventId): number {
+    const event = this.#events[id]!;
+    return event.active ? event.fireCycle : Infinity;
   }
 
   /** Get the number of cycles until a specific event fires. Returns 0 if not scheduled. */
@@ -75,35 +116,59 @@ export class Scheduler {
    * Returns Infinity if no events are scheduled.
    */
   cyclesUntilNextEvent(): number {
-    let minCycle = Infinity;
-    for (let i = 0; i < EventId.Count; i++) {
-      const event = this.#events[i]!;
-      if (event.active && event.fireCycle < minCycle) {
-        minCycle = event.fireCycle;
-      }
-    }
-    if (minCycle === Infinity) {
-      return Infinity;
-    }
-    return Math.max(0, minCycle - this.currentCycle);
+    return Math.max(0, this.#nextEventCycle - this.currentCycle);
+  }
+
+  /** Move the clock forward by `cycles`, firing nothing: the CPU, a DMA or the BIOS used the time. */
+  advance(cycles: number): void {
+    this.currentCycle += cycles;
   }
 
   /**
-   * Advance the clock by `cycles` and fire any events that are due.
-   * Events may schedule new events — those are not fired in this tick.
+   * Fire the earliest event if it is due (ties in EventId order); returns whether one fired. A run
+   * loop that fires them one at a time can stop between two, at the end of a frame, when a long
+   * instruction or DMA has let several frames' events come due at once.
    */
-  tick(cycles: number): void {
-    this.currentCycle += cycles;
-
-    // Fire all events whose time has come.
-    // Process in priority order (lower EventId = higher priority).
+  runNextDueEvent(): boolean {
+    if (this.#nextEventCycle > this.currentCycle) {
+      return false;
+    }
+    let next: ScheduledEvent | undefined;
     for (let i = 0; i < EventId.Count; i++) {
       const event = this.#events[i]!;
-      if (event.active && event.fireCycle <= this.currentCycle) {
-        event.active = false;
-        event.callback();
+      if (event.active && event.fireCycle === this.#nextEventCycle) {
+        next = event;
+        break;
       }
     }
+    next!.active = false;
+    this.#findNextEvent();
+    next!.callback(next!.fireCycle);
+    return true;
+  }
+
+  /** Fire every event that is due, earliest first, those the callbacks schedule included. */
+  runDueEvents(): void {
+    while (this.runNextDueEvent()) {
+      // fire the next one
+    }
+  }
+
+  /** Advance the clock by `cycles` and fire the events that come due. */
+  tick(cycles: number): void {
+    this.advance(cycles);
+    this.runDueEvents();
+  }
+
+  #findNextEvent(): void {
+    let min = Infinity;
+    for (let i = 0; i < EventId.Count; i++) {
+      const event = this.#events[i]!;
+      if (event.active && event.fireCycle < min) {
+        min = event.fireCycle;
+      }
+    }
+    this.#nextEventCycle = min;
   }
 
   /** Serialize to a plain snapshot (callbacks are NOT saved). */
@@ -116,16 +181,20 @@ export class Scheduler {
     return { currentCycle: this.currentCycle, events };
   }
 
-  /** Restore from a snapshot. Callbacks must be re-registered by the caller. */
+  /**
+   * Restore from a snapshot. Callbacks must be re-registered by the caller. A snapshot from before
+   * an event existed lacks its slot, which restores as not scheduled.
+   */
   deserialize(snap: SchedulerSnapshot): void {
     this.currentCycle = snap.currentCycle;
     for (let i = 0; i < EventId.Count; i++) {
       const e = this.#events[i]!;
-      const s = snap.events[i]!;
-      e.fireCycle = s.fireCycle;
-      e.active = s.active;
+      const s = snap.events[i];
+      e.fireCycle = s?.fireCycle ?? 0;
+      e.active = s?.active ?? false;
       // callback left as-is — caller must re-register
     }
+    this.#findNextEvent();
   }
 
   /** Reset all events and the cycle counter. */
@@ -134,5 +203,6 @@ export class Scheduler {
     for (let i = 0; i < EventId.Count; i++) {
       this.#events[i]!.active = false;
     }
+    this.#nextEventCycle = Infinity;
   }
 }

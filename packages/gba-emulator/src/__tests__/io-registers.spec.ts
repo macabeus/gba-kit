@@ -84,6 +84,7 @@ describe('I/O writes of every width reach the register that owns the address', (
     gba.bus.write16(IO + 0xda, 0x0300);
     gba.bus.write16(IO + 0xdc, 2); // two words
     gba.bus.write16(IO + 0xde, 0x8400); // enable, 32-bit, immediate
+    gba.scheduler.tick(3); // a channel starts 3 cycles after the write that enables it
     expect(gba.bus.read32(0x03000100)).toBe(0xdeadbeef);
     expect(gba.bus.read32(0x03000104)).toBe(0xcafebabe);
   });
@@ -106,8 +107,10 @@ describe('I/O writes of every width reach the register that owns the address', (
     for (const [offset, value] of bytes) {
       gba.bus.write8(IO + offset, value);
     }
+    gba.scheduler.tick(3);
     expect(gba.bus.read32(0x03000020)).toBe(0);
     gba.bus.write8(IO + 0xdf, 0x84);
+    gba.scheduler.tick(3); // a channel starts 3 cycles after the write that enables it
     expect(gba.bus.read32(0x03000020)).toBe(0x11223344);
   });
 

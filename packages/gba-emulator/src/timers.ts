@@ -39,6 +39,16 @@ const TIMER_EVENT_IDS = [
 
 const TIMER_IRQ_FLAGS = [IrqFlag.Timer0, IrqFlag.Timer1, IrqFlag.Timer2, IrqFlag.Timer3] as const;
 
+/**
+ * The clock stands at an instruction's first cycle while it runs. A counter read sees the count as
+ * of READ_OFFSET cycles earlier, while a control write acts at the clock's cycle, which gives the
+ * counts the hardware reads (mGBA io.c GBAIORead, `GBATimerUpdateRegister(gba, 0, 2)`, and
+ * GBATimerWriteTMCNT_HI; mgba-suite Timing calibration, "Timer IRQ"). An overflow is serviced once
+ * a read can see it, READ_OFFSET cycles after it happens, or earlier when a control write comes
+ * after it.
+ */
+const READ_OFFSET = 2;
+
 export class TimerController {
   readonly #channels: TimerChannel[] = [];
   readonly #scheduler: Scheduler;
@@ -66,11 +76,11 @@ export class TimerController {
     this.#channels[index]!.onOverflow = callback;
   }
 
-  /** Read timer counter (TM0CNT_L etc.). Syncs counter to current cycle. */
+  /** Read timer counter (TM0CNT_L etc.): the count as of the read (see READ_OFFSET). */
   readCounter(index: number): number {
     const ch = this.#channels[index]!;
     if (ch.enabled && !ch.cascade) {
-      this.#syncCounter(index);
+      this.#syncCounter(index, this.#scheduler.currentCycle - READ_OFFSET);
     }
     return ch.counter & 0xffff;
   }
@@ -91,10 +101,21 @@ export class TimerController {
     return (ch.prescaler & 3) | (ch.cascade ? 1 << 2 : 0) | (ch.irqEnable ? 1 << 6 : 0) | (ch.enabled ? 1 << 7 : 0);
   }
 
-  /** Write timer control (TM0CNT_H etc.). */
+  /**
+   * Write timer control (TM0CNT_H etc.). Starting a timer loads the reload value and counts from
+   * the cycle of the write. A running timer whose prescaler or cascade bit changes keeps the count
+   * it has reached and goes on at the new rate (mGBA timer.c GBATimerWriteTMCNT_HI).
+   */
   writeControl(index: number, value: number): void {
     const ch = this.#channels[index]!;
+    const now = this.#scheduler.currentCycle;
     const wasEnabled = ch.enabled;
+    const oldPrescaler = ch.prescaler;
+    const oldCascade = ch.cascade;
+    if (wasEnabled && !oldCascade) {
+      this.#serviceOverflowsBefore(index, now);
+      this.#syncCounter(index, now);
+    }
 
     ch.prescaler = value & 3;
     ch.cascade = index > 0 && (value & (1 << 2)) !== 0;
@@ -104,7 +125,7 @@ export class TimerController {
     if (!wasEnabled && ch.enabled) {
       // Timer just enabled: reload counter
       ch.counter = ch.reload;
-      ch.lastUpdateCycle = this.#scheduler.currentCycle;
+      ch.lastUpdateCycle = now;
 
       if (!ch.cascade) {
         this.#scheduleOverflow(index);
@@ -112,13 +133,30 @@ export class TimerController {
     } else if (wasEnabled && !ch.enabled) {
       // Timer disabled: cancel scheduled overflow
       this.#scheduler.cancel(TIMER_EVENT_IDS[index]!);
+    } else if (ch.enabled && (ch.prescaler !== oldPrescaler || ch.cascade !== oldCascade)) {
+      ch.lastUpdateCycle = now;
+      if (ch.cascade) {
+        this.#scheduler.cancel(TIMER_EVENT_IDS[index]!);
+      } else {
+        this.#scheduleOverflow(index);
+      }
     }
   }
 
-  /** Sync a non-cascade timer's counter based on elapsed cycles. */
-  #syncCounter(index: number): void {
+  /** Service the overflows that happened by `now` and wait for a read to see them, so a write comes after them. */
+  #serviceOverflowsBefore(index: number, now: number): void {
+    const id = TIMER_EVENT_IDS[index]!;
+    while (this.#scheduler.dueCycle(id) - READ_OFFSET <= now) {
+      const overflow = this.#scheduler.dueCycle(id) - READ_OFFSET;
+      this.#scheduler.cancel(id);
+      this.#onOverflow(index, overflow);
+    }
+  }
+
+  /** Bring a non-cascade timer's counter up to the cycle `now`. */
+  #syncCounter(index: number, now: number): void {
     const ch = this.#channels[index]!;
-    const elapsed = this.#scheduler.currentCycle - ch.lastUpdateCycle;
+    const elapsed = now - ch.lastUpdateCycle;
     const prescaler = TIMER_PRESCALERS[ch.prescaler]!;
     const ticks = Math.floor(elapsed / prescaler);
 
@@ -128,25 +166,27 @@ export class TimerController {
     }
   }
 
-  /** Schedule the next overflow event for a timer. */
+  /** Schedule the next overflow, counted from the cycle the counter was last brought up to. */
   #scheduleOverflow(index: number): void {
     const ch = this.#channels[index]!;
     const ticksUntilOverflow = 0x10000 - ch.counter;
     const prescaler = TIMER_PRESCALERS[ch.prescaler]!;
-    const cycles = ticksUntilOverflow * prescaler;
-
-    this.#scheduler.schedule(TIMER_EVENT_IDS[index]!, cycles, () => {
-      this.#onOverflow(index);
-    });
+    const overflow = ch.lastUpdateCycle + ticksUntilOverflow * prescaler;
+    this.#scheduler.scheduleAt(TIMER_EVENT_IDS[index]!, overflow + READ_OFFSET, (due) =>
+      this.#onOverflow(index, due - READ_OFFSET),
+    );
   }
 
-  /** Handle a timer overflow. */
-  #onOverflow(index: number): void {
+  /**
+   * Handle a timer overflow that happened at the cycle `due`. The timer reloads and counts on from
+   * that cycle, so its period holds whenever the event is serviced, and its IRQ is raised then.
+   */
+  #onOverflow(index: number, due: number): void {
     const ch = this.#channels[index]!;
 
     // Reload counter
     ch.counter = ch.reload;
-    ch.lastUpdateCycle = this.#scheduler.currentCycle;
+    ch.lastUpdateCycle = due;
 
     // Fire IRQ if enabled
     if (ch.irqEnable) {
@@ -163,7 +203,7 @@ export class TimerController {
         next.counter = (next.counter + 1) & 0xffff;
         if (next.counter === 0) {
           // Cascade overflow
-          this.#onOverflow(index + 1);
+          this.#onOverflow(index + 1, due);
         }
       }
     }
@@ -216,7 +256,7 @@ export class TimerController {
       const ch = this.#channels[i]!;
       const id = TIMER_EVENT_IDS[i]!;
       if (this.#scheduler.isScheduled(id)) {
-        this.#scheduler.reattach(id, () => this.#onOverflow(i));
+        this.#scheduler.reattach(id, (due) => this.#onOverflow(i, due - READ_OFFSET));
       } else if (ch.enabled && !ch.cascade) {
         this.#scheduleOverflow(i); // an older snapshot, with no overflow event of its own
       }

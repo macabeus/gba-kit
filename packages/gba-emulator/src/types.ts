@@ -25,10 +25,10 @@ export const TOTAL_SCANLINES = VISIBLE_SCANLINES + VBLANK_SCANLINES; // 228
 /** Cycles per frame */
 export const CYCLES_PER_FRAME = CYCLES_PER_SCANLINE * TOTAL_SCANLINES; // 280,896
 
-/** Visible portion of a scanline in cycles */
+/** Visible portion of a scanline in cycles: 240 dots of 4 cycles */
 export const HDRAW_CYCLES = 960;
 
-/** HBlank portion in cycles */
+/** HBlank portion in cycles: 68 dots */
 export const HBLANK_CYCLES = 272;
 
 /** Target frame rate (Hz) */

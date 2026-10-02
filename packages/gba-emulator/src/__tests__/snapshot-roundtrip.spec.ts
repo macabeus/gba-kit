@@ -163,6 +163,36 @@ describe('snapshot round trip', () => {
     expect(fresh.bus.read16(0x040000de) & 0x0800).toBe(0);
   });
 
+  it('the game pak prefetch buffer is restored; an old snapshot without it restores it empty', () => {
+    // ldr r2, [sp] ; b .-4 from ROM with the prefetch buffer on: every load lets it fetch ahead.
+    const program = [0xe59d2000, 0xeafffffd];
+    const start = (): Gba => {
+      const gba = boot(program);
+      gba.armCpu.registers[13] = 0x03007f00;
+      gba.bus.write16(0x04000204, 0x4317);
+      return gba;
+    };
+    const gba = start();
+    gba.runFrame();
+    expect(gba.runFrame(() => gba.armCpu.registers[15] === 0x08000004)).toBe('stopped'); // after a load
+    const snap = gba.serialize();
+    expect(snap.bus.prefetchEnd).toBeGreaterThan(0x08000000);
+
+    const fresh = start();
+    fresh.deserialize(snap);
+    expect(fresh.serialize()).toEqual(snap);
+    gba.runFrame();
+    fresh.runFrame();
+    expect(fresh.serialize()).toEqual(gba.serialize());
+
+    const legacy = { ...snap, bus: { ...snap.bus } };
+    delete legacy.bus.prefetchEnd;
+    const old = start();
+    old.deserialize(legacy);
+    expect(old.serialize().bus.prefetchEnd).toBe(0);
+    expect(old.runFrame()).toBe('done');
+  });
+
   it('frameCount is restored, and an old snapshot without it reads as 0', () => {
     const gba = boot(TIMER_SPIN);
     gba.runFrame();

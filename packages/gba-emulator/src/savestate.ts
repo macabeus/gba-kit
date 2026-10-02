@@ -126,6 +126,8 @@ export interface SystemBusSnapshot {
   lastBiosRead: number;
   /** Internal Memory Control (0x04000800). Older snapshots omit it and restore as 0x0D000020, the BIOS's value. */
   memoryControl?: number;
+  /** The last opcode address the game pak prefetch buffer holds. Older snapshots omit it and restore it empty (0). */
+  prefetchEnd?: number;
   eeprom: EepromSnapshot;
 }
 

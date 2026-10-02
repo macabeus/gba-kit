@@ -5,6 +5,10 @@
  * implement the behavior in TypeScript. This is faster and doesn't
  * require a BIOS dump.
  *
+ * Each call reports the cycles the real BIOS code would take, so a call costs the time it does on
+ * hardware: the dispatch and return every SWI goes through, plus a per-function cost where the
+ * function's loop is long enough to matter (mGBA src/gba/bios.c GBASwi16 and its stall counts).
+ *
  * Reference: GBATEK - GBA BIOS Functions
  * http://problemkaputt.de/gbatek-gba-bios-functions.htm
  */
@@ -54,29 +58,33 @@ export interface BiosEnv {
  * @param cpu - The CPU instance
  * @param swiNumber - The SWI function number (0x00-0xFF)
  * @param env - Hooks back into the machine this call runs in
+ * @returns the cycles the BIOS spends from the SWI vector to its return branch
  */
-export function handleSwi(cpu: BiosCpu, swiNumber: number, env: BiosEnv = {}): void {
+export function handleSwi(cpu: BiosCpu, swiNumber: number, env: BiosEnv = {}): number {
+  // Read before the call, which may change the registers.
+  const dispatch = swiDispatchCycles(cpu);
+  let cycles = 0;
   switch (swiNumber) {
     case 0x06:
-      swiDiv(cpu);
+      cycles = swiDiv(cpu);
       break;
     case 0x07:
-      swiDivArm(cpu);
+      cycles = swiDivArm(cpu);
       break;
     case 0x08:
-      swiSqrt(cpu);
+      cycles = swiSqrt(cpu);
       break;
     case 0x09:
-      swiArcTan(cpu);
+      cycles = swiArcTan(cpu);
       break;
     case 0x0a:
-      swiArcTan2(cpu);
+      cycles = swiArcTan2(cpu);
       break;
     case 0x0b:
-      swiCpuSet(cpu);
+      cycles = swiCpuSet(cpu);
       break;
     case 0x0c:
-      swiCpuFastSet(cpu);
+      cycles = swiCpuFastSet(cpu);
       break;
     case 0x0e:
       swiBgAffineSet(cpu);
@@ -88,10 +96,10 @@ export function handleSwi(cpu: BiosCpu, swiNumber: number, env: BiosEnv = {}): v
       swiBitUnPack(cpu);
       break;
     case 0x11:
-      swiLz77UnCompWram(cpu);
+      cycles = swiLz77UnCompWram(cpu);
       break;
     case 0x12:
-      swiLz77UnCompVram(cpu);
+      cycles = swiLz77UnCompVram(cpu);
       break;
     case 0x14:
       swiRlUnCompWram(cpu);
@@ -119,6 +127,162 @@ export function handleSwi(cpu: BiosCpu, swiNumber: number, env: BiosEnv = {}): v
     default:
       break;
   }
+  return dispatch + cycles;
+}
+
+// ─── Cycle costs ──────────────────────────────────────────────────
+
+/**
+ * The cycles every call spends in the BIOS's SWI dispatch and return code, which runs from the
+ * zero-wait BIOS ROM, besides the `ldrb r12, [lr, #-2]` that reads the SWI number from the
+ * caller's code. mGBA counts 45 cycles plus that load's wait states, and the return's refill of
+ * the caller's pipeline (2 cycles and its wait states) is the SWI instruction's own branch back
+ * (GBASwi16).
+ */
+const SWI_DISPATCH_CYCLES = 42;
+
+function swiDispatchCycles(cpu: BiosCpu): number {
+  // While the SWI executes, registers[15] is the return address, the BIOS's lr.
+  const numberAddress = (cpu.registers[15]! - 2) >>> 0;
+  return SWI_DISPATCH_CYCLES + cpu.memory.accessCycles(numberAddress, 1, false);
+}
+
+/**
+ * The internal cycles of a multiply in the BIOS's code, by how many top bytes of the product are
+ * sign bits (mGBA bios.c _mulWait).
+ */
+function multiplyWait(value: number): number {
+  const v = value | 0;
+  if (v >> 8 === 0 || v >> 8 === -1) {
+    return 1;
+  }
+  if (v >> 16 === 0 || v >> 16 === -1) {
+    return 2;
+  }
+  return v >> 24 === 0 || v >> 24 === -1 ? 3 : 4;
+}
+
+/** Div's loop runs once per quotient bit it can produce: 13 cycles each, 4 before and 7 after (mGBA _Div). */
+function divCycles(numerator: number, denominator: number): number {
+  const loops = Math.max(1, Math.clz32(denominator) - Math.clz32(numerator));
+  return 4 + 13 * loops + 7;
+}
+
+/** Sqrt's cycles follow the BIOS's bit-by-bit search, step for step (mGBA _Sqrt). */
+function sqrtCycles(value: number): number {
+  const x = value >>> 0;
+  if (x === 0) {
+    return 53;
+  }
+  let cycles = 15;
+  let upper = x;
+  let bound = 1;
+  while (bound < upper) {
+    upper >>>= 1;
+    bound = (bound << 1) >>> 0;
+    cycles += 6;
+  }
+  for (;;) {
+    cycles += 6;
+    upper = x;
+    let accum = 0;
+    let lower = bound;
+    for (;;) {
+      cycles += 5;
+      const oldLower = lower;
+      if (lower <= upper >>> 1) {
+        lower = (lower << 1) >>> 0;
+      }
+      if (oldLower >= upper >>> 1) {
+        break;
+      }
+    }
+    for (;;) {
+      cycles += 8;
+      accum = (accum << 1) >>> 0;
+      if (upper >= lower) {
+        accum++;
+        upper = (upper - lower) >>> 0;
+      }
+      if (lower === bound) {
+        break;
+      }
+      lower >>>= 1;
+    }
+    const oldBound = bound;
+    bound = ((bound + accum) >>> 0) >>> 1;
+    if (bound >= oldBound) {
+      return cycles;
+    }
+  }
+}
+
+/**
+ * ArcTan evaluates a polynomial in Horner form; each multiply's cost depends on its product
+ * (mGBA _ArcTan: 37 cycles plus the multiplies').
+ */
+function arcTanCycles(tan: number): number {
+  const i = tan | 0;
+  let cycles = 37 + multiplyWait(Math.imul(i, i));
+  const a = -(Math.imul(i, i) >> 14);
+  cycles += multiplyWait(Math.imul(0xa9, a));
+  let b = (Math.imul(0xa9, a) >> 14) + 0x390;
+  for (const term of [0x91c, 0xfb6, 0x16aa, 0x2081, 0x3651, 0xa2f9]) {
+    cycles += multiplyWait(Math.imul(b, a));
+    b = (Math.imul(b, a) >> 14) + term;
+  }
+  return cycles;
+}
+
+/** ArcTan2 reduces the angle to an octant and runs ArcTan on the smaller coordinate over the larger (mGBA _ArcTan2). */
+function arcTan2Cycles(xValue: number, yValue: number): number {
+  const x = xValue | 0;
+  const y = yValue | 0;
+  if (x === 0 || y === 0) {
+    return 11;
+  }
+  const yOverX = ((y << 14) / x) | 0;
+  const xOverY = ((x << 14) / y) | 0;
+  if (y >= 0) {
+    if (x >= 0 ? x >= y : -x >= y) {
+      return arcTanCycles(yOverX);
+    }
+    return arcTanCycles(xOverY);
+  }
+  if (x <= 0 ? -x > -y : x >= -y) {
+    return arcTanCycles(yOverX);
+  }
+  return arcTanCycles(xOverY);
+}
+
+/**
+ * CpuSet and CpuFastSet run a loop from the BIOS ROM (mGBA hle-bios.s): per unit a compare, a
+ * load (N, then I), a store (N) and the branch back; a fill loads once before the loop instead.
+ * CpuFastSet moves 8 words per LDM/STM pair. Around the loop, CpuFastSet spends 48 cycles, as
+ * measured on hardware (mgba-suite Timing "CpuSet": 256 words EWRAM to EWRAM), and CpuSet 3
+ * fewer, the difference between the two functions' setup and exit code in hle-bios.s.
+ */
+const CPUSET_FIXED_CYCLES = 45;
+const CPUFASTSET_FIXED_CYCLES = 48;
+
+function cpuSetCycles(cpu: BiosCpu, src: number, dst: number, count: number, width: 2 | 4, fill: boolean): number {
+  const store = cpu.memory.accessCycles(dst, width, false);
+  const load = cpu.memory.accessCycles(src, width, false);
+  if (fill) {
+    return CPUSET_FIXED_CYCLES + load + 1 + count * (5 + store);
+  }
+  return CPUSET_FIXED_CYCLES + count * (7 + load + store);
+}
+
+function cpuFastSetCycles(cpu: BiosCpu, src: number, dst: number, words: number, fill: boolean): number {
+  const block = (address: number): number =>
+    cpu.memory.accessCycles(address, 4, false) + 7 * cpu.memory.accessCycles(address, 4, true);
+  const blocks = words >>> 3;
+  if (fill) {
+    // The word goes into 8 registers: a load and 7 moves.
+    return CPUFASTSET_FIXED_CYCLES + cpu.memory.accessCycles(src, 4, false) + 1 + 7 + blocks * (5 + block(dst));
+  }
+  return CPUFASTSET_FIXED_CYCLES + blocks * (7 + block(src) + block(dst));
 }
 
 // ─── SWI 0x06: Div ─────────────────────────────────────────────────
@@ -135,9 +299,10 @@ export function handleSwi(cpu: BiosCpu, swiNumber: number, env: BiosEnv = {}): v
  *   r1 = numerator % denominator (signed)
  *   r3 = abs(numerator / denominator)
  */
-function swiDiv(cpu: BiosCpu): void {
+function swiDiv(cpu: BiosCpu): number {
   const numerator = cpu.registers[0]! | 0;
   const denominator = cpu.registers[1]! | 0;
+  const cycles = divCycles(numerator, denominator);
 
   if (denominator === 0) {
     // Division by zero — undefined behavior, but real BIOS hangs.
@@ -145,7 +310,7 @@ function swiDiv(cpu: BiosCpu): void {
     cpu.registers[0] = 0;
     cpu.registers[1] = 0;
     cpu.registers[3] = 0;
-    return;
+    return cycles;
   }
 
   // JavaScript integer division truncates toward zero (like C99)
@@ -155,6 +320,7 @@ function swiDiv(cpu: BiosCpu): void {
   cpu.registers[0] = quotient >>> 0;
   cpu.registers[1] = remainder >>> 0;
   cpu.registers[3] = Math.abs(quotient) >>> 0;
+  return cycles;
 }
 
 // ─── SWI 0x07: DivArm ──────────────────────────────────────────────
@@ -171,12 +337,12 @@ function swiDiv(cpu: BiosCpu): void {
  *   r1 = numerator % denominator (signed)
  *   r3 = abs(numerator / denominator)
  */
-function swiDivArm(cpu: BiosCpu): void {
+function swiDivArm(cpu: BiosCpu): number {
   // Swap r0 and r1, then call Div
   const temp = cpu.registers[0]!;
   cpu.registers[0] = cpu.registers[1]!;
   cpu.registers[1] = temp;
-  swiDiv(cpu);
+  return swiDiv(cpu);
 }
 
 // ─── SWI 0x08: Sqrt ────────────────────────────────────────────────
@@ -190,9 +356,10 @@ function swiDivArm(cpu: BiosCpu): void {
  * Output:
  *   r0 = floor(sqrt(r0)) (unsigned 16-bit)
  */
-function swiSqrt(cpu: BiosCpu): void {
+function swiSqrt(cpu: BiosCpu): number {
   const value = cpu.registers[0]! >>> 0;
   cpu.registers[0] = Math.floor(Math.sqrt(value)) >>> 0;
+  return sqrtCycles(value);
 }
 
 // ─── SWI 0x09: ArcTan ──────────────────────────────────────────────
@@ -207,7 +374,8 @@ function swiSqrt(cpu: BiosCpu): void {
  *   r0 = arctan(r0) in range -0x4000 to +0x4000 (representing -pi/4 to +pi/4)
  *         Actually returns in range 0xC000..0x4000 (signed), representing -pi/2..+pi/2
  */
-function swiArcTan(cpu: BiosCpu): void {
+function swiArcTan(cpu: BiosCpu): number {
+  const cycles = arcTanCycles(cpu.registers[0]!);
   // r0 is a signed 16-bit fixed-point 1.14 value
   const tan = (cpu.registers[0]! << 16) >> 16; // sign-extend to 32-bit
   // Convert from 1.14 fixed point to float
@@ -218,6 +386,7 @@ function swiArcTan(cpu: BiosCpu): void {
   // scale so that pi/2 = 0x4000
   const scaled = Math.round((result / (Math.PI / 2)) * 0x4000);
   cpu.registers[0] = scaled & 0xffff;
+  return cycles;
 }
 
 // ─── SWI 0x0A: ArcTan2 ─────────────────────────────────────────────
@@ -232,13 +401,14 @@ function swiArcTan(cpu: BiosCpu): void {
  * Output:
  *   r0 = arctan2(y, x) in range 0x0000..0xFFFF (representing 0..2*pi)
  */
-function swiArcTan2(cpu: BiosCpu): void {
+function swiArcTan2(cpu: BiosCpu): number {
+  const cycles = arcTan2Cycles(cpu.registers[0]!, cpu.registers[1]!);
   const x = (cpu.registers[0]! << 16) >> 16;
   const y = (cpu.registers[1]! << 16) >> 16;
 
   if (x === 0 && y === 0) {
     cpu.registers[0] = 0;
-    return;
+    return cycles;
   }
 
   const xf = x / 0x4000;
@@ -253,6 +423,7 @@ function swiArcTan2(cpu: BiosCpu): void {
   // Scale to 0..0x10000 (full circle), wrap to 16 bits
   const scaled = Math.round((angle / (2 * Math.PI)) * 0x10000) & 0xffff;
   cpu.registers[0] = scaled;
+  return cycles;
 }
 
 // ─── SWI 0x0B: CpuSet ──────────────────────────────────────────────
@@ -268,7 +439,7 @@ function swiArcTan2(cpu: BiosCpu): void {
  *     bit 24:     0=copy, 1=fill (use first source word/halfword for all)
  *     bit 26:     0=16-bit (halfword), 1=32-bit (word)
  */
-function swiCpuSet(cpu: BiosCpu): void {
+function swiCpuSet(cpu: BiosCpu): number {
   let src = cpu.registers[0]! >>> 0;
   let dst = cpu.registers[1]! >>> 0;
   const control = cpu.registers[2]! >>> 0;
@@ -276,6 +447,7 @@ function swiCpuSet(cpu: BiosCpu): void {
   const count = control & 0x1fffff;
   const fill = (control & (1 << 24)) !== 0;
   const word32 = (control & (1 << 26)) !== 0;
+  const cycles = cpuSetCycles(cpu, src, dst, count, word32 ? 4 : 2, fill);
 
   if (word32) {
     // 32-bit transfers
@@ -300,6 +472,7 @@ function swiCpuSet(cpu: BiosCpu): void {
       dst = (dst + 2) >>> 0;
     }
   }
+  return cycles;
 }
 
 // ─── SWI 0x0C: CpuFastSet ──────────────────────────────────────────
@@ -316,7 +489,7 @@ function swiCpuSet(cpu: BiosCpu): void {
  *
  * Always operates in 32-bit mode, in blocks of 8 words (32 bytes).
  */
-function swiCpuFastSet(cpu: BiosCpu): void {
+function swiCpuFastSet(cpu: BiosCpu): number {
   let src = cpu.registers[0]! >>> 0;
   let dst = cpu.registers[1]! >>> 0;
   const control = cpu.registers[2]! >>> 0;
@@ -326,6 +499,7 @@ function swiCpuFastSet(cpu: BiosCpu): void {
 
   // Round up to multiple of 8
   count = (count + 7) & ~7;
+  const cycles = cpuFastSetCycles(cpu, src, dst, count, fill);
 
   const fillValue = cpu.memory.read32(src);
   for (let i = 0; i < count; i++) {
@@ -336,6 +510,7 @@ function swiCpuFastSet(cpu: BiosCpu): void {
     }
     dst = (dst + 4) >>> 0;
   }
+  return cycles;
 }
 
 // ─── SWI 0x0E: BgAffineSet ─────────────────────────────────────────
@@ -583,9 +758,16 @@ function swiBitUnPack(cpu: BiosCpu): void {
  *              displacement = offset + 1 (back from current dst)
  *              length = length + 3
  */
-function lz77Decompress(cpu: BiosCpu, useHalfwordWrites: boolean): void {
+function lz77Decompress(cpu: BiosCpu, useHalfwordWrites: boolean): number {
   const src = cpu.registers[0]! >>> 0;
   const dst = cpu.registers[1]! >>> 0;
+
+  // The BIOS's cycles, counted the way mGBA's _unLz77 counts them: a load is its access plus an I
+  // cycle, a store its access, and each pass of the loop adds the instructions around them.
+  const memory = cpu.memory;
+  const load = (address: number, width: 1 | 2 | 4): number => memory.accessCycles(address, width, false) + 1;
+  const store = (address: number, width: 1 | 2): number => memory.accessCycles(address, width, false);
+  let cycles = 20 + load(src, 4);
 
   // Read header
   const header = cpu.memory.read32(src);
@@ -599,14 +781,27 @@ function lz77Decompress(cpu: BiosCpu, useHalfwordWrites: boolean): void {
   let srcPos = (src + 4) >>> 0;
   let bufPos = 0;
 
+  // A byte reaches the destination with a byte store in WRAM, and in VRAM with a halfword store
+  // once both bytes of the halfword are there.
+  const storeByte = (offset: number): number => {
+    const address = (dst + offset) >>> 0;
+    if (!useHalfwordWrites) {
+      return store(address, 1);
+    }
+    return address & 1 ? store((address ^ 1) >>> 0, 2) : 0;
+  };
+
   while (bufPos < decompSize) {
     // Read flag byte
+    cycles += 14 + load(srcPos, 1);
     const flags = cpu.memory.read8(srcPos);
     srcPos = (srcPos + 1) >>> 0;
 
     for (let i = 7; i >= 0 && bufPos < decompSize; i--) {
+      cycles += 14 + 18;
       if ((flags >> i) & 1) {
         // Compressed: reference
+        cycles += load(srcPos, 1) + load((srcPos + 1) >>> 0, 1);
         const byte1 = cpu.memory.read8(srcPos);
         srcPos = (srcPos + 1) >>> 0;
         const byte2 = cpu.memory.read8(srcPos);
@@ -616,11 +811,15 @@ function lz77Decompress(cpu: BiosCpu, useHalfwordWrites: boolean): void {
         const displacement = (((byte1 & 0xf) << 8) | byte2) + 1;
 
         for (let j = 0; j < length && bufPos < decompSize; j++) {
+          const from = (dst + bufPos - displacement) >>> 0;
+          cycles += useHalfwordWrites ? 10 + load(from & ~1, 2) + 4 : 10 + load(from, 1);
+          cycles += storeByte(bufPos);
           buffer[bufPos] = buffer[bufPos - displacement]!;
           bufPos++;
         }
       } else {
         // Uncompressed: copy 1 byte
+        cycles += load(srcPos, 1) + storeByte(bufPos);
         buffer[bufPos] = cpu.memory.read8(srcPos);
         bufPos++;
         srcPos = (srcPos + 1) >>> 0;
@@ -648,14 +847,15 @@ function lz77Decompress(cpu: BiosCpu, useHalfwordWrites: boolean): void {
       dstPos = (dstPos + 1) >>> 0;
     }
   }
+  return cycles;
 }
 
-function swiLz77UnCompWram(cpu: BiosCpu): void {
-  lz77Decompress(cpu, false);
+function swiLz77UnCompWram(cpu: BiosCpu): number {
+  return lz77Decompress(cpu, false);
 }
 
-function swiLz77UnCompVram(cpu: BiosCpu): void {
-  lz77Decompress(cpu, true);
+function swiLz77UnCompVram(cpu: BiosCpu): number {
+  return lz77Decompress(cpu, true);
 }
 
 // ─── SWI 0x14/0x15: Run-Length Decompress ───────────────────────────

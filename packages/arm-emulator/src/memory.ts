@@ -179,6 +179,20 @@ export class GbaMemory implements MemoryBus {
     this.#recordWrite(aligned, 4, value);
   }
 
+  // This memory has no wait states and no prefetch unit: every access is one cycle.
+
+  accessCycles(_address: number, _width: 1 | 2 | 4, _sequential: boolean): number {
+    return 1;
+  }
+
+  fetchCycles(_address: number, _width: 2 | 4, _sequential: boolean): number {
+    return 1;
+  }
+
+  stallCycles(cycles: number, _fetchAddress: number, _dataAddress?: number): number {
+    return cycles;
+  }
+
   #recordWrite(address: number, size: 1 | 2 | 4, value: number): void {
     const entry: MemoryWrite = { address, size, value };
     this.#writeLog.push(entry);

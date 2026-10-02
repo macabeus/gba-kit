@@ -1305,7 +1305,10 @@ describe('ArmCpu', () => {
       const mem = new GbaMemory();
       const cpu = new ArmCpu(mem, {
         // A BIOS call that writes the code it returns to (CpuSet over the caller, say).
-        swiHandler: (c) => mem.write32(c.registers[PC]!, MOV_R0_5),
+        swiHandler: (c) => {
+          mem.write32(c.registers[PC]!, MOV_R0_5);
+          return 0;
+        },
       });
       loadArmInstructions(mem, CODE, [0xef010000 /* swi 0x10000 */, armMovImm(0, 1), armBx(LR)]);
       cpu.cpsr = MODE_SYS;

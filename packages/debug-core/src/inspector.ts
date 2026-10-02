@@ -298,7 +298,7 @@ export class Inspector {
     return [
       { name: 'frame', value: String(this.machine.frame), type: 'frames' },
       { name: 'scanline', value: String(this.machine.scanline), type: 'line' },
-      { name: 'cycle', value: String(this.machine.cycle), type: 'instruction count' },
+      { name: 'cycle', value: String(this.machine.cycle), type: 'CPU cycles' },
       { name: 'function', value: fn ? fn.name : '?', type: 'symbol' },
       { name: 'halted', value: String(this.machine.halted), type: 'bool' },
       { name: 'IME', value: String(gba.interrupts.ime & 1), type: 'u16', address: 0x04000208 },

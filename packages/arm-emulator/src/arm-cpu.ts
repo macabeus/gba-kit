@@ -145,11 +145,39 @@ function checkCondition(cond: number, n: boolean, z: boolean, c: boolean, v: boo
 // ─── SWI Handler Type ───────────────────────────────────────────────
 
 /**
+ * The internal cycles (m) of a multiply: the multiplier array stops early once the multiplier's
+ * remaining top bytes are all zero, or, for a signed multiply, all ones. m is 1 when bits 31-8 are,
+ * 2 when bits 31-16 are, 3 when bits 31-24 are, and 4 otherwise (GBATEK "ARM CPU Instruction Cycle
+ * Times"; mGBA ARM_WAIT_SMUL / ARM_WAIT_UMUL).
+ */
+function multiplierCycles(multiplier: number, signed: boolean): number {
+  const m = multiplier | 0;
+  if (signed) {
+    if (m >> 8 === 0 || m >> 8 === -1) {
+      return 1;
+    }
+    if (m >> 16 === 0 || m >> 16 === -1) {
+      return 2;
+    }
+    return m >> 24 === 0 || m >> 24 === -1 ? 3 : 4;
+  }
+  if (m >>> 8 === 0) {
+    return 1;
+  }
+  if (m >>> 16 === 0) {
+    return 2;
+  }
+  return m >>> 24 === 0 ? 3 : 4;
+}
+
+/**
  * Callback for Software Interrupt (SWI) instructions.
  * Platform-specific: on GBA, the SWI number selects a BIOS function.
+ * It returns the cycles the call spends between taking the SWI and branching back, which the SWI
+ * instruction costs on top of its own fetch and that return branch.
  * If not provided, SWI instructions are silently ignored.
  */
-export type SwiHandler = (cpu: ArmCpu, swiNumber: number) => void;
+export type SwiHandler = (cpu: ArmCpu, swiNumber: number) => number;
 
 // ─── ARM7TDMI Full CPU ──────────────────────────────────────────────
 
@@ -249,6 +277,13 @@ export class ArmCpu {
   #pipelineThumb = false;
   #decodedOpcode = 0;
   #fetchedOpcode = 0;
+
+  /**
+   * Cycles the instruction in progress has used so far: its opcode fetch, its data accesses, its
+   * internal cycles and any refill a branch makes, each priced by the bus (GBATEK "ARM CPU
+   * Instruction Cycle Times"; mGBA `currentCycles` in src/arm/isa-arm.c and isa-thumb.c).
+   */
+  #cycles = 0;
 
   constructor(memory: MemoryBus, options?: { hooks?: DebugHooks; swiHandler?: SwiHandler }) {
     this.memory = memory;
@@ -650,8 +685,12 @@ export class ArmCpu {
    * - Saving registers to IRQ stack
    * - Calling the user's handler from [0x03007FFC]
    * - Restoring registers and returning from IRQ
+   *
+   * Returns the cycles the entry takes: the pipeline refill at the vector (mGBA ARMRaiseIRQ).
    */
-  enterIrq(): void {
+  enterIrq(): number {
+    this.#cycles = 0;
+
     // Save current CPSR as SPSR_irq
     const savedCpsr = this.cpsr;
 
@@ -675,6 +714,7 @@ export class ArmCpu {
 
     // Jump to the BIOS IRQ vector; its stub calls the user handler.
     this.#branchTo(0x00000018);
+    return this.#cycles;
   }
 
   /** Enter Undefined Instruction exception */
@@ -693,18 +733,22 @@ export class ArmCpu {
   }
 
   /**
-   * Execute one instruction (ARM or Thumb based on T bit).
-   * Returns false when nothing ran: the CPU is halted, or a debug hook refused the instruction.
+   * Execute one instruction (ARM or Thumb based on T bit) and return the cycles it took.
+   * Returns 0 when nothing ran: the CPU is halted, a debug hook refused the instruction, or the
+   * instruction halted the CPU at the sentinel return address.
+   *
+   * A PC set from outside (a host, the debugger, a snapshot) refills the pipeline here at no cost:
+   * only a branch the program takes pays for its refill.
    */
-  step(): boolean {
+  step(): number {
     if (this.#halted) {
-      return false;
+      return 0;
     }
 
     const pc = this.registers[PC]!;
     if (isSentinel(pc)) {
       this.#halted = true;
-      return false;
+      return 0;
     }
 
     // Check stubs
@@ -723,7 +767,7 @@ export class ArmCpu {
       this.registers[0] = 0;
       const returnAddr = this.registers[LR]!;
       this.registers[PC] = returnAddr & ~1;
-      return true;
+      return 1;
     }
 
     if (this.getT()) {
@@ -774,13 +818,56 @@ export class ArmCpu {
 
   /**
    * Write the PC as a branch does: aligned for the current instruction set (mGBA ARM_WRITE_PC and
-   * THUMB_WRITE_PC mask with -WORD_SIZE), with the pipeline refilled from the target.
+   * THUMB_WRITE_PC mask with -WORD_SIZE), with the pipeline refilled from the target. The refill
+   * is an N fetch of the target and an S fetch of the opcode after it, the 1N+1S every branch adds
+   * to the instruction's own fetch (GBATEK: B 2S+1N).
    */
   #branchTo(target: number): void {
     const thumb = this.getT();
+    const width = thumb ? 2 : 4;
     const address = (thumb ? target & ~1 : target & ~3) >>> 0;
     this.registers[PC] = address;
+    this.#cycles +=
+      this.memory.fetchCycles(address, width, false) + this.memory.fetchCycles((address + width) >>> 0, width, true);
     this.#fillPipeline(address, thumb);
+  }
+
+  // ─── Cycle Accounting ────────────────────────────────────────────
+
+  /** The address the fetch stage reads while the current instruction executes: [$+8] ARM, [$+4] Thumb. */
+  #fetchAddress(): number {
+    return (this.#pipelineAddress + (this.#pipelineThumb ? 2 : 4)) >>> 0;
+  }
+
+  /**
+   * After a data access or internal cycles the next opcode fetch is nonsequential, since the bus
+   * carried something else in between: it costs an N fetch where the instruction's base price
+   * counted an S fetch (mGBA ARM_LOAD_POST_BODY, ARM_STORE_POST_BODY, the multiplies).
+   */
+  #chargeNonsequentialFetch(): void {
+    const address = this.#fetchAddress();
+    const width = this.#pipelineThumb ? 2 : 4;
+    this.#cycles += this.memory.accessCycles(address, width, false) - this.memory.accessCycles(address, width, true);
+  }
+
+  /** A load: its N data cycle, then the I cycle that writes the register (GBATEK LDR: 1S+1N+1I). */
+  #chargeLoad(address: number, width: 1 | 2 | 4): void {
+    const cycles = this.memory.accessCycles(address, width, false) + 1;
+    this.#cycles += this.memory.stallCycles(cycles, this.#fetchAddress(), address);
+    this.#chargeNonsequentialFetch();
+  }
+
+  /** A store: its N data cycle (GBATEK STR: 2N, the store and the nonsequential fetch after it). */
+  #chargeStore(address: number, width: 1 | 2 | 4): void {
+    const cycles = this.memory.accessCycles(address, width, false);
+    this.#cycles += this.memory.stallCycles(cycles, this.#fetchAddress(), address);
+    this.#chargeNonsequentialFetch();
+  }
+
+  /** A multiply's internal cycles: m, plus 1 to accumulate and 1 for a long result (GBATEK MUL..SMLAL). */
+  #chargeMultiply(internal: number): void {
+    this.#cycles += this.memory.stallCycles(internal, this.#fetchAddress());
+    this.#chargeNonsequentialFetch();
   }
 
   /**
@@ -860,8 +947,8 @@ export class ArmCpu {
 
   // ─── Thumb Execution ─────────────────────────────────────────────
 
-  /** Execute one Thumb instruction */
-  #stepThumb(): boolean {
+  /** Execute one Thumb instruction; returns its cycles, or 0 when nothing ran. */
+  #stepThumb(): number {
     const instrAddr = (this.registers[PC]! & ~1) >>> 0;
     if (instrAddr !== this.#pipelineAddress || !this.#pipelineThumb) {
       this.#fillPipeline(instrAddr, true);
@@ -875,19 +962,22 @@ export class ArmCpu {
     if (this.#hooks?.onInstructionPre) {
       const action = this.#hooks.onInstructionPre(instrAddr, instr);
       if (action === 'break') {
-        return false;
+        return 0;
       }
     }
 
-    // Fetch stage: [$+4] enters the pipeline before this instruction touches memory.
+    // Fetch stage: [$+4] enters the pipeline before this instruction touches memory. Its S fetch
+    // is the base price of every instruction.
+    const fetchAddress = (instrAddr + 4) >>> 0;
     this.#decodedOpcode = this.#fetchedOpcode;
-    this.#fetchedOpcode = this.memory.read16((instrAddr + 4) >>> 0);
+    this.#fetchedOpcode = this.memory.read16(fetchAddress);
+    this.#cycles = this.memory.fetchCycles(fetchAddress, 2, true);
     this.#pipelineAddress = (instrAddr + 2) >>> 0;
     this.registers[PC] = (instrAddr + 2) >>> 0;
     this.#executeThumb(instr, instrAddr);
 
     this.#hooks?.onInstructionPost?.(instrAddr, instr);
-    return !this.#halted;
+    return this.#halted ? 0 : this.#cycles;
   }
 
   /** Decode and execute a single 16-bit Thumb instruction. */
@@ -956,8 +1046,10 @@ export class ArmCpu {
       const offset8 = (instr & 0xff) << 2;
       const address = (this.registers[SP]! + offset8) >>> 0;
       if (l === 1) {
+        this.#chargeLoad(address, 4);
         this.registers[rd] = this.#loadWord(address);
       } else {
+        this.#chargeStore(address, 4);
         this.memory.write32(address, this.registers[rd]!);
       }
       return;
@@ -985,8 +1077,10 @@ export class ArmCpu {
       const rd = bits(instr, 2, 0);
       const address = (this.registers[rb]! + (offset5 << 1)) >>> 0;
       if (l === 1) {
+        this.#chargeLoad(address, 2);
         this.registers[rd] = this.#loadHalfword(address);
       } else {
+        this.#chargeStore(address, 2);
         this.memory.write16(address, this.registers[rd]!);
       }
       return;
@@ -1016,6 +1110,7 @@ export class ArmCpu {
       const offset8 = (instr & 0xff) << 2;
       const base = ((this.registers[PC]! + 2) & ~3) >>> 0;
       const address = (base + offset8) >>> 0;
+      this.#chargeLoad(address, 4);
       this.registers[rd] = this.#loadWord(address);
       return;
     }
@@ -1151,19 +1246,23 @@ export class ArmCpu {
       case 0x1:
         result = rdVal ^ rsVal;
         break;
+      // A shift by a register spends an I cycle reading the amount (GBATEK THUMB.4: 1S+1I).
       case 0x2: {
         const amount = rsVal & 0xff;
         [result, carry] = lsl(rdVal, amount, this.getC());
+        this.#cycles += 1;
         break;
       }
       case 0x3: {
         const amount = rsVal & 0xff;
         [result, carry] = lsr(rdVal, amount, this.getC());
+        this.#cycles += 1;
         break;
       }
       case 0x4: {
         const amount = rsVal & 0xff;
         [result, carry] = asr(rdVal, amount, this.getC());
+        this.#cycles += 1;
         break;
       }
       case 0x5: {
@@ -1183,6 +1282,7 @@ export class ArmCpu {
       case 0x7: {
         const amount = rsVal & 0xff;
         [result, carry] = ror(rdVal, amount, this.getC());
+        this.#cycles += 1;
         break;
       }
       case 0x8:
@@ -1219,6 +1319,7 @@ export class ArmCpu {
         // MUL Rd, Rs is MULS Rd, Rs, Rd: Rd is the multiplier.
         result = Math.imul(rdVal, rsVal);
         carry = multiplyCarry(rsVal, rdVal, 0);
+        this.#chargeMultiply(multiplierCycles(rdVal, true));
         break;
       case 0xe:
         result = rdVal & ~rsVal;
@@ -1297,12 +1398,17 @@ export class ArmCpu {
     const rb = bits(instr, 5, 3);
     const rd = bits(instr, 2, 0);
     const address = (this.registers[rb]! + this.registers[ro]!) >>> 0;
+    const width = b === 1 ? 1 : 4;
     if (l === 1) {
+      this.#chargeLoad(address, width);
       this.registers[rd] = b === 1 ? this.memory.read8(address) : this.#loadWord(address);
-    } else if (b === 1) {
-      this.memory.write8(address, this.registers[rd]!);
     } else {
-      this.memory.write32(address, this.registers[rd]!);
+      this.#chargeStore(address, width);
+      if (b === 1) {
+        this.memory.write8(address, this.registers[rd]!);
+      } else {
+        this.memory.write32(address, this.registers[rd]!);
+      }
     }
   }
 
@@ -1314,10 +1420,15 @@ export class ArmCpu {
     const rd = bits(instr, 2, 0);
     const address = (this.registers[rb]! + this.registers[ro]!) >>> 0;
     if (s === 0 && h === 0) {
+      this.#chargeStore(address, 2);
       this.memory.write16(address, this.registers[rd]!);
-    } else if (s === 0 && h === 1) {
+      return;
+    }
+    // LDRSB reads a byte, LDRH and LDRSH a halfword.
+    this.#chargeLoad(address, s === 1 && h === 0 ? 1 : 2);
+    if (s === 0) {
       this.registers[rd] = this.#loadHalfword(address);
-    } else if (s === 1 && h === 0) {
+    } else if (h === 0) {
       this.registers[rd] = signExtend(this.memory.read8(address), 8) >>> 0;
     } else {
       this.registers[rd] = this.#loadSignedHalfword(address);
@@ -1333,12 +1444,17 @@ export class ArmCpu {
     const base = this.registers[rb]!;
     const offset = b === 0 ? offset5 << 2 : offset5;
     const address = (base + offset) >>> 0;
+    const width = b === 1 ? 1 : 4;
     if (l === 1) {
+      this.#chargeLoad(address, width);
       this.registers[rd] = b === 1 ? this.memory.read8(address) : this.#loadWord(address);
-    } else if (b === 1) {
-      this.memory.write8(address, this.registers[rd]!);
     } else {
-      this.memory.write32(address, this.registers[rd]!);
+      this.#chargeStore(address, width);
+      if (b === 1) {
+        this.memory.write8(address, this.registers[rd]!);
+      } else {
+        this.memory.write32(address, this.registers[rd]!);
+      }
     }
   }
 
@@ -1384,8 +1500,8 @@ export class ArmCpu {
 
   // ─── ARM Execution ───────────────────────────────────────────────
 
-  /** Execute one ARM (32-bit) instruction */
-  #stepArm(): boolean {
+  /** Execute one ARM (32-bit) instruction; returns its cycles, or 0 when nothing ran. */
+  #stepArm(): number {
     const instrAddr = (this.registers[PC]! & ~3) >>> 0;
     if (instrAddr !== this.#pipelineAddress || this.#pipelineThumb) {
       this.#fillPipeline(instrAddr, false);
@@ -1399,13 +1515,16 @@ export class ArmCpu {
     if (this.#hooks?.onInstructionPre) {
       const action = this.#hooks.onInstructionPre(instrAddr, instr);
       if (action === 'break') {
-        return false;
+        return 0;
       }
     }
 
-    // Fetch stage: [$+8] enters the pipeline before this instruction touches memory.
+    // Fetch stage: [$+8] enters the pipeline before this instruction touches memory. Its S fetch
+    // is the base price of every instruction, one whose condition fails included.
+    const fetchAddress = (instrAddr + 8) >>> 0;
     this.#decodedOpcode = this.#fetchedOpcode;
-    this.#fetchedOpcode = this.memory.read32((instrAddr + 8) >>> 0);
+    this.#fetchedOpcode = this.memory.read32(fetchAddress);
+    this.#cycles = this.memory.fetchCycles(fetchAddress, 4, true);
     this.#pipelineAddress = (instrAddr + 4) >>> 0;
     this.registers[PC] = (instrAddr + 4) >>> 0;
 
@@ -1416,7 +1535,7 @@ export class ArmCpu {
     }
 
     this.#hooks?.onInstructionPost?.(instrAddr, instr);
-    return !this.#halted;
+    return this.#halted ? 0 : this.#cycles;
   }
 
   /**
@@ -1558,9 +1677,10 @@ export class ArmCpu {
 
     let amount: number;
     if (regShift) {
-      // Register-specified shift amount (Rs)
+      // Register-specified shift amount (Rs), read in an I cycle (GBATEK ARM.5: +1I).
       const rsReg = (instr >>> 8) & 0xf;
       amount = this.registers[rsReg]! & 0xff;
+      this.#cycles += 1;
     } else {
       // Immediate-specified shift amount
       amount = (instr >>> 7) & 0x1f;
@@ -1742,6 +1862,7 @@ export class ArmCpu {
     const multiplier = this.registers[rs]!;
     const accumulator = accumulate ? this.registers[rn]! : 0;
     const result = (Math.imul(multiplicand, multiplier) + accumulator) | 0;
+    this.#chargeMultiply(multiplierCycles(multiplier, true) + (accumulate ? 1 : 0));
 
     this.registers[rd] = result >>> 0;
 
@@ -1764,6 +1885,7 @@ export class ArmCpu {
     const multiplier = this.registers[bits(instr, 11, 8)]!;
     const accLo = accumulate ? this.registers[rdLo]! : 0;
     const accHi = accumulate ? this.registers[rdHi]! : 0;
+    this.#chargeMultiply(multiplierCycles(multiplier, isSigned) + (accumulate ? 2 : 1));
 
     // 32x32 -> 64 with BigInt for 64-bit precision, plus RdHi:RdLo for UMLAL/SMLAL.
     const product = isSigned
@@ -1793,6 +1915,13 @@ export class ArmCpu {
     const rd = bits(instr, 15, 12);
     const rm = instr & 0xf;
     const address = this.registers[rn]!;
+
+    // A load (N, then I) and a store (N) to the same address: GBATEK SWP 1S+2N+1I.
+    const width = byteMode ? 1 : 4;
+    const fetchAddress = this.#fetchAddress();
+    this.#cycles +=
+      this.memory.stallCycles(this.memory.accessCycles(address, width, false) + 1, fetchAddress, address) +
+      this.memory.stallCycles(this.memory.accessCycles(address, width, false), fetchAddress, address);
 
     if (byteMode) {
       const temp = this.memory.read8(address);
@@ -1894,6 +2023,7 @@ export class ArmCpu {
     const address = pre ? indexed : base;
 
     if (load) {
+      this.#chargeLoad(address, byteMode ? 1 : 4);
       const value = byteMode ? this.memory.read8(address) : this.#loadWord(address);
       // The base is written back before the loaded value, so `ldr r0, [r0], #4` keeps the data.
       if (writeback) {
@@ -1903,6 +2033,7 @@ export class ArmCpu {
     } else {
       // A stored R15 is instrAddr+12 (GBATEK "ARM.9"; mGBA adds WORD_SIZE_ARM to PC+8).
       const value = rd === PC ? (this.registers[PC]! + 8) >>> 0 : this.registers[rd]!;
+      this.#chargeStore(address, byteMode ? 1 : 4);
       if (byteMode) {
         this.memory.write8(address, value & 0xff);
       } else {
@@ -1936,6 +2067,7 @@ export class ArmCpu {
     const address = pre ? indexed : base;
 
     if (load) {
+      this.#chargeLoad(address, sh === 0b10 ? 1 : 2);
       let value: number;
       switch (sh) {
         case 0b01: // LDRH
@@ -1957,6 +2089,7 @@ export class ArmCpu {
       // STRH (sh=01; the signed forms have no store on ARMv4). A stored R15 is instrAddr+12.
       if (sh === 0b01) {
         const value = rd === PC ? (this.registers[PC]! + 8) >>> 0 : this.registers[rd]!;
+        this.#chargeStore(address, 2);
         this.memory.write16(address, value & 0xffff);
       }
       if (writeback) {
@@ -2017,6 +2150,10 @@ export class ArmCpu {
     let address = (up ? (pre ? base + 4 : base) : pre ? base - span : base - span + 4) >>> 0;
     const loadsPc = load && (list & (1 << PC)) !== 0;
     const userBank = sBit && !loadsPc;
+    // The first word is an N cycle and the rest S cycles; an LDM adds the I cycle that writes the
+    // last register (GBATEK LDM: nS+1N+1I, STM: (n-1)S+2N).
+    const firstAddress = address;
+    let cycles = load ? 1 : 0;
 
     if (load) {
       if (writeback) {
@@ -2025,6 +2162,7 @@ export class ArmCpu {
       let pcValue = 0;
       for (let i = 0; i < 16; i++) {
         if (list & (1 << i)) {
+          cycles += this.memory.accessCycles(address, 4, address !== firstAddress);
           const value = this.memory.read32(address);
           if (i === PC) {
             pcValue = value;
@@ -2036,6 +2174,8 @@ export class ArmCpu {
           address = (address + 4) >>> 0;
         }
       }
+      this.#cycles += this.memory.stallCycles(cycles, this.#fetchAddress(), firstAddress);
+      this.#chargeNonsequentialFetch();
       if (loadsPc) {
         if (sBit) {
           this.#restoreCpsrFromSpsr();
@@ -2058,6 +2198,7 @@ export class ArmCpu {
           } else {
             value = userBank ? this.#readUserRegister(i) : this.registers[i]!;
           }
+          cycles += this.memory.accessCycles(address, 4, !first);
           this.memory.write32(address, value);
           address = (address + 4) >>> 0;
           if (first && writeback) {
@@ -2066,6 +2207,8 @@ export class ArmCpu {
           first = false;
         }
       }
+      this.#cycles += this.memory.stallCycles(cycles, this.#fetchAddress(), firstAddress);
+      this.#chargeNonsequentialFetch();
     }
   }
 
@@ -2128,12 +2271,13 @@ export class ArmCpu {
   // ─── Software Interrupt ──────────────────────────────────────────
 
   /**
-   * SWI: the HLE BIOS runs the call in place of the BIOS code at the 0x08 vector. On hardware the
-   * BIOS returns with `movs pc, lr`, which refills the pipeline at the return address, so code the
-   * call wrote right after the SWI is what runs next.
+   * SWI: the HLE BIOS runs the call in place of the BIOS code at the 0x08 vector, and its handler
+   * says how many cycles that code takes. On hardware the BIOS returns with `movs pc, lr`, which
+   * refills the pipeline at the return address, so code the call wrote right after the SWI is what
+   * runs next.
    */
   #softwareInterrupt(swiNumber: number): void {
-    this.#swiHandler?.(this, swiNumber);
+    this.#cycles += this.#swiHandler?.(this, swiNumber) ?? 0;
     if (!this.#halted) {
       this.#branchTo(this.registers[PC]!);
     }

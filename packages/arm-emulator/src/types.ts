@@ -21,6 +21,11 @@ export const SENTINEL_ADDR = 0xdeadbeee;
  * Reads return the aligned data unrotated; the CPU applies the ARM7TDMI rules for misaligned
  * loads (rotation, LDRSH sign extension).
  *
+ * The bus also prices each access, because the wait states belong to the memory the address
+ * selects: the CPU adds up these prices, plus its internal cycles, as the cost of an instruction
+ * (GBATEK "ARM CPU Instruction Cycle Times"). A price counts the access's own cycle, so a zero-wait
+ * memory answers 1.
+ *
  * The full GBA emulator injects GbaSystemBus (dispatches to PPU, APU, etc.).
  */
 export interface MemoryBus {
@@ -30,6 +35,26 @@ export interface MemoryBus {
   write8(address: number, value: number): void;
   write16(address: number, value: number): void;
   write32(address: number, value: number): void;
+
+  /**
+   * Cycles one data access of `width` bytes at `address` takes. `sequential` is an S cycle, the
+   * address after the previous access (an LDM/STM past its first word); otherwise an N cycle.
+   */
+  accessCycles(address: number, width: 1 | 2 | 4, sequential: boolean): number;
+
+  /**
+   * Cycles one opcode fetch of `width` bytes at `address` takes, on the same terms. A nonsequential
+   * fetch starts a new stream of code: the CPU branched.
+   */
+  fetchCycles(address: number, width: 2 | 4, sequential: boolean): number;
+
+  /**
+   * What `cycles` cost that the CPU spends off the code bus: internal cycles, and the data access
+   * at `dataAddress` when one is given. A bus that prefetches opcodes from `fetchAddress` onward
+   * meanwhile charges less (it may even refund fetches it completes ahead); a plain bus charges
+   * `cycles`.
+   */
+  stallCycles(cycles: number, fetchAddress: number, dataAddress?: number): number;
 }
 
 // ─── Debug Hooks ──────────────────────────────────────────────────────

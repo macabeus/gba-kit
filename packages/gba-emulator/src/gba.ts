@@ -5,6 +5,10 @@
  * The CPU runs until the next scheduled event, then the event fires
  * and may schedule further events.
  *
+ * Time is counted in CPU cycles: each instruction moves the scheduler's clock by
+ * what it cost on the ARM7TDMI, wait states included, as the CPU reports it, and
+ * DMA transfers, BIOS calls and interrupt entry move it by theirs.
+ *
  * Execution is owned here, not by the CPU: timers, DMA, the PPU's scanline
  * chain, IRQ delivery and HALT all advance together. A debugger stops the
  * machine through `StopPredicate` — checked before each instruction and while
@@ -125,8 +129,9 @@ export class Gba {
     // code, so its read-protection latch holds that code's last fetch afterwards (mGBA GBASwi16).
     this.armCpu = new ArmCpu(this.bus, {
       swiHandler: (cpu, swiNumber) => {
-        handleSwi(cpu, swiNumber, this.#biosEnv);
+        const cycles = handleSwi(cpu, swiNumber, this.#biosEnv);
         this.bus.latchBiosOpcode(BIOS_LATCH_AFTER_SWI);
+        return cycles;
       },
     });
     for (const [mode, sp] of BOOT_STACK_POINTERS) {
@@ -166,6 +171,7 @@ export class Gba {
       getOrigin: () => captureOrigin(this.armCpu.registers[15]!, this.armCpu.cpsr),
       setDmaSource: (channel, origin) => this.bus.setDmaSource(channel, origin),
       clearDmaSource: () => this.bus.clearDmaSource(),
+      accessCycles: (addr, width, sequential) => this.bus.accessCycles(addr, width, sequential),
     });
 
     // Install HLE BIOS IRQ handler stub
@@ -173,7 +179,7 @@ export class Gba {
 
     // Start at line 0, where the V-count comparison runs like on any other line
     this.display.setScanline(0);
-    this.#scheduleHDraw();
+    this.#scheduleHDraw(this.scheduler.currentCycle);
   }
 
   /** Load a ROM into the system */
@@ -239,35 +245,31 @@ export class Gba {
     this.#running = true;
     this.#stopped = false;
     let outcome: RunOutcome = 'done';
+    const scheduler = this.scheduler;
 
     while (this.#running && !done()) {
-      // If halted, fast-forward to next event (but keep APU running)
+      // Due events fire one per pass, so a frame that ends among them ends the run.
+      if (scheduler.runNextDueEvent()) {
+        continue;
+      }
+
+      const start = scheduler.currentCycle;
       if (this.interrupts.halted) {
+        // A halted CPU sleeps until the next event; the APU keeps running.
         if (shouldStop?.()) {
           outcome = 'stopped';
           break;
         }
-        const skip = this.scheduler.cyclesUntilNextEvent();
-        if (skip === Infinity) {
+        const next = scheduler.nextEventCycle;
+        if (next === Infinity) {
           outcome = 'stalled';
           break;
         }
-        this.scheduler.tick(skip);
-        this.apu.tick(skip);
-        continue;
-      }
-
-      // Run CPU until next event
-      const cyclesToNext = this.scheduler.cyclesUntilNextEvent();
-      if (cyclesToNext === Infinity) {
-        // No events scheduled — run a batch of CPU cycles
-        this.#runCpuCycles(CYCLES_PER_SCANLINE, shouldStop);
-      } else if (cyclesToNext <= 0) {
-        // Events are due — process them
-        this.scheduler.tick(0);
+        scheduler.advance(next - scheduler.currentCycle);
       } else {
-        this.#runCpuCycles(cyclesToNext, shouldStop);
+        this.#runCpu(shouldStop);
       }
+      this.apu.tick(scheduler.currentCycle - start);
 
       if (this.#stopped) {
         outcome = 'stopped';
@@ -283,15 +285,22 @@ export class Gba {
     return outcome;
   }
 
-  /** Run CPU for approximately the given number of cycles */
-  #runCpuCycles(cycles: number, shouldStop?: StopPredicate): void {
+  /**
+   * Run the CPU until the next event is due. Each instruction moves the clock by its cycles as it
+   * completes, so an I/O access sees the cycle its instruction began at, and an event an access
+   * schedules earlier than the others ends the run in time.
+   */
+  #runCpu(shouldStop?: StopPredicate): void {
     const cpu = this.armCpu;
-    let cyclesRun = 0;
+    const scheduler = this.scheduler;
+    // Bound the run when nothing is scheduled, so `done` is asked again.
+    const limit = scheduler.currentCycle + CYCLES_PER_SCANLINE;
 
-    while (cyclesRun < cycles) {
-      // Check for pending IRQ before each instruction
-      if (this.interrupts.irqPending()) {
-        this.#handleIrq();
+    while (scheduler.currentCycle < scheduler.nextEventCycle && scheduler.currentCycle < limit) {
+      // Check for pending IRQ before each instruction. Entering it takes cycles, so look at the
+      // clock again before running the handler's first instruction.
+      if (this.interrupts.irqPending() && this.#handleIrq()) {
+        continue;
       }
 
       // If halted (e.g. by SWI Halt/VBlankIntrWait), stop running CPU
@@ -313,8 +322,8 @@ export class Gba {
         pcBeforeStep = cpu.registers[15]!;
       }
 
-      const ok = cpu.step();
-      if (!ok) {
+      const cycles = cpu.step();
+      if (cycles === 0) {
         // Either the CPU halted itself, or a debug hook refused the instruction. In
         // both cases nothing executed, so nothing is charged.
         if (cpu.halted) {
@@ -324,7 +333,7 @@ export class Gba {
         }
         break;
       }
-      cyclesRun += 1;
+      scheduler.advance(cycles);
 
       // Detect BIOS IRQ handler return: the SUBS PC, LR, #4 at address 0x94
       // returns from IRQ mode to the interrupted context. After this executes,
@@ -347,17 +356,13 @@ export class Gba {
         }
       }
     }
-
-    // Advance the scheduler clock and APU
-    this.scheduler.tick(cyclesRun);
-    this.apu.tick(cyclesRun);
   }
 
-  /** Handle an IRQ by switching the CPU to the IRQ handler */
-  #handleIrq(): void {
+  /** Handle an IRQ by switching the CPU to the IRQ handler; returns whether the CPU took it. */
+  #handleIrq(): boolean {
     // Don't fire if CPU has IRQs disabled (CPSR I bit)
     if (this.armCpu.irqDisabled()) {
-      return;
+      return false;
     }
 
     // Update BIOS IF mirror at 0x03007FF8 before entering the handler.
@@ -371,12 +376,14 @@ export class Gba {
 
     this.#inIrqHandler = true;
     this.#eventSink?.({ kind: 'irq-enter', pc: this.armCpu.registers[15]! });
-    this.armCpu.enterIrq();
+    this.scheduler.advance(this.armCpu.enterIrq());
+    return true;
   }
 
   // ─── Scanline Timing ──────────────────────────────────────────────
 
-  #scheduleHDraw(): void {
+  /** A line began at the cycle `lineStart`: the PPU draws it now, and HBlank comes HDRAW_CYCLES later. */
+  #scheduleHDraw(lineStart: number): void {
     // Render the scanline at the START of HDraw (not at HBlank).
     // On real GBA, the PPU reads VRAM during HDraw. Games write sprite tile
     // data during HBlank/VBlank and may clear it during HDraw (expecting the
@@ -386,27 +393,23 @@ export class Gba {
       this.ppu.renderScanline(this.#currentScanline, this.bus);
     }
 
-    this.scheduler.schedule(EventId.HBlank, HDRAW_CYCLES, () => {
-      this.#onHBlank();
-    });
+    this.scheduler.scheduleAt(EventId.HBlank, lineStart + HDRAW_CYCLES, (due) => this.#onHBlank(due));
   }
 
-  #onHBlank(): void {
+  #onHBlank(due: number): void {
     this.#eventSink?.({ kind: 'hblank', scanline: this.#currentScanline });
     this.display.enterHBlank();
 
     // HBlank DMA (PPU already rendered at the start of HDraw)
     if (this.#currentScanline < VISIBLE_SCANLINES) {
-      this.dma.trigger(DmaStartTiming.HBlank);
+      this.dma.trigger(DmaStartTiming.HBlank, due);
     }
 
-    // Schedule end of HBlank
-    this.scheduler.schedule(EventId.HBlankEnd, HBLANK_CYCLES, () => {
-      this.#onHBlankEnd();
-    });
+    // The line ends 1232 cycles after it began, on the hardware grid however late this ran.
+    this.scheduler.scheduleAt(EventId.HBlankEnd, due + HBLANK_CYCLES, (end) => this.#onHBlankEnd(end));
   }
 
-  #onHBlankEnd(): void {
+  #onHBlankEnd(due: number): void {
     this.display.leaveHBlank();
 
     // Advance scanline; after the last line the frame ends and line 0 begins
@@ -418,19 +421,18 @@ export class Gba {
     this.display.setScanline(this.#currentScanline);
 
     if (this.#currentScanline === VISIBLE_SCANLINES) {
-      this.#onVBlankStart();
+      this.#onVBlankStart(due);
     }
 
-    // Schedule next HDraw
-    this.#scheduleHDraw();
+    this.#scheduleHDraw(due);
   }
 
-  #onVBlankStart(): void {
+  #onVBlankStart(due: number): void {
     this.#eventSink?.({ kind: 'vblank' });
     this.display.enterVBlank();
 
     // Trigger VBlank DMA
-    this.dma.trigger(DmaStartTiming.VBlank);
+    this.dma.trigger(DmaStartTiming.VBlank, due);
 
     // Notify PPU
     this.ppu.onVBlank?.();
@@ -495,10 +497,10 @@ export class Gba {
   /** Give every pending event its callback back, without moving it. */
   #reattachSchedulerCallbacks(): void {
     if (this.scheduler.isScheduled(EventId.HBlank)) {
-      this.scheduler.reattach(EventId.HBlank, () => this.#onHBlank());
+      this.scheduler.reattach(EventId.HBlank, (due) => this.#onHBlank(due));
     }
     if (this.scheduler.isScheduled(EventId.HBlankEnd)) {
-      this.scheduler.reattach(EventId.HBlankEnd, () => this.#onHBlankEnd());
+      this.scheduler.reattach(EventId.HBlankEnd, (due) => this.#onHBlankEnd(due));
     }
     this.timers.reattachEvents();
     this.dma.reattachEvents();
@@ -526,7 +528,7 @@ export class Gba {
     this.apu.reset();
     this.#installBiosStub();
     this.display.setScanline(0);
-    this.#scheduleHDraw();
+    this.#scheduleHDraw(this.scheduler.currentCycle);
   }
 
   /**

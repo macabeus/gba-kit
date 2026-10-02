@@ -154,6 +154,7 @@ describe('GbaSystemBus write watchpoints', () => {
     bus.write32(0x040000d8, 0x02000100); // DMA3DAD
     bus.write16(0x040000dc, 1); // DMA3CNT_L (1 unit)
     bus.write16(0x040000de, 0x8000); // DMA3CNT_H: enable | immediate | 16-bit
+    gba.scheduler.tick(3); // the channel starts 3 cycles after the write
 
     expect(bus.read16(0x02000100)).toBe(0xbeef); // copy happened
     expect(hits).toHaveLength(1);
@@ -173,6 +174,7 @@ describe('GbaSystemBus write watchpoints', () => {
     bus.write32(0x040000d8, 0x02000100); // DMA3DAD
     bus.write16(0x040000dc, 1);
     bus.write16(0x040000de, 0x8000); // enable immediate
+    gba.scheduler.tick(3); // the channel starts 3 cycles after the write
 
     expect(bus.read16(0x02000100)).toBe(0xcafe); // copy still happens
   });

@@ -3,7 +3,12 @@
  *
  * 4 DMA channels with priority (0 highest, 3 lowest).
  * Supports immediate, VBlank, HBlank, and special (sound FIFO) start modes.
- * DMA halts the CPU during transfers.
+ *
+ * A transfer holds the bus, so the CPU stops while it runs and the clock advances by all of it:
+ * n units take 2N+2(n-1)S+xI, a read and a write each, the first pair nonsequential (GBATEK "DMA
+ * Transfers": Transfer Rate/Timing). x is 2 when either end is outside the game pak and 0 when
+ * both are in it, as mGBA counts it (dma.c GBADMAService) against the timings mgba-suite measured
+ * on hardware. A channel starts 3 cycles after its trigger.
  */
 import type { InterruptController } from './interrupts.js';
 import type { DmaSnapshot } from './savestate.js';
@@ -58,7 +63,18 @@ export interface DmaMemoryAccess {
   /** Mark/unmark subsequent writes as coming from a DMA channel (watchpoints). */
   setDmaSource?(channel: number, origin: WriteOrigin): void;
   clearDmaSource?(): void;
+  /** What one access costs, wait states included (the bus's `accessCycles`). */
+  accessCycles(address: number, width: 2 | 4, sequential: boolean): number;
 }
+
+/** Cycles from a channel's trigger to its first access (mGBA GBADMAWriteCNT_HI: "DMAs take 3 cycles to start"). */
+const DMA_START_DELAY = 3;
+
+/** The internal cycles that end a transfer touching memory outside the game pak (mGBA GBADMAService). */
+const DMA_END_CYCLES = 2;
+
+/** Where the game pak's address space begins; a transfer entirely at or above it ends without internal cycles. */
+const CARTRIDGE_BASE = 0x08000000;
 
 const DMA_EVENT_IDS = [EventId.Dma0, EventId.Dma1, EventId.Dma2, EventId.Dma3] as const;
 const DMA_IRQ_FLAGS = [IrqFlag.Dma0, IrqFlag.Dma1, IrqFlag.Dma2, IrqFlag.Dma3] as const;
@@ -187,20 +203,19 @@ export class DmaController {
       ch.wordCount = ch.wordCountLatch === 0 ? (index === 3 ? 0x10000 : 0x4000) : ch.wordCountLatch;
 
       if (ch.startTiming === DmaStartTiming.Immediately) {
-        // Immediate DMA executes synchronously (blocks the CPU on real GBA)
-        this.#executeTransfer(index);
+        this.#scheduleTransfer(index, this.#scheduler.currentCycle);
       }
     } else if (wasEnabled && !ch.enabled) {
       this.#scheduler.cancel(DMA_EVENT_IDS[index]!);
     }
   }
 
-  /** Trigger DMA channels waiting for a specific start timing */
-  trigger(timing: DmaStartTiming): void {
+  /** Trigger the DMA channels waiting for `timing`, which occurred at the cycle `at`. */
+  trigger(timing: DmaStartTiming, at: number): void {
     for (let i = 0; i < 4; i++) {
       const ch = this.#channels[i]!;
       if (ch.enabled && ch.startTiming === timing) {
-        this.#scheduleTransfer(i);
+        this.#scheduleTransfer(i, at);
       }
     }
   }
@@ -213,9 +228,8 @@ export class DmaController {
     }
   }
 
-  #scheduleTransfer(index: number): void {
-    // DMA transfers happen "immediately" in emulation terms (2 cycles startup)
-    this.#scheduler.schedule(DMA_EVENT_IDS[index]!, 2, () => {
+  #scheduleTransfer(index: number, triggeredAt: number): void {
+    this.#scheduler.scheduleAt(DMA_EVENT_IDS[index]!, triggeredAt + DMA_START_DELAY, () => {
       this.#executeTransfer(index);
     });
   }
@@ -241,7 +255,9 @@ export class DmaController {
 
     // Attribute this channel's writes to its start instruction (for watchpoints).
     memory.setDmaSource?.(index, ch.startOrigin);
+    let cycles = 0;
     for (let i = 0; i < ch.wordCount; i++) {
+      cycles += memory.accessCycles(ch.srcAddr, step, i > 0) + memory.accessCycles(ch.dstAddr, step, i > 0);
       if (ch.wordSize) {
         const value = memory.read32(ch.srcAddr);
         memory.write32(ch.dstAddr, value);
@@ -256,8 +272,14 @@ export class DmaController {
       ch.dstAddr = this.#updateAddr(ch.dstAddr, ch.dstControl, step);
     }
     memory.clearDmaSource?.();
+    this.#scheduler.advance(cycles + this.#endCycles(ch.srcAddr, ch.dstAddr));
 
     this.#onTransferComplete(index);
+  }
+
+  /** The internal cycles a transfer ends with, from where its last unit went. */
+  #endCycles(src: number, dst: number): number {
+    return src >>> 0 < CARTRIDGE_BASE || dst >>> 0 < CARTRIDGE_BASE ? DMA_END_CYCLES : 0;
   }
 
   /** Special FIFO transfer: always 4 words of 32-bit, destination fixed */
@@ -269,13 +291,16 @@ export class DmaController {
     const ch = this.#channels[index]!;
 
     memory.setDmaSource?.(index, ch.startOrigin);
+    let cycles = 0;
     for (let i = 0; i < 4; i++) {
+      cycles += memory.accessCycles(ch.srcAddr, 4, i > 0) + memory.accessCycles(ch.dstAddr, 4, i > 0);
       const value = memory.read32(ch.srcAddr);
       memory.write32(ch.dstAddr, value);
       ch.srcAddr = this.#updateAddr(ch.srcAddr, ch.srcControl, 4);
       // Destination fixed for FIFO
     }
     memory.clearDmaSource?.();
+    this.#scheduler.advance(cycles + this.#endCycles(ch.srcAddr, ch.dstAddr));
 
     // FIFO DMA always repeats — don't disable
     if (ch.irqEnable) {

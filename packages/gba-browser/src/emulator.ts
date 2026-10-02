@@ -165,9 +165,9 @@ export class EmulatorBridge {
     if (this.#state !== 'paused') {
       return;
     }
-    this.#gba.armCpu.step();
-    this.#gba.scheduler.tick(1);
-    this.#gba.apu.tick(1);
+    const cycles = this.#gba.armCpu.step();
+    this.#gba.scheduler.tick(cycles);
+    this.#gba.apu.tick(cycles);
     this.#renderFrame();
     this.#callbacks?.onFrame();
   }
@@ -191,9 +191,9 @@ export class EmulatorBridge {
     // Run until we reach the next instruction or hit a breakpoint
     let cyclesRun = 0;
     for (let i = 0; i < 100_000; i++) {
-      this.#gba.armCpu.step();
-      this.#gba.scheduler.tick(1);
-      cyclesRun++;
+      const cycles = this.#gba.armCpu.step();
+      this.#gba.scheduler.tick(cycles);
+      cyclesRun += cycles;
       if (this.#gba.armCpu.registers[15]! === targetPC) {
         break;
       }
@@ -214,9 +214,9 @@ export class EmulatorBridge {
     }
     let cyclesRun = 0;
     for (let i = 0; i < 10_000_000; i++) {
-      this.#gba.armCpu.step();
-      this.#gba.scheduler.tick(1);
-      cyclesRun++;
+      const cycles = this.#gba.armCpu.step();
+      this.#gba.scheduler.tick(cycles);
+      cyclesRun += cycles;
       if (this.#gba.armCpu.registers[15]! === address) {
         break;
       }
