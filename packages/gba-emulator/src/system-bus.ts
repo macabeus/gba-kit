@@ -24,6 +24,7 @@
 import type { MemoryBus } from '@gba-kit/arm-emulator';
 
 import type { Apu } from './apu/apu.js';
+import type { DisplayStatus } from './display-status.js';
 import type { DmaController } from './dma.js';
 import type { InputController } from './input.js';
 import type { InterruptController } from './interrupts.js';
@@ -136,7 +137,7 @@ const UNUSED = -2;
 /**
  * How each I/O halfword the register file stores reads back: the mask of its readable bits,
  * WRITE_ONLY or UNUSED. A mask of 0 is an unused halfword that reads 0. The registers a subsystem
- * owns (sound, DMA, timers, keypad, interrupts, WAITCNT, POSTFLG) are decoded
+ * owns (DISPSTAT/VCOUNT, sound, DMA, timers, keypad, interrupts, WAITCNT, POSTFLG) are decoded
  * before this table. GBATEK "GBA I/O Map"; mGBA io.c GBAIORead.
  */
 const IO_READ_MASKS = ((): Int32Array => {
@@ -146,7 +147,6 @@ const IO_READ_MASKS = ((): Int32Array => {
   };
   set(0x000, 0xffff); // DISPCNT
   set(0x002, 0x0001); // green swap
-  set(0x004, 0xffff, 2); // DISPSTAT, VCOUNT
   set(0x008, 0xdfff, 2); // BG0CNT, BG1CNT: bit 13 (area overflow) exists on BG2 and BG3 only
   set(0x00c, 0xffff, 2); // BG2CNT, BG3CNT
   set(0x010, WRITE_ONLY, 0x1c); // BGxHOFS/VOFS, BG2/BG3 PA-PD, X, Y, WIN0H-WIN1V
@@ -250,6 +250,7 @@ export class GbaSystemBus implements MemoryBus {
   #dma!: DmaController;
   #input!: InputController;
   #apu!: Apu;
+  #display!: DisplayStatus;
 
   /** Until a CPU is connected, the bus sees one held in reset: at PC 0 with an empty pipeline. */
   #cpu: BusCpu = { registers: new Uint32Array(16), cpsr: 0xd3, prefetchedOpcode: 0, decodedOpcode: 0 };
@@ -388,6 +389,7 @@ export class GbaSystemBus implements MemoryBus {
     dma: DmaController;
     input: InputController;
     apu: Apu;
+    display: DisplayStatus;
     cpu: BusCpu;
   }): void {
     this.#interrupts = parts.interrupts;
@@ -395,6 +397,7 @@ export class GbaSystemBus implements MemoryBus {
     this.#dma = parts.dma;
     this.#input = parts.input;
     this.#apu = parts.apu;
+    this.#display = parts.display;
     this.#cpu = parts.cpu;
   }
 
@@ -1175,6 +1178,10 @@ export class GbaSystemBus implements MemoryBus {
       return peek ? 0 : this.#openBus16(offset);
     }
     switch (IO_BASE | offset) {
+      case MMIO.DISPSTAT:
+        return this.#display.readDispstat();
+      case MMIO.VCOUNT:
+        return this.#display.readVcount();
       case MMIO.KEYINPUT:
         return this.#input.readKeyInput();
       case MMIO.KEYCNT:
@@ -1269,6 +1276,10 @@ export class GbaSystemBus implements MemoryBus {
       return;
     }
     switch (IO_BASE | offset) {
+      case MMIO.DISPSTAT:
+        this.#display.writeDispstat(merge(this.#display.readDispstat(), value, mask));
+        return;
+      case MMIO.VCOUNT:
       case MMIO.KEYINPUT:
         return; // read-only
       case MMIO.KEYCNT:

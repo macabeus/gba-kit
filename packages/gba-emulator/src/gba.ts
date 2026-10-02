@@ -15,6 +15,7 @@ import { ArmCpu } from '@gba-kit/arm-emulator/arm-cpu';
 
 import { Apu } from './apu/apu.js';
 import { type BiosEnv, handleSwi } from './bios.js';
+import { DisplayStatus } from './display-status.js';
 import { DmaController, type DmaTransferInfo } from './dma.js';
 import { InputController } from './input.js';
 import { InterruptController } from './interrupts.js';
@@ -34,7 +35,6 @@ import {
   GbaButton,
   HBLANK_CYCLES,
   HDRAW_CYCLES,
-  IrqFlag,
   TOTAL_SCANLINES,
   VISIBLE_SCANLINES,
 } from './types.js';
@@ -88,6 +88,7 @@ export class Gba {
   readonly dma: DmaController;
   readonly input: InputController;
   readonly bus: GbaSystemBus;
+  readonly display: DisplayStatus;
   readonly ppu: Ppu;
   readonly apu: Apu;
   readonly armCpu: ArmCpu;
@@ -109,6 +110,7 @@ export class Gba {
     this.dma = new DmaController(this.scheduler, this.interrupts);
     this.input = new InputController(this.interrupts);
     this.bus = new GbaSystemBus();
+    this.display = new DisplayStatus(this.bus.mmioRegisters, this.interrupts);
     this.ppu = new Ppu();
     this.apu = new Apu();
 
@@ -138,6 +140,7 @@ export class Gba {
       dma: this.dma,
       input: this.input,
       apu: this.apu,
+      display: this.display,
       cpu: this.armCpu,
     });
 
@@ -168,7 +171,8 @@ export class Gba {
     // Install HLE BIOS IRQ handler stub
     this.#installBiosStub();
 
-    // Schedule initial HBlank
+    // Start at line 0, where the V-count comparison runs like on any other line
+    this.display.setScanline(0);
     this.#scheduleHDraw();
   }
 
@@ -389,14 +393,7 @@ export class Gba {
 
   #onHBlank(): void {
     this.#eventSink?.({ kind: 'hblank', scanline: this.#currentScanline });
-    // Set HBlank flag in DISPSTAT
-    const dispstat = this.bus.mmioRegisters[4]! | (this.bus.mmioRegisters[5]! << 8);
-    this.bus.mmioRegisters[4] = (dispstat | 0x02) & 0xff; // Set HBlank bit
-
-    // HBlank IRQ
-    if (dispstat & (1 << 4)) {
-      this.interrupts.requestInterrupt(IrqFlag.HBlank);
-    }
+    this.display.enterHBlank();
 
     // HBlank DMA (PPU already rendered at the start of HDraw)
     if (this.#currentScanline < VISIBLE_SCANLINES) {
@@ -410,38 +407,18 @@ export class Gba {
   }
 
   #onHBlankEnd(): void {
-    // Clear HBlank flag
-    this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! & ~0x02;
+    this.display.leaveHBlank();
 
-    // Advance scanline
+    // Advance scanline; after the last line the frame ends and line 0 begins
     this.#currentScanline++;
-
-    // Update VCOUNT
-    this.bus.mmioRegisters[6] = this.#currentScanline & 0xff;
-
-    // Check VCount match
-    const dispstat = this.bus.mmioRegisters[4]! | (this.bus.mmioRegisters[5]! << 8);
-    const vcountTarget = (dispstat >> 8) & 0xff;
-    if (this.#currentScanline === vcountTarget) {
-      // Set VCount flag
-      this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! | 0x04;
-      if (dispstat & (1 << 5)) {
-        this.interrupts.requestInterrupt(IrqFlag.VCount);
-      }
-    } else {
-      this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! & ~0x04;
+    if (this.#currentScanline === TOTAL_SCANLINES) {
+      this.#currentScanline = 0;
+      this.#frameCount++;
     }
+    this.display.setScanline(this.#currentScanline);
 
     if (this.#currentScanline === VISIBLE_SCANLINES) {
-      // Enter VBlank
       this.#onVBlankStart();
-    } else if (this.#currentScanline >= TOTAL_SCANLINES) {
-      // End of frame — wrap back to scanline 0
-      this.#currentScanline = 0;
-      this.bus.mmioRegisters[6] = 0;
-      this.#frameCount++;
-      // Clear VBlank flag
-      this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! & ~0x01;
     }
 
     // Schedule next HDraw
@@ -450,14 +427,7 @@ export class Gba {
 
   #onVBlankStart(): void {
     this.#eventSink?.({ kind: 'vblank' });
-    // Set VBlank flag in DISPSTAT
-    this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! | 0x01;
-
-    // VBlank IRQ
-    const dispstat = this.bus.mmioRegisters[4]! | (this.bus.mmioRegisters[5]! << 8);
-    if (dispstat & (1 << 3)) {
-      this.interrupts.requestInterrupt(IrqFlag.VBlank);
-    }
+    this.display.enterVBlank();
 
     // Trigger VBlank DMA
     this.dma.trigger(DmaStartTiming.VBlank);
@@ -555,6 +525,7 @@ export class Gba {
     this.ppu.reset();
     this.apu.reset();
     this.#installBiosStub();
+    this.display.setScanline(0);
     this.#scheduleHDraw();
   }
 
