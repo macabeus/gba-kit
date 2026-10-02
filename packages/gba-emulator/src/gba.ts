@@ -40,10 +40,10 @@ import { captureOrigin } from './write-source.js';
 
 /** PPU rendering interface */
 export interface PpuInterface {
-  /** Render a single scanline */
+  /** Line-start work, at the first cycle of every scanline (0-227) */
+  beginScanline(line: number, bus: GbaSystemBus): void;
+  /** Render a single visible scanline */
   renderScanline(line: number, bus: GbaSystemBus): void;
-  /** Called at VBlank start */
-  onVBlank?(): void;
   /** Get the framebuffer */
   getFramebuffer(): Uint32Array;
   /** Reset */
@@ -124,8 +124,8 @@ export class Gba {
     // Connect APU to DMA for sound FIFO refills
     this.apu.connectDma(this.dma);
 
-    // Wire PPU ref point reload: when the game writes BG2X/BG2Y/BG3X/BG3Y,
-    // the PPU must reload its internal accumulators (for per-scanline affine effects).
+    // Wire PPU ref point reload: when the game writes BG2X/BG2Y/BG3X/BG3Y, the PPU reloads
+    // its internal accumulator at the next line start (for per-scanline affine effects).
     this.ppu.mmioRegisters = this.bus.mmioRegisters;
     this.bus.onBgRefPointWrite = (bgIndex, isX) => {
       this.ppu.reloadBgRefPoint(bgIndex, isX);
@@ -364,6 +364,8 @@ export class Gba {
   // ─── Scanline Timing ──────────────────────────────────────────────
 
   #scheduleHDraw(): void {
+    this.ppu.beginScanline(this.#currentScanline, this.bus);
+
     // Render the scanline at the START of HDraw (not at HBlank).
     // On real GBA, the PPU reads VRAM during HDraw. Games write sprite tile
     // data during HBlank/VBlank and may clear it during HDraw (expecting the
@@ -452,9 +454,6 @@ export class Gba {
 
     // Trigger VBlank DMA
     this.dma.trigger(DmaStartTiming.VBlank);
-
-    // Notify PPU
-    this.ppu.onVBlank?.();
   }
 
   // ─── Save State ─────────────────────────────────────────────────

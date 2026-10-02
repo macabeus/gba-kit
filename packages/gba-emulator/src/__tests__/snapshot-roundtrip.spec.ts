@@ -97,6 +97,77 @@ describe('snapshot round trip', () => {
     expect(b.serialize()).toEqual(a.serialize());
   });
 
+  it("the PPU's line-start state survives a restore: the OBJ line prepared ahead, latches, window flip-flops", () => {
+    /** BG0 and a sprite on screen, WIN1 held open across frames, BG2's point stepping in mode 1. */
+    const scene = (): Gba => {
+      const gba = boot(TIMER_SPIN);
+      const io = (offset: number, value: number) => gba.bus.write16(0x04000000 + offset, value);
+      gba.bus.write16(0x05000002, 0x001f); // BG colour 1
+      gba.bus.write16(0x05000202, 0x03e0); // OBJ colour 1
+      for (let i = 0; i < 0x800; i += 2) {
+        gba.bus.write16(0x06000000 + i, 0x1111); // BG tiles
+        gba.bus.write16(0x06010000 + i, 0x1111); // OBJ tiles
+      }
+      gba.bus.write16(0x07000000, 0); // OAM 0: 64x64 at (0, 0)
+      gba.bus.write16(0x07000002, 3 << 14);
+      io(0x08, 31 << 8); // BG0: map at 0xF800 (all tile 0)
+      io(0x46, 0x50e4); // WIN1 from line 80, never closed
+      io(0x42, 0x00f0);
+      io(0x48, 0x1100); // WIN1: BG0 + OBJ
+      io(0x00, 1 | (1 << 6) | (1 << 8) | (1 << 12) | (1 << 14));
+      gba.runFrame();
+      gba.runFrame();
+      while (gba.scanline !== 20) {
+        gba.runScanline();
+      }
+      return gba;
+    };
+    const moveSprite = (gba: Gba) => gba.bus.write16(0x07000002, (3 << 14) | 100);
+
+    const original = scene();
+    const snap = original.serialize();
+    moveSprite(original);
+    original.runFrame();
+    original.runFrame();
+
+    const restored = boot(TIMER_SPIN);
+    restored.deserialize(snap);
+    expect(restored.serialize()).toEqual(snap);
+    moveSprite(restored);
+    restored.runFrame();
+    restored.runFrame();
+    expect(restored.serialize()).toEqual(original.serialize());
+  });
+
+  it('an older PPU snapshot without the line-start state loads, with the layers DISPCNT enables showing', () => {
+    const gba = boot(TIMER_SPIN);
+    gba.bus.write16(0x05000002, 0x001f);
+    for (let i = 0; i < 0x20; i += 2) {
+      gba.bus.write16(0x06000000 + i, 0x1111);
+    }
+    gba.bus.write16(0x04000008, 31 << 8);
+    gba.bus.write16(0x04000000, 1 << 8);
+    gba.runFrame();
+    gba.runFrame();
+    const snap = gba.serialize();
+    // The shape snapshots had before: latch flags, no line-start state
+    const ppu = { ...snap.ppu };
+    delete ppu.refWritten;
+    delete ppu.dispcntLatch;
+    delete ppu.windowFlags;
+    delete ppu.bgMosaicY;
+    delete ppu.objMosaicY;
+    delete ppu.objLines;
+    delete ppu.objLineNumbers;
+    const legacy = { ...snap, ppu: { ...ppu, bg2RefLatched: true, bg3RefLatched: true } };
+
+    const fresh = boot(TIMER_SPIN);
+    fresh.deserialize(legacy);
+    expect(fresh.serialize().ppu.dispcntLatch).toEqual([1 << 8, 1 << 8, 1 << 8]);
+    fresh.runFrame();
+    expect(fresh.ppu.getFramebuffer()[0]).toBe(0xff0000f8);
+  });
+
   it('held buttons survive a restore', () => {
     const gba = boot(TIMER_SPIN);
     gba.pressButton(GbaButton.A);

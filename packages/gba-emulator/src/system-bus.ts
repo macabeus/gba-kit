@@ -100,6 +100,18 @@ function digitsAt(rom: Uint8Array, at: number, count: number): boolean {
   return true;
 }
 
+/**
+ * The I/O register file at power-on: BG2/BG3 PA and PD hold 0x0100 (the identity transform),
+ * everything else 0. mGBA src/gba/io.c GBAIOInit.
+ */
+function powerOnIoRegisters(): Uint8Array {
+  const io = new Uint8Array(0x400);
+  for (const register of [MMIO.BG2PA, MMIO.BG2PD, MMIO.BG3PA, MMIO.BG3PD]) {
+    io[(register & 0x3ff) + 1] = 0x01;
+  }
+  return io;
+}
+
 export class GbaSystemBus implements MemoryBus {
   /** BIOS ROM (16 KB) — set via loadBios() */
   #bios = new Uint8Array(0x4000);
@@ -151,7 +163,7 @@ export class GbaSystemBus implements MemoryBus {
   #apu!: Apu;
 
   /** Display control registers (written via MMIO, read by PPU) */
-  readonly mmioRegisters = new Uint8Array(0x400);
+  readonly mmioRegisters = powerOnIoRegisters();
 
   /** Callback when BG2/BG3 reference point registers are written (for PPU ref point reload) */
   onBgRefPointWrite?: (bgIndex: 2 | 3, isX: boolean) => void;
@@ -1299,7 +1311,7 @@ export class GbaSystemBus implements MemoryBus {
     this.oam.fill(0);
     this.sram.fill(0);
     this.#eeprom.reset();
-    this.mmioRegisters.fill(0);
+    this.mmioRegisters.set(powerOnIoRegisters());
     this.#waitcnt = 0;
     this.#postflg = 0;
     this.#lastBiosRead = 0;

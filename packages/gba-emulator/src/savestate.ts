@@ -126,14 +126,30 @@ export interface SystemBusSnapshot {
 
 // ─── PPU ──────────────────────────────────────────────────────────────
 
+/**
+ * The fields after the reference points are optional because older snapshots lack them
+ * (they carried `bg2RefLatched`/`bg3RefLatched`, which `deserialize` passes over); see
+ * `Ppu.deserialize` for what each restores as.
+ */
 export interface PpuSnapshot {
   framebuffer: Uint32Array;
   bg2RefX: number;
   bg2RefY: number;
   bg3RefX: number;
   bg3RefY: number;
-  bg2RefLatched: boolean;
-  bg3RefLatched: boolean;
+  /** BG2X, BG2Y, BG3X, BG3Y written since the last line start (bits 0-3). */
+  refWritten?: number;
+  /** DISPCNT sampled at the last three line starts, oldest first. */
+  dispcntLatch?: number[];
+  /** WIN0/WIN1 vertical flip-flops (bits 0-1) and horizontal flip-flops (bits 2-3). */
+  windowFlags?: number;
+  /** BG and OBJ mosaic vertical counters. */
+  bgMosaicY?: number;
+  objMosaicY?: number;
+  /** The OBJ line on display, then the one prepared for the next line (240 packed pixels each). */
+  objLines?: Uint32Array;
+  /** The scanlines `objLines` were built for, -1 for none. */
+  objLineNumbers?: number[];
 }
 
 // ─── APU ──────────────────────────────────────────────────────────────
