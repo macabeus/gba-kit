@@ -121,10 +121,13 @@ describe('Gba HLE BIOS state is per instance', () => {
     const a = boot(VBLANK_WAIT);
     const b = boot(COUNT_LOOP);
     a.runFrame();
-    expect(a.interrupts.intrWaitFlags).toBe(1);
-    expect(b.interrupts.intrWaitFlags).toBe(0);
+    // A sleeps in its BIOS's IntrWait loop; B never called it.
+    expect(a.interrupts.halted).toBe(true);
+    expect(a.armCpu.registers[15]).toBeLessThan(0x4000);
+    expect(b.interrupts.halted).toBe(false);
     b.runFrame();
-    expect(b.interrupts.intrWaitFlags).toBe(0);
+    expect(b.interrupts.halted).toBe(false);
+    expect(b.armCpu.registers[15]).toBeGreaterThanOrEqual(0x08000000);
   });
 });
 

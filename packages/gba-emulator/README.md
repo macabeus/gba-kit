@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/@gba-kit/gba-emulator)](https://www.npmjs.com/package/@gba-kit/gba-emulator)
 
-Full Game Boy Advance hardware emulation built on top of `@gba-kit/arm-emulator`. Emulates PPU (graphics), APU (audio), DMA, timers, interrupts, input, and the memory-mapped I/O system bus. Includes HLE BIOS for SWI calls.
+Full Game Boy Advance hardware emulation built on top of `@gba-kit/arm-emulator`. Emulates PPU (graphics), APU (audio), DMA, timers, interrupts, input, and the memory-mapped I/O system bus. Includes an HLE BIOS: SWI calls run in TypeScript, and the ones that steer the CPU (Halt, IntrWait, SoftReset) run as ARM code from a small BIOS image.
 
 ## Install
 
@@ -17,12 +17,10 @@ npm install @gba-kit/gba-emulator
 ```typescript
 import { Gba } from '@gba-kit/gba-emulator';
 
+// A new machine (and one after `reset()`) is in the state the BIOS's boot code leaves:
+// SYS mode, the boot stacks, PC at the ROM's entry point 0x08000000.
 const gba = new Gba();
-
-// Load ROM and set up CPU for post-BIOS boot
 gba.loadRom(romData); // Uint8Array
-gba.armCpu.cpsr = 0x1f; // SYS mode
-gba.armCpu.registers[15] = 0x08000000; // ROM entry point
 gba.runFrame();
 
 // Read framebuffer (240x160, ABGR format)

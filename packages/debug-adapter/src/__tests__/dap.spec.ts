@@ -1011,7 +1011,8 @@ describe('inspection', () => {
       count: 8,
     });
     expect(Array.from(Buffer.from(mem.data!, 'base64'))).toEqual([8, 0, 0, 0, 13, 0, 0, 0]); // g_samples[2], [3]: untouched by the first frame
-    const globals = await scopeRef(client, 'Globals');
+    // Frame 0 sleeps in the BIOS's IntrWait, which has no file of its own; frame 1 is the swi's.
+    const globals = await scopeRef(client, 'Globals', 1);
     const at = client.log.length;
     const write = await client.body<DebugProtocol.WriteMemoryResponse['body']>('writeMemory', {
       memoryReference: samples.memoryReference,
@@ -1126,18 +1127,21 @@ describe('a stack the ELF has no call-frame information for', () => {
     await client.body('setFunctionBreakpoints', { breakpoints: [{ name: 'isr' }] });
     await stopped(client, 'continue', { threadId: 1 });
     const { stackFrames } = await client.body<DebugProtocol.StackTraceResponse['body']>('stackTrace', { threadId: 1 });
-    expect(stackFrames.map((f) => f.name).slice(0, 4)).toEqual([
+    // The interrupt struck in the BIOS's IntrWait, which the stack crosses back to the swi.
+    expect(stackFrames.map((f) => f.name).slice(0, 5)).toEqual([
       'isr',
       '<BIOS stub +0x90>',
+      expect.stringMatching(/^<BIOS stub \+0x/),
       'wait_vblank',
       'main (from its prologue)',
     ]);
     expect(stackFrames[1]!.source).toBeUndefined();
-    const { scopes } = await client.body<DebugProtocol.ScopesResponse['body']>('scopes', { frameId: 3 });
+    expect(stackFrames[2]!.source).toBeUndefined();
+    const { scopes } = await client.body<DebugProtocol.ScopesResponse['body']>('scopes', { frameId: 4 });
     expect(scopes.map((s) => s.name)).toContain('Registers');
     // The interrupted frame says which of its registers the handler may be holding.
     const interrupted = await client.body<DebugProtocol.ScopesResponse['body']>('scopes', { frameId: 2 });
-    expect(interrupted.scopes[0]!.name).toMatch(/^Locals — r4–r11 were not recovered across the interrupt/);
+    expect(interrupted.scopes[0]!.name).toMatch(/r4–r11 were not recovered across the interrupt/);
   });
 });
 
@@ -1192,7 +1196,8 @@ describe('emulator requests', () => {
     const trace = await client.body<GbaKitRequests['gba-kit/trace']['body']>('gba-kit/trace', { count: 5 });
     expect(trace.enabled).toBe(true);
     expect(trace.entries.length).toBe(5);
-    expect(trace.entries[4]!.pc).toBeGreaterThanOrEqual(0x08000000);
+    // The program sleeps in VBlankIntrWait: its last instruction is the BIOS's HALTCNT write.
+    expect(trace.entries[4]!.pc).toBeLessThan(0x4000);
     const events = await client.body<GbaKitRequests['gba-kit/events']['body']>('gba-kit/events', { count: 1000 });
     expect(events.entries.some((e) => e.event.kind === 'vblank')).toBe(true);
     expect(

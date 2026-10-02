@@ -42,7 +42,6 @@ export function serializeSnapshot(snap: GbaSnapshot): any {
       pipeline: snap.cpu.pipeline ? typedArrayToBase64(snap.cpu.pipeline) : undefined,
     },
     currentScanline: snap.currentScanline,
-    inIrqHandler: snap.inIrqHandler,
     scheduler: {
       currentCycle: snap.scheduler.currentCycle,
       events: snap.scheduler.events,
@@ -123,7 +122,6 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
       pipeline: data.cpu.pipeline ? base64ToUint32Array(data.cpu.pipeline) : undefined,
     },
     currentScanline: data.currentScanline,
-    inIrqHandler: data.inIrqHandler,
     scheduler: data.scheduler,
     interrupts: data.interrupts,
     timers: data.timers,

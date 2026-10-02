@@ -8,7 +8,7 @@
 export { Gba } from './gba.js';
 export type { HardwareEvent, RunOutcome, StopPredicate } from './gba.js';
 export type { DmaTransferInfo } from './dma.js';
-export type { BiosEnv } from './bios.js';
+export { BIOS_SWI_HANDLER } from './bios-image.js';
 
 // Subsystems
 export {

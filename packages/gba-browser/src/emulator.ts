@@ -5,9 +5,9 @@
  * Manages the emulation loop, screen rendering, and keyboard input.
  */
 import type { DebugHooks } from '@gba-kit/arm-emulator';
-import { ArmCpu, MODE_SYS } from '@gba-kit/arm-emulator/arm-cpu';
+import type { ArmCpu } from '@gba-kit/arm-emulator/arm-cpu';
 import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassembler';
-import { BOOT_STACK_POINTERS, Gba } from '@gba-kit/gba-emulator';
+import { Gba } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
 /** Keyboard mapping: key → GBA button bit */
@@ -101,32 +101,11 @@ export class EmulatorBridge {
     this.#renderFrame();
   }
 
-  /** Load a ROM from an ArrayBuffer */
+  /** Load a ROM from an ArrayBuffer, into a machine in the state the BIOS's boot code leaves. */
   loadRom(data: ArrayBuffer): void {
     this.stop();
     this.#gba.reset();
     this.#gba.loadRom(new Uint8Array(data));
-
-    const cpu = this.#gba.armCpu;
-
-    // Set up initial CPU state matching post-BIOS boot: the BIOS initializes each
-    // mode's stack and then jumps to ROM, and skipping it means replicating that.
-    for (const [mode, sp] of BOOT_STACK_POINTERS) {
-      cpu.switchMode(mode);
-      cpu.registers[13] = sp;
-    }
-
-    // System mode (privileged, but uses the USR registers), IRQs enabled, ARM state
-    cpu.switchMode(MODE_SYS);
-    cpu.cpsr = MODE_SYS;
-
-    // PC to ROM entry point
-    cpu.registers[15] = 0x08000000;
-
-    // Read the ROM header to determine entry mode
-    // GBA ROMs start with an ARM branch instruction at 0x08000000
-    // The branch usually jumps to Thumb code, but the entry is always ARM
-
     this.#setState('paused');
   }
 

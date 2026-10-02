@@ -1090,6 +1090,40 @@ describe('ArmCpu', () => {
     });
   });
 
+  describe('SWI exception', () => {
+    // GBATEK "ARM CPU Exceptions": SWI enters SVC mode with R14_svc = the address after the SWI,
+    // SPSR_svc = the old CPSR, I set, T clear, and PC = 0x08.
+    const takeException = (): number | null => null;
+
+    it('a handler that returns null leaves an ARM SWI to the vector', () => {
+      const mem = new GbaMemory();
+      const cpu = new ArmCpu(mem, { swiHandler: takeException });
+      loadArmInstructions(mem, 0x08000000, [0xef050000 /* swi 0x50000 */]);
+      cpu.cpsr = MODE_SYS | (1 << 29); // C set: the SPSR keeps the flags
+      cpu.registers[PC] = 0x08000000;
+      const cycles = cpu.step();
+      expect(cpu.getMode()).toBe(MODE_SVC);
+      expect(cpu.registers[PC]).toBe(0x08);
+      expect(cpu.registers[LR]).toBe(0x08000004);
+      expect(cpu.getSPSR()).toBe(MODE_SYS | (1 << 29));
+      expect(cpu.irqDisabled()).toBe(true);
+      expect(cycles).toBe(3); // 2S+1N, like a branch
+    });
+
+    it('a Thumb SWI enters ARM state with the return address after the halfword', () => {
+      const mem = new GbaMemory();
+      const cpu = new ArmCpu(mem, { swiHandler: takeException });
+      loadThumbInstructions(mem, 0x08000000, [0xdf05 /* swi 5 */]);
+      cpu.cpsr = MODE_SYS | (1 << 5);
+      cpu.registers[PC] = 0x08000000;
+      cpu.step();
+      expect(cpu.getT()).toBe(false);
+      expect(cpu.registers[PC]).toBe(0x08);
+      expect(cpu.registers[LR]).toBe(0x08000002);
+      expect(cpu.getSPSR()).toBe(MODE_SYS | (1 << 5));
+    });
+  });
+
   describe('Thumb mode execution', () => {
     it('runs basic Thumb instructions', () => {
       const { cpu } = setupThumbCpu([

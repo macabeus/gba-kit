@@ -14,7 +14,11 @@ export interface GbaSnapshot {
   currentScanline: number;
   /** Hardware frames completed since reset. Older snapshots omit it and restore as 0. */
   frameCount?: number;
-  inIrqHandler: boolean;
+  /**
+   * Whether the CPU was in the BIOS IRQ handler, for the IntrWait model that ran outside the BIOS
+   * code. Older snapshots carry it; a restore ignores it.
+   */
+  inIrqHandler?: boolean;
   scheduler: SchedulerSnapshot;
   interrupts: InterruptSnapshot;
   timers: TimerSnapshot;
@@ -44,7 +48,13 @@ export interface InterruptSnapshot {
   ie: number;
   if_: number;
   halted: boolean;
-  intrWaitFlags: number;
+  /** Whether the sleep is Stop (HALTCNT bit 7). Older snapshots omit it and restore as Halt. */
+  stopped?: boolean;
+  /**
+   * The wait of the IntrWait model that ran outside the BIOS code. Older snapshots carry it; the
+   * BIOS image runs IntrWait itself now, so a restore ignores it.
+   */
+  intrWaitFlags?: number;
 }
 
 // ─── Timers ───────────────────────────────────────────────────────────

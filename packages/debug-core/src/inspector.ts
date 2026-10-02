@@ -28,7 +28,7 @@ import type {
   WritableScalar,
 } from '@gba-kit/debug-info';
 import { formatBitfield, formatValue, frameConfidence, le32, scalarSize, toInt } from '@gba-kit/debug-info';
-import { BIOS_IRQ_STUB } from '@gba-kit/gba-emulator';
+import { BIOS_IRQ_STUB, BIOS_SWI_HANDLER } from '@gba-kit/gba-emulator';
 
 import {
   type ExprEnv,
@@ -209,6 +209,7 @@ export class Inspector {
       stackBoundFor,
       exceptionReturnBias,
       exceptionStub: BIOS_IRQ_STUB,
+      serviceCall: BIOS_SWI_HANDLER,
     };
   }
 

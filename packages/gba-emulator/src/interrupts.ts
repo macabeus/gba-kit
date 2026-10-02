@@ -7,13 +7,25 @@
  * The signal takes IRQ_DELAY cycles to reach the CPU: an enabled request wakes a halted CPU, and
  * becomes an exception the CPU can take, that long after it is raised (mGBA gba.c GBATestIRQ,
  * GBA_IRQ_DELAY; mgba-suite "Timer IRQ").
+ *
+ * Halt (HALTCNT bit 7 clear) pauses the CPU while the signal is down: IE AND IF is zero or still on
+ * its way. IME plays no part, and a halt entered while the CPU already sees a request ends at once
+ * (GBATEK "System Control": "the CPU is paused as long as (IE AND IF)=0"; NanoBoyAdvance
+ * IRQ::ShouldUnhaltCPU). Stop (bit 7 set) ends the same way, for keypad, Game Pak and serial
+ * requests only.
  */
 import type { InterruptSnapshot } from './savestate.js';
 import type { Scheduler } from './scheduler.js';
-import { EventId } from './types.js';
+import { EventId, IrqFlag } from './types.js';
 
 /** Cycles from an enabled interrupt request to the CPU seeing it. */
 const IRQ_DELAY = 7;
+
+/** Every request source. */
+const ALL_IRQS = 0x3fff;
+
+/** The requests that end Stop mode: the ones whose hardware runs while the GBA sleeps. */
+const STOP_WAKE_IRQS = IrqFlag.Keypad | IrqFlag.GamePak | IrqFlag.Serial;
 
 export class InterruptController {
   /** Master Interrupt Enable (0x04000208) — only bit 0 matters */
@@ -25,16 +37,11 @@ export class InterruptController {
   /** Interrupt Flags (0x04000202) — which interrupts are pending */
   if_ = 0;
 
-  /** Whether the CPU is in HALT state (waiting for interrupt) */
+  /** Whether the CPU sleeps in Halt or Stop mode, waiting for an interrupt request. */
   halted = false;
 
-  /**
-   * IntrWait flags — set by HLE SWI IntrWait/VBlankIntrWait.
-   * When non-zero, halt only breaks when one of these specific interrupts fires.
-   * This prevents the game loop from running at HBlank rate when VBlankIntrWait
-   * is used with HBlank IRQs enabled.
-   */
-  intrWaitFlags = 0;
+  /** The requests that end the current sleep: all of them for Halt, a few for Stop. */
+  #wakeIrqs = ALL_IRQS;
 
   /** Observer for every interrupt request (an event log's IRQ rows). */
   onRequest: ((flag: number) => void) | null = null;
@@ -70,15 +77,40 @@ export class InterruptController {
     }
   }
 
-  /**
-   * The request reached the CPU. A halted CPU wakes for any enabled interrupt, even during
-   * IntrWait: on hardware the BIOS IRQ handler runs and the IntrWait loop halts again until its
-   * own interrupt has fired, which the GBA coordinator checks after the handler returns.
-   */
+  /** The request reached the CPU, which wakes if the request is one its sleep waits for. */
   #onSignal(): void {
-    if ((this.ie & this.if_) !== 0) {
+    if ((this.ie & this.if_ & this.#wakeIrqs) !== 0) {
       this.halted = false;
     }
+  }
+
+  /** Whether the CPU sees an enabled request now: IE AND IF is non-zero and its delay has passed. */
+  #signalled(): boolean {
+    return (this.ie & this.if_) !== 0 && !this.#scheduler.isScheduled(EventId.Irq);
+  }
+
+  /** HALTCNT with bit 7 clear: Halt, until the CPU sees an enabled request. */
+  halt(): void {
+    this.#sleep(ALL_IRQS);
+  }
+
+  /**
+   * HALTCNT with bit 7 set: Stop, until the CPU sees an enabled keypad, Game Pak or serial
+   * request. The LCD, sound and timers keep their clocks here, so frames still complete while the
+   * CPU sleeps.
+   */
+  stop(): void {
+    this.#sleep(STOP_WAKE_IRQS);
+  }
+
+  /** Whether the current sleep is Stop rather than Halt. */
+  get stopped(): boolean {
+    return this.halted && this.#wakeIrqs !== ALL_IRQS;
+  }
+
+  #sleep(wakeIrqs: number): void {
+    this.#wakeIrqs = wakeIrqs;
+    this.halted = !(this.#signalled() && (this.ie & this.if_ & wakeIrqs) !== 0);
   }
 
   /** Acknowledge (clear) interrupt flags by writing to IF. Writing 1 clears. */
@@ -132,7 +164,7 @@ export class InterruptController {
       ie: this.ie,
       if_: this.if_,
       halted: this.halted,
-      intrWaitFlags: this.intrWaitFlags,
+      stopped: this.stopped,
     };
   }
 
@@ -142,7 +174,8 @@ export class InterruptController {
     this.ie = snap.ie;
     this.if_ = snap.if_;
     this.halted = snap.halted;
-    this.intrWaitFlags = snap.intrWaitFlags;
+    // Older snapshots carry no `stopped`: they knew only Halt.
+    this.#wakeIrqs = snap.stopped ? STOP_WAKE_IRQS : ALL_IRQS;
   }
 
   /** After a snapshot restore: a signal on its way to the CPU keeps its cycle and gets its callback back. */
@@ -158,7 +191,7 @@ export class InterruptController {
     this.ie = 0;
     this.if_ = 0;
     this.halted = false;
-    this.intrWaitFlags = 0;
+    this.#wakeIrqs = ALL_IRQS;
     this.#scheduler.cancel(EventId.Irq);
   }
 }

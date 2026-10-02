@@ -114,13 +114,24 @@ describe('I/O writes of every width reach the register that owns the address', (
     expect(gba.bus.read32(0x03000020)).toBe(0x11223344);
   });
 
-  it('POSTFLG and HALTCNT are the two bytes of 0x04000300: a halfword write reaches both', () => {
+  it('POSTFLG and HALTCNT are the two bytes of 0x04000300: a halfword write from BIOS code reaches both', () => {
     const gba = boot();
+    gba.bus.reset(); // POSTFLG 0, as before the boot code sets it
+    gba.armCpu.registers[15] = 0x100; // executing in the BIOS
     gba.bus.write8(IO + 0x300, 1);
     expect(gba.bus.read8(IO + 0x300)).toBe(1);
     expect(gba.interrupts.halted).toBe(false);
     gba.bus.write16(IO + 0x300, 0x0001);
     expect(gba.interrupts.halted).toBe(true);
+  });
+
+  it('POSTFLG and HALTCNT ignore writes from code outside the BIOS', () => {
+    // NanoBoyAdvance io.cc and mGBA io.c take them only while r15 is in the BIOS.
+    const gba = boot();
+    gba.bus.reset();
+    gba.bus.write16(IO + 0x300, 0x0001);
+    expect(gba.bus.read8(IO + 0x300)).toBe(0);
+    expect(gba.interrupts.halted).toBe(false);
   });
 
   it('a write of any width to BG2X reloads the internal reference point', () => {
@@ -198,7 +209,7 @@ describe('I/O above the register file', () => {
     gba.bus.write16(IO + 0x400, 0x1234);
     gba.bus.write16(IO + 0x410, 0x4567);
     gba.bus.write32(IO + 0x800, 0x0d000020);
-    expect(gba.bus.read16(IO)).toBe(0);
+    expect(gba.bus.read16(IO)).toBe(0x0080); // DISPCNT as the boot left it
     expect(gba.bus.peek(IO + 0x10, 2).data).toEqual(new Uint8Array([0x23, 0x01]));
     expect(gba.bus.describeAddress(IO + 0x400)).toBeNull();
     expect(gba.bus.peek(IO + 0x400, 1).readable).toBe(0);

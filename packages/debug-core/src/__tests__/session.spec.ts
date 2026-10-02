@@ -687,11 +687,14 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(h.session.position).toEqual(at);
   });
 
-  it('a halt event breakpoint stops asleep; a step from there wakes into the interrupt, a step back lands on the swi', async () => {
+  it('a halt event breakpoint stops asleep in the BIOS; a step from there wakes into the interrupt, a step back lands on the HALTCNT write', async () => {
     const h = await boot(variant);
     h.session.setEventBreakpoints(['halt']);
     expect(h.run()?.reason).toBe('event breakpoint');
     expect(h.session.machine.halted).toBe(true);
+    // VBlankIntrWait halts inside the BIOS, and the call stack reaches through it to the swi.
+    expect(h.session.pc).toBeLessThan(0x4000);
+    expect(h.session.callStack().map((f) => f.name)).toContain('main');
     const halted = h.session.position;
     h.session.stepInstruction();
     expect(h.session.pc).toBe(0x18); // the IRQ vector
@@ -699,14 +702,15 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(h.session.position.instruction).toBe(halted.instruction);
     expect(h.session.stepBack()).toBe(true);
     expect(h.session.position.instruction).toBe(halted.instruction - 1);
-    expect(h.session.disassemble(h.session.pc, 1)[0]!.text).toMatch(/^(swi|svc)/);
+    expect(h.session.disassemble(h.session.pc, 1)[0]!.text).toMatch(/^strb r3, \[r12, #0x301\]/); // HALTCNT
     h.session.setEventBreakpoints([]);
-    h.session.stepInstruction(); // the swi: the CPU sleeps until the interrupt wakes it at the vector
+    h.session.stepInstruction(); // the HALTCNT write: the CPU sleeps until the interrupt wakes it at the vector
     expect(h.session.pc).toBe(0x18);
     expect(h.session.machine.gba.armCpu.getMode()).toBe(IRQ_MODE);
-    h.session.stepOut(); // out of the exception: back where the swi returned
+    // Out of the exception, through the rest of the BIOS's IntrWait, to the program after the swi.
+    h.session.stepOut();
     expect(h.session.machine.gba.armCpu.getMode()).toBe(SYS_MODE);
-    expect(h.session.pc).toBe(halted.pc);
+    expect(h.session.pc).toBeGreaterThanOrEqual(0x08000000);
     if (variant !== 'thumb-O2') {
       h.session.stepOver(); // out of wait_vblank (inlined at -O2: the return already is the next line)
     }
@@ -1518,6 +1522,11 @@ describe('Session views and tools', () => {
     expect(h.session.dataBreakpointTarget('bonus')).toBeNull(); // without a frame it is not a global
     h.session.setSourceBreakpoints(MAIN, []);
     h.session.setDataBreakpoints([{ ...bonus, access: 'write' }]);
+    // Between calls the slot lies below main's stack pointer, where the BIOS's SWI handler
+    // pushes the caller's r2 and lr on its way into VBlankIntrWait: that write lands first.
+    expect(h.run()?.description).toMatch(
+      /^bonus written \(0x[0-9a-f]+, 4 bytes at 0x[0-9a-f]+\) by <BIOS stub \+0xc8>/,
+    );
     expect(h.run()?.description).toMatch(/^bonus written \(0x2, 4 bytes/);
   });
 
@@ -1834,20 +1843,29 @@ describe('unwinding past the end of the call-frame information', () => {
     h.run();
     expect(h.session.machine.gba.armCpu.getMode()).toBe(IRQ_MODE);
     const frames = h.session.callStack();
-    expect(frames.map((f) => f.name)).toEqual(['isr', '<BIOS stub +0x90>', 'wait_vblank', 'main']);
-    expect(frames.map((f) => f.method)).toEqual(['live', 'exception', 'exception', 'prologue']);
+    // The interrupt struck in the BIOS's IntrWait, which the walk crosses back to the swi.
+    expect(frames.map((f) => f.name)).toEqual([
+      'isr',
+      '<BIOS stub +0x90>',
+      expect.stringMatching(/^<BIOS stub \+0x/),
+      'wait_vblank',
+      'main',
+    ]);
+    expect(frames.map((f) => f.method)).toEqual(['live', 'exception', 'exception', 'service', 'prologue']);
     // The dispatcher is not a function of this program, whatever the symbol table
     // and a discarded DIE would like to claim about the BIOS region.
     expect(frames[1]!.source).toBeNull();
-    // An interrupted pc is the next instruction, not a return address: looked up as
-    // a return address it would land on the `swi` and report the line before this.
+    expect(frames[2]!.source).toBeNull();
+    // An interrupted pc is the next instruction, not a return address.
     expect(frames[2]!.virtual!.physical.lookupPc).toBe(frames[2]!.address);
-    expect(frames[2]!.source).toEqual({ path: MAIN, line: WAIT_RETURN_LINE });
     expect(frames[2]!.doubt).toMatch(/r4–r11 were not recovered across the interrupt/);
     // The interrupted code's own stack, not the handler's.
     const irqSp = h.session.machine.registers[13]!;
     expect(frames[2]!.virtual!.physical.regs[13]!).toBeLessThan(irqSp);
-    expect(frames[3]!.source).toEqual({ path: MAIN, line: lineOf('main.c', 'wait_vblank();') });
+    // The SWI's caller, at the swi, on the stack it called from: above what the BIOS pushed.
+    expect(frames[3]!.source).toEqual({ path: MAIN, line: lineOf('main.c', 'swi 0x05"') });
+    expect(frames[3]!.virtual!.physical.regs[13]!).toBeGreaterThan(frames[2]!.virtual!.physical.regs[13]!);
+    expect(frames[4]!.source).toEqual({ path: MAIN, line: lineOf('main.c', 'wait_vblank();') });
   });
 
   it('steps out into a measured caller, and refuses from one that rests on lr', async () => {

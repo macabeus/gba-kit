@@ -15,10 +15,11 @@
  * the CPU is halted — so a stop never charges a cycle for an instruction that
  * did not run, and the next `runFrame` finishes the same hardware frame.
  */
-import { ArmCpu } from '@gba-kit/arm-emulator/arm-cpu';
+import { ArmCpu, MODE_SYS } from '@gba-kit/arm-emulator/arm-cpu';
 
 import { Apu } from './apu/apu.js';
-import { type BiosEnv, handleSwi } from './bios.js';
+import { buildBiosImage } from './bios-image.js';
+import { handleSwi } from './bios.js';
 import { DisplayStatus } from './display-status.js';
 import { DmaController, type DmaTransferInfo } from './dma.js';
 import { InputController } from './input.js';
@@ -30,8 +31,6 @@ import { SerialPort } from './serial.js';
 import { GbaSystemBus } from './system-bus.js';
 import { TimerController } from './timers.js';
 import {
-  BIOS_IRQ_STUB_PUSH,
-  BIOS_LATCH_AFTER_IRQ,
   BIOS_LATCH_AFTER_SWI,
   BOOT_STACK_POINTERS,
   CYCLES_PER_SCANLINE,
@@ -39,10 +38,17 @@ import {
   EventId,
   GbaButton,
   HBLANK_START_CYCLE,
+  MMIO,
   TOTAL_SCANLINES,
   VISIBLE_SCANLINES,
 } from './types.js';
 import { captureOrigin } from './write-source.js';
+
+/** The BIOS region's contents: the HLE BIOS's ARM code (bios-image.ts). */
+const BIOS_IMAGE = buildBiosImage();
+
+/** Where the BIOS's boot code hands over to the cartridge. */
+const CARTRIDGE_ENTRY = 0x08000000;
 
 /** PPU rendering interface */
 export interface PpuInterface {
@@ -103,9 +109,6 @@ export class Gba {
   #running = false;
   /** Set when a `StopPredicate` or a CPU debug hook refused an instruction during the current run. */
   #stopped = false;
-  /** Tracks whether the CPU is currently inside the BIOS IRQ handler */
-  #inIrqHandler = false;
-  readonly #biosEnv: BiosEnv;
   #eventSink: ((event: HardwareEvent) => void) | null = null;
 
   constructor() {
@@ -120,25 +123,18 @@ export class Gba {
     this.ppu = new Ppu();
     this.apu = new Apu();
 
-    // The HLE BIOS reaches this machine's interrupt controller and no other.
-    this.#biosEnv = {
-      onIntrWait: (flags) => {
-        this.interrupts.intrWaitFlags = flags;
-      },
-    };
-
-    // Create CPU with GBA BIOS SWI handler. The real BIOS leaves every SWI through the same
-    // code, so its read-protection latch holds that code's last fetch afterwards (mGBA GBASwi16).
+    // Create CPU with GBA BIOS SWI handler. A call the HLE runs in TypeScript leaves the BIOS's
+    // read-protection latch where the real BIOS's shared return code leaves it (mGBA GBASwi16); a
+    // call the BIOS image runs goes through the SWI exception and fetches that code itself.
     this.armCpu = new ArmCpu(this.bus, {
       swiHandler: (cpu, swiNumber) => {
-        const cycles = handleSwi(cpu, swiNumber, this.#biosEnv);
-        this.bus.latchBiosOpcode(BIOS_LATCH_AFTER_SWI);
+        const cycles = handleSwi(cpu, swiNumber);
+        if (cycles !== null) {
+          this.bus.latchBiosOpcode(BIOS_LATCH_AFTER_SWI);
+        }
         return cycles;
       },
     });
-    for (const [mode, sp] of BOOT_STACK_POINTERS) {
-      this.armCpu.setBankedSP(mode, sp);
-    }
 
     // Wire subsystem references
     this.bus.connect({
@@ -177,12 +173,43 @@ export class Gba {
       accessCycles: (addr, width, sequential) => this.bus.accessCycles(addr, width, sequential),
     });
 
-    // Install HLE BIOS IRQ handler stub
-    this.#installBiosStub();
+    this.bus.loadBios(BIOS_IMAGE);
+    this.#skipBiosBoot();
 
     // Start at line 0, where the V-count comparison runs like on any other line
     this.display.setScanline(0);
     this.#scheduleHBlank(this.scheduler.currentCycle);
+  }
+
+  /**
+   * The machine as the BIOS's boot code leaves it when it jumps to the cartridge, where the
+   * emulator starts instead of running a boot ROM it does not have (mGBA gba.c GBASkipBIOS and
+   * io.c GBAIOInit; NanoBoyAdvance Core::SkipBootScreen):
+   * - I/O: DISPCNT 0x0080 (forced blank), BG2 and BG3 PA and PD 0x0100, RCNT 0x8000, SOUNDBIAS
+   *   0x0200 and POSTFLG 1. The boot code writes them, so they go through the bus while the CPU
+   *   still sits at the reset vector, in the BIOS.
+   * - CPU: the IRQ, SVC and SYS stacks of BOOT_STACK_POINTERS, SYS mode, ARM state, IRQs and FIQs
+   *   enabled, PC at the cartridge's entry point.
+   * The BIOS read-protection latch starts at BIOS_LATCH_AFTER_BOOT with the bus.
+   */
+  #skipBiosBoot(): void {
+    const cpu = this.armCpu;
+    cpu.resetState();
+    this.bus.write16(MMIO.DISPCNT, 0x0080);
+    for (const identity of [MMIO.BG2PA, MMIO.BG2PD, MMIO.BG3PA, MMIO.BG3PD]) {
+      this.bus.write16(identity, 0x0100);
+    }
+    this.bus.write16(MMIO.RCNT, 0x8000);
+    this.bus.write16(MMIO.SOUNDBIAS, 0x0200);
+    this.bus.write8(MMIO.POSTFLG, 1);
+
+    for (const [mode, sp] of BOOT_STACK_POINTERS) {
+      cpu.switchMode(mode);
+      cpu.registers[13] = sp;
+    }
+    cpu.switchMode(MODE_SYS);
+    cpu.cpsr = MODE_SYS;
+    cpu.registers[15] = CARTRIDGE_ENTRY;
   }
 
   /** Load a ROM into the system */
@@ -319,12 +346,6 @@ export class Gba {
         break;
       }
 
-      // Track PC before step to detect BIOS IRQ handler return
-      let pcBeforeStep = 0;
-      if (this.#inIrqHandler) {
-        pcBeforeStep = cpu.registers[15]!;
-      }
-
       const cycles = cpu.step();
       if (cycles === 0) {
         // Either the CPU halted itself, or a debug hook refused the instruction. In
@@ -337,27 +358,6 @@ export class Gba {
         break;
       }
       scheduler.advance(cycles);
-
-      // Detect BIOS IRQ handler return: the SUBS PC, LR, #4 at address 0x94
-      // returns from IRQ mode to the interrupted context. After this executes,
-      // we check if we need to re-halt for IntrWait (matching real BIOS behavior
-      // where the IntrWait loop re-halts after each non-matching interrupt).
-      if (this.#inIrqHandler && pcBeforeStep === 0x94) {
-        this.#inIrqHandler = false;
-
-        if (this.interrupts.intrWaitFlags !== 0) {
-          const biosIf = this.bus.read16(0x03007ff8);
-          if (biosIf & this.interrupts.intrWaitFlags) {
-            // IntrWait satisfied — clear flags and let game code continue
-            this.bus.write16(0x03007ff8, biosIf & ~this.interrupts.intrWaitFlags);
-            this.interrupts.intrWaitFlags = 0;
-          } else {
-            // Not satisfied — re-halt (IntrWait loop continues waiting)
-            this.interrupts.halted = true;
-            break;
-          }
-        }
-      }
     }
   }
 
@@ -368,16 +368,6 @@ export class Gba {
       return false;
     }
 
-    // Update BIOS IF mirror at 0x03007FF8 before entering the handler.
-    // This matches real GBA BIOS behavior: the BIOS reads IE & IF, ANDs them,
-    // and ORs the result into the mirror. The user handler may then acknowledge
-    // IF, but the mirror preserves which interrupts actually fired.
-    // IntrWait checks this mirror to decide when the waited interrupt has occurred.
-    const pending = this.interrupts.ie & this.interrupts.if_;
-    const currentMirror = this.bus.read16(0x03007ff8);
-    this.bus.write16(0x03007ff8, currentMirror | pending);
-
-    this.#inIrqHandler = true;
     this.#eventSink?.({ kind: 'irq-enter', pc: this.armCpu.registers[15]! });
     this.scheduler.advance(this.armCpu.enterIrq());
     return true;
@@ -450,7 +440,6 @@ export class Gba {
       cpu: this.armCpu.serialize(),
       currentScanline: this.#currentScanline,
       frameCount: this.#frameCount,
-      inIrqHandler: this.#inIrqHandler,
       scheduler: this.scheduler.serialize(),
       interrupts: this.interrupts.serialize(),
       timers: this.timers.serialize(),
@@ -475,7 +464,6 @@ export class Gba {
     this.#stopped = false;
     this.#currentScanline = snap.currentScanline;
     this.#frameCount = snap.frameCount ?? 0;
-    this.#inIrqHandler = snap.inIrqHandler;
 
     // Restore subsystems
     this.interrupts.deserialize(snap.interrupts);
@@ -522,7 +510,6 @@ export class Gba {
     this.#stopped = false;
     this.#currentScanline = 0;
     this.#frameCount = 0;
-    this.#inIrqHandler = false;
     this.scheduler.reset();
     this.interrupts.reset();
     this.timers.reset();
@@ -531,53 +518,8 @@ export class Gba {
     this.bus.reset();
     this.ppu.reset();
     this.apu.reset();
-    this.#installBiosStub();
+    this.#skipBiosBoot();
     this.display.setScanline(0);
     this.#scheduleHBlank(this.scheduler.currentCycle);
-  }
-
-  /**
-   * Install a minimal HLE BIOS stub.
-   *
-   * Matches the real GBA BIOS IRQ handler behavior:
-   * The BIOS just saves registers, calls the user handler from [0x03FFFFFC],
-   * restores registers, and returns. It does NOT acknowledge IF or update
-   * the BIOS IF mirror — the game's own IRQ handler is responsible for that.
-   *
-   * SWI handler at 0x08: handled in HLE (bios.ts), but we need a
-   * return path. The SWI handler just needs MOVS PC, LR to return.
-   */
-  #installBiosStub(): void {
-    // ─── UND handler (at 0x04) ─────────────────────────────────────
-    this.bus.writeBios32(0x04, 0xe1b0f00e); // MOVS PC, LR
-
-    // ─── SWI handler (at 0x08) ─────────────────────────────────────
-    this.bus.writeBios32(0x08, 0xe1b0f00e); // MOVS PC, LR
-
-    // ─── IRQ vector (at 0x18) ────────────────────────────────────
-    // B 0x80: offset = (0x80 - 0x18 - 8) / 4 = 0x18
-    this.bus.writeBios32(0x18, 0xea000018); // B 0x80
-
-    // ─── IRQ handler (at 0x80) ───────────────────────────────────
-    // Matches real GBA BIOS (and mGBA's HLE stub): save regs, call user
-    // handler via LDR PC, restore, return. The BIOS does NOT acknowledge
-    // IF or update the BIOS IF mirror — that's the user handler's job.
-    // 0x80: STMFD SP!, {R0-R3, R12, LR}   — save regs to IRQ stack
-    this.bus.writeBios32(0x80, BIOS_IRQ_STUB_PUSH);
-    // 0x84: MOV R0, #0x04000000            — IO register base
-    this.bus.writeBios32(0x84, 0xe3a00301);
-    // 0x88: ADD LR, PC, #0                 — LR = 0x88+8 = 0x90 (return point)
-    this.bus.writeBios32(0x88, 0xe28fe000);
-    // 0x8C: LDR PC, [R0, #-4]             — PC = [0x03FFFFFC] = user handler
-    this.bus.writeBios32(0x8c, 0xe510f004);
-    // — user handler returns here (0x90) —
-    // 0x90: LDMFD SP!, {R0-R3, R12, LR}   — restore regs from IRQ stack
-    this.bus.writeBios32(0x90, 0xe8bd500f);
-    // 0x94: SUBS PC, LR, #4               — return from IRQ, restore CPSR
-    this.bus.writeBios32(0x94, 0xe25ef004);
-    // 0x9C: fetched while 0x94 executes, so the BIOS read-protection latch holds it after an IRQ,
-    // as it holds the real BIOS's [0x13C+8]. The LDR PC at 0x8C fetches 0x94 the same way: during
-    // the user handler the latch holds the SUBS, the real BIOS's [0x134+8].
-    this.bus.writeBios32(0x9c, BIOS_LATCH_AFTER_IRQ);
   }
 }

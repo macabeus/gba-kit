@@ -1194,10 +1194,15 @@ export class GbaSystemBus implements MemoryBus {
     if (address >= BIOS_SIZE) {
       return this.#openBus();
     }
-    if (this.#cpu.registers[15]! < BIOS_SIZE) {
+    if (this.#cpuInBios()) {
       this.#biosLatch = this.#read32From(this.#bios, address);
     }
     return this.#biosLatch;
+  }
+
+  /** Whether the CPU executes in the BIOS: registers[15], $+width while $ runs, is inside it. */
+  #cpuInBios(): boolean {
+    return this.#cpu.registers[15]! < BIOS_SIZE;
   }
 
   // ─── ROM Access ───────────────────────────────────────────────────
@@ -1448,12 +1453,21 @@ export class GbaSystemBus implements MemoryBus {
         this.#updateWaitStates();
         return;
       case MMIO.POSTFLG:
-        // Two byte registers: POSTFLG, and HALTCNT, which halts the CPU when written.
+        // Two byte registers only BIOS code can write: POSTFLG, which the boot code sets once, and
+        // HALTCNT, whose bit 7 picks Stop over Halt (GBATEK "System Control"; NanoBoyAdvance
+        // io.cc and mGBA io.c take these writes only while the CPU executes in the BIOS).
+        if (!this.#cpuInBios()) {
+          return;
+        }
         if (mask & 0x00ff) {
           this.#postflg |= value & 1;
         }
         if (mask & 0xff00) {
-          this.#interrupts.halted = true;
+          if (value & 0x8000) {
+            this.#interrupts.stop();
+          } else {
+            this.#interrupts.halt();
+          }
         }
         return;
     }

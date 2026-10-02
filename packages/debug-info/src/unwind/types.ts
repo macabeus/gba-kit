@@ -67,6 +67,37 @@ export interface TargetPolicy {
   exceptionReturnBias(mode: number): number;
   /** the stub the walk crosses: the mode it runs in, and where its pushed block keeps the interrupted lr */
   exceptionStub: { mode: number; lrOffset: number };
+  /**
+   * The BIOS code a program enters with an SWI, for a walk that finds the machine inside it.
+   * Absent for a target whose SWIs leave no frame of their own.
+   */
+  serviceCall?: ServiceCallPolicy;
+}
+
+/**
+ * The SWI handler as a walk reads it. On entry it pushes a block on the stack of the mode the
+ * exception enters, holding the caller's return address and status; it then runs its routines
+ * on the caller's own stack, pushing a known amount there at each of its addresses.
+ */
+export interface ServiceCallPolicy {
+  /** the mode the SWI exception enters, whose stack pointer still points at the entry block */
+  mode: number;
+  /** where the entry block keeps the caller's return address and its saved status register */
+  returnOffset: number;
+  statusOffset: number;
+  /** the caller's registers the entry block saved, by offset */
+  blockSlots: ReadonlyArray<readonly [register: number, offset: number]>;
+  /**
+   * For a BIOS address: what the handler has pushed on the caller's stack when it runs there —
+   * how many bytes, and where among them the caller's registers sit, counted down from the
+   * caller's sp. Undefined for an address of no routine the handler runs on the caller's stack.
+   */
+  frameAt(pc: number): ServiceCallFrame | undefined;
+}
+
+export interface ServiceCallFrame {
+  pushed: number;
+  slots: ReadonlyArray<readonly [register: number, below: number]>;
 }
 
 /** Everything the walk needs to know about the machine, and nothing about an emulator. */
@@ -79,6 +110,8 @@ export type FrameMethod =
   | 'cfi'
   /** read off an exception boundary: the stub's pushed block and the banked state */
   | 'exception'
+  /** read off the BIOS's SWI handler: the block its exception mode pushed, and its pushes on the caller's stack */
+  | 'service'
   /** measured from the callee's own prologue, or from the teardown its epilogue has left to run */
   | 'prologue'
   /** a link register the decode proved still holds this frame's return address */
@@ -103,6 +136,8 @@ export const FRAME_METHODS: Record<FrameMethod, { confidence: 'derived' | 'infer
   cfi: { confidence: 'derived', runnable: true },
   // A BIOS address the program never branches to itself, so there is nothing to run to.
   exception: { confidence: 'derived', runnable: false },
+  // The instruction after the program's own SWI, which the handler returns to.
+  service: { confidence: 'derived', runnable: true },
   prologue: { confidence: 'derived', runnable: true },
   lr: { confidence: 'derived', runnable: true },
   // Corroborated by a call that ends at it, and its stack pointer is measured, so

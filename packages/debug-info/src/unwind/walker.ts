@@ -12,7 +12,9 @@
  *
  * An exception boundary is not one of the layers and is recognised before the
  * sequence runs: crossing one emits two frames and moves the walk onto another
- * mode's stack, neither of which the shape of a layer can express.
+ * mode's stack, neither of which the shape of a layer can express. The BIOS's SWI
+ * handler is recognised the same way: a frame inside it steps to the program's SWI
+ * by what the handler is known to have pushed.
  *
  * The teardown comes before the table because gcc's `.debug_frame` is
  * *synchronous*: its rows track the prologue and stop, so in an epilogue it hands
@@ -38,6 +40,7 @@ import {
   type Measured,
   type MeasuredFrame,
   type Refusal,
+  type ServiceCallFrame,
   type StackWalk,
   type UnwoundFrame,
   type WalkContext,
@@ -139,6 +142,10 @@ interface Crossing {
 }
 
 function advance(top: UnwoundFrame, ctx: WalkContext): Advance {
+  const service = top.pc < ctx.facts.codeFloor ? ctx.facts.serviceCall?.frameAt(top.pc) : undefined;
+  if (service) {
+    return crossServiceCall(top, service, ctx.facts);
+  }
   if (top.pc < ctx.facts.codeFloor) {
     // Frame 0 is inside the stub itself — the machine is stopped in the BIOS — so
     // the boundary is right here and the live stack pointer is where the pushed
@@ -514,7 +521,11 @@ function crossException(
   );
 }
 
-/** The interrupted instruction's address, or null when what was read cannot be one. */
+/**
+ * The interrupted instruction's address, or null when what was read cannot be one: program code,
+ * or the BIOS's SWI handler, which interrupts strike while it waits (IntrWait) and which the walk
+ * crosses next.
+ */
 function resumeAddress(lr: number | undefined, bias: number, facts: MachineFacts): number | null {
   if (lr === undefined) {
     return null;
@@ -522,7 +533,60 @@ function resumeAddress(lr: number | undefined, bias: number, facts: MachineFacts
   // What `subs pc, lr, #4` does, which is right for an ARM and a Thumb
   // interruption alike.
   const resume = ((lr + bias) & ~1) >>> 0;
-  return resume >= facts.codeFloor && facts.isCodeRegion(resume) && facts.functionBounds(resume) ? resume : null;
+  if (resume < facts.codeFloor) {
+    return facts.serviceCall?.frameAt(resume) ? resume : null;
+  }
+  return facts.isCodeRegion(resume) && facts.functionBounds(resume) ? resume : null;
+}
+
+/**
+ * Crossing out of the BIOS's SWI handler into the program that made the call.
+ *
+ * The handler's entry block, on the stack of the mode the exception entered, holds the
+ * address after the SWI and the caller's status; its routines run on the caller's own
+ * stack, and at every address of theirs the policy says how much they have pushed there
+ * and where the caller's registers sit in it. The caller's sp is the frame's sp plus that,
+ * which is also this frame's CFA. The registers the handler neither saved nor uses are
+ * the caller's own; r0, r1 and r3 carry the call's results, and r4–r10 pass through.
+ */
+function crossServiceCall(top: UnwoundFrame, frame: ServiceCallFrame, facts: MachineFacts): Advance {
+  const call = facts.serviceCall!;
+  const block = facts.bankedSp(call.mode);
+  const sp = top.regs[13];
+  const ret = block === undefined ? undefined : facts.read32((block + call.returnOffset) >>> 0);
+  const status = block === undefined ? undefined : facts.read32((block + call.statusOffset) >>> 0);
+  if (sp === undefined || ret === undefined || status === undefined) {
+    return {
+      frames: [],
+      end: "the BIOS's SWI handler could not be read: its entry block or the caller's stack is unknown",
+    };
+  }
+  const callerSp = (sp + frame.pushed) >>> 0;
+  const pc = (ret & (status & 0x20 ? ~1 : ~3)) >>> 0;
+  const gate = pc < facts.codeFloor ? { rejected: 'is in the BIOS', doubt: null } : gateReturnAddress(pc, facts);
+  if (gate.rejected) {
+    return {
+      cfa: callerSp,
+      frames: [],
+      end: `the SWI's return address (0x${hex8(pc)}) ${gate.rejected}`,
+    };
+  }
+  const regs = Array.from(top.regs);
+  for (const r of [0, 1, 3]) {
+    regs[r] = undefined;
+  }
+  for (const [r, offset] of call.blockSlots) {
+    regs[r] = facts.read32((block! + offset) >>> 0);
+  }
+  for (const [r, below] of frame.slots) {
+    regs[r] = facts.read32((callerSp - below) >>> 0);
+  }
+  regs[13] = callerSp;
+  regs[15] = pc;
+  return {
+    cfa: callerSp,
+    frames: [{ pc, lookupPc: (pc - 2) >>> 0, regs, cfa: undefined, method: 'service', doubt: gate.doubt }],
+  };
 }
 
 function interruptedFrame(regs: Array<number | undefined>, resume: number, mode: number, doubt: string): Crossing {

@@ -173,11 +173,13 @@ function multiplierCycles(multiplier: number, signed: boolean): number {
 /**
  * Callback for Software Interrupt (SWI) instructions.
  * Platform-specific: on GBA, the SWI number selects a BIOS function.
- * It returns the cycles the call spends between taking the SWI and branching back, which the SWI
- * instruction costs on top of its own fetch and that return branch.
- * If not provided, SWI instructions are silently ignored.
+ * A handler that runs the call itself returns the cycles the call spends between taking the SWI
+ * and branching back, which the SWI instruction costs on top of its own fetch and that return
+ * branch. A handler that returns null leaves the call to the code at the SWI vector: the CPU takes
+ * the exception, as it does for every SWI on hardware.
+ * Without a handler, SWI instructions do nothing.
  */
-export type SwiHandler = (cpu: ArmCpu, swiNumber: number) => number;
+export type SwiHandler = (cpu: ArmCpu, swiNumber: number) => number | null;
 
 // ─── ARM7TDMI Full CPU ──────────────────────────────────────────────
 
@@ -681,7 +683,7 @@ export class ArmCpu {
    * 5. Clear T bit (enter ARM state)
    * 6. Set PC to IRQ vector (0x00000018)
    *
-   * The BIOS stub at 0x18 (installed by Gba.#installBiosStub) handles:
+   * On the GBA the BIOS code at 0x18 (gba-emulator bios-image.ts) handles:
    * - Saving registers to IRQ stack
    * - Calling the user's handler from [0x03007FFC]
    * - Restoring registers and returning from IRQ
@@ -715,6 +717,23 @@ export class ArmCpu {
     // Jump to the BIOS IRQ vector; its stub calls the user handler.
     this.#branchTo(0x00000018);
     return this.#cycles;
+  }
+
+  /**
+   * Enter the Software Interrupt exception: SVC mode with LR_svc the address of the instruction
+   * after the SWI and SPSR_svc the CPSR it ran under, IRQs disabled, ARM state, PC at the 0x08
+   * vector (GBATEK "ARM CPU Exceptions"). Called while the SWI executes, when registers[PC] already
+   * holds that next address.
+   */
+  #enterSwi(): void {
+    const savedCpsr = this.cpsr;
+    const returnAddr = this.registers[PC]!;
+    this.switchMode(MODE_SVC);
+    this.registers[LR] = returnAddr;
+    this.setSPSR(savedCpsr);
+    this.cpsr |= 1 << CPSR_I;
+    this.cpsr &= ~(1 << CPSR_T);
+    this.#branchTo(0x00000008);
   }
 
   /** Enter Undefined Instruction exception */
@@ -2271,13 +2290,18 @@ export class ArmCpu {
   // ─── Software Interrupt ──────────────────────────────────────────
 
   /**
-   * SWI: the HLE BIOS runs the call in place of the BIOS code at the 0x08 vector, and its handler
-   * says how many cycles that code takes. On hardware the BIOS returns with `movs pc, lr`, which
-   * refills the pipeline at the return address, so code the call wrote right after the SWI is what
-   * runs next.
+   * SWI: an HLE handler runs the call in place of the BIOS code at the 0x08 vector and says how
+   * many cycles that code takes. On hardware the BIOS returns with `movs pc, lr`, which refills the
+   * pipeline at the return address, so code the call wrote right after the SWI is what runs next.
+   * A call the handler leaves to the BIOS code takes the exception into it.
    */
   #softwareInterrupt(swiNumber: number): void {
-    this.#cycles += this.#swiHandler?.(this, swiNumber) ?? 0;
+    const cycles = this.#swiHandler ? this.#swiHandler(this, swiNumber) : 0;
+    if (cycles === null) {
+      this.#enterSwi();
+      return;
+    }
+    this.#cycles += cycles;
     if (!this.#halted) {
       this.#branchTo(this.registers[PC]!);
     }

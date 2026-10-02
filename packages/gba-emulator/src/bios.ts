@@ -3,7 +3,9 @@
  *
  * Instead of running real BIOS ROM, we intercept SWI instructions and
  * implement the behavior in TypeScript. This is faster and doesn't
- * require a BIOS dump.
+ * require a BIOS dump. The calls that steer the CPU itself (Halt, Stop,
+ * IntrWait, VBlankIntrWait, CustomHalt, SoftReset) run instead as ARM code
+ * from the BIOS image (bios-image.ts), entered through the SWI exception.
  *
  * Each call reports the cycles the real BIOS code would take, so a call costs the time it does on
  * hardware: the dispatch and return every SWI goes through, plus a per-function cost where the
@@ -14,6 +16,8 @@
  */
 import type { MemoryBus } from '@gba-kit/arm-emulator';
 
+import { runsInBiosCode } from './bios-image.js';
+
 /**
  * Interface for the CPU that BIOS calls need access to.
  * Uses duck typing to avoid circular imports with ArmCpu.
@@ -21,28 +25,6 @@ import type { MemoryBus } from '@gba-kit/arm-emulator';
 interface BiosCpu {
   readonly registers: Uint32Array;
   readonly memory: MemoryBus;
-}
-
-/**
- * GBA Interrupt Controller memory layout:
- *   0x04000200 - IE  (Interrupt Enable)
- *   0x04000202 - IF  (Interrupt Flags)
- *   0x04000208 - IME (Interrupt Master Enable)
- *
- * BIOS IntrWait mechanics:
- *   The BIOS IRQ handler acknowledges interrupts in IF and also sets bits
- *   at 0x03007FF8 (IWRAM). The IntrWait SWI checks this location.
- *   We implement Halt/IntrWait/VBlankIntrWait by writing to HALTCNT (0x04000301)
- *   which the system bus handles by setting interrupts.halted = true.
- */
-
-/**
- * What the HLE BIOS needs from the machine it runs in. Passed per call, so two
- * `Gba` instances in one process never share state through this module.
- */
-export interface BiosEnv {
-  /** IntrWait: tell the interrupt controller which flags end the halt. */
-  onIntrWait?(flags: number): void;
 }
 
 /**
@@ -57,10 +39,13 @@ export interface BiosEnv {
  *
  * @param cpu - The CPU instance
  * @param swiNumber - The SWI function number (0x00-0xFF)
- * @param env - Hooks back into the machine this call runs in
- * @returns the cycles the BIOS spends from the SWI vector to its return branch
+ * @returns the cycles the BIOS spends from the SWI vector to its return branch, or null for a call
+ *   the BIOS image runs as ARM code, which the CPU enters through the SWI exception
  */
-export function handleSwi(cpu: BiosCpu, swiNumber: number, env: BiosEnv = {}): number {
+export function handleSwi(cpu: BiosCpu, swiNumber: number): number | null {
+  if (runsInBiosCode(swiNumber)) {
+    return null;
+  }
   // Read before the call, which may change the registers.
   const dispatch = swiDispatchCycles(cpu);
   let cycles = 0;
@@ -109,15 +94,6 @@ export function handleSwi(cpu: BiosCpu, swiNumber: number, env: BiosEnv = {}): n
       break;
     case 0x15:
       swiRlUnCompVram(cpu);
-      break;
-    case 0x02: // Halt
-      swiHalt(cpu);
-      break;
-    case 0x04: // IntrWait
-      swiIntrWait(cpu, env);
-      break;
-    case 0x05: // VBlankIntrWait
-      swiVBlankIntrWait(cpu, env);
       break;
     case 0x19: // MidiKey2Freq
       swiMidiKey2Freq(cpu);
@@ -1021,75 +997,6 @@ function swiHuffUnComp(cpu: BiosCpu): void {
       }
     }
   }
-}
-
-// ─── SWI 0x02: Halt ──────────────────────────────────────────────
-
-/**
- * SWI 0x02 — Halt: Halt CPU until any interrupt.
- *
- * Writes to HALTCNT to put the CPU into low-power halt state.
- * The CPU resumes when any enabled interrupt fires.
- */
-function swiHalt(cpu: BiosCpu): void {
-  // Write to HALTCNT (0x04000301) to trigger halt
-  cpu.memory.write8(0x04000301, 0);
-}
-
-// ─── SWI 0x04: IntrWait ─────────────────────────────────────────
-
-/**
- * SWI 0x04 — IntrWait: Wait for specific interrupt(s).
- *
- * Input:
- *   r0 = 1: discard old flags first; 0: check existing flags
- *   r1 = interrupt flags to wait for (same bits as IE/IF)
- *
- * On real hardware, this loops checking IF at 0x03007FF8 (BIOS mirror).
- * We implement it by:
- * 1. Optionally clearing the requested flags in the BIOS IF mirror
- * 2. Setting the CPU to halt state
- *
- * The GBA coordinator's halt logic will fast-forward to the next event,
- * and IRQ handling will wake the CPU.
- */
-function swiIntrWait(cpu: BiosCpu, env: BiosEnv): void {
-  const discardOld = cpu.registers[0]!;
-  const waitFlags = cpu.registers[1]! & 0x3fff;
-
-  if (discardOld) {
-    // Clear the requested flags in the BIOS IF mirror at 0x03007FF8
-    const biosIf = cpu.memory.read16(0x03007ff8);
-    cpu.memory.write16(0x03007ff8, biosIf & ~waitFlags);
-  }
-
-  // Check if the interrupt has already occurred
-  const biosIf = cpu.memory.read16(0x03007ff8);
-  if (biosIf & waitFlags) {
-    // Already happened — clear and return immediately
-    cpu.memory.write16(0x03007ff8, biosIf & ~waitFlags);
-    return;
-  }
-
-  // Set IntrWait flags so halt only breaks for the desired interrupt
-  env.onIntrWait?.(waitFlags);
-
-  // Put CPU into halt state
-  cpu.memory.write8(0x04000301, 0);
-}
-
-// ─── SWI 0x05: VBlankIntrWait ───────────────────────────────────
-
-/**
- * SWI 0x05 — VBlankIntrWait: Wait for VBlank interrupt.
- *
- * Equivalent to IntrWait(1, 0x0001) — discard old flags, wait for VBlank.
- */
-function swiVBlankIntrWait(cpu: BiosCpu, env: BiosEnv): void {
-  // Set up for VBlank wait
-  cpu.registers[0] = 1; // Discard old flags
-  cpu.registers[1] = 0x0001; // VBlank flag (bit 0 of IE/IF)
-  swiIntrWait(cpu, env);
 }
 
 // ─── SWI 0x19: MidiKey2Freq ─────────────────────────────────────
