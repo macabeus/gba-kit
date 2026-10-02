@@ -196,7 +196,7 @@ describe('Halt and HALTCNT', () => {
   });
 });
 
-describe('SoftReset', () => {
+describe('SoftReset and RegisterRamReset', () => {
   function resetFrom(returnByte: number): Gba {
     const gba = boot(MAIN_SOFT_RESET);
     gba.bus.write32(0x03007e10, 0x12345678); // inside the 0x200 bytes it clears
@@ -232,6 +232,35 @@ describe('SoftReset', () => {
     const gba = resetFrom(1);
     expect(gba.runFrame(() => gba.armCpu.registers[15] === 0x02000000)).toBe('stopped');
     expect(gba.armCpu.cpsr).toBe(MODE_SYS);
+  });
+
+  it('RegisterRamReset clears the memory and registers r0 picks, and blanks the screen', () => {
+    const gba = new Gba();
+    gba.loadRom(romOf([0xef010000 /* swi 0x10000 */, 0xeafffffe /* b . */]));
+    gba.armCpu.registers[0] = 0x83; // EWRAM, IWRAM, the other registers
+    gba.bus.write32(0x02000100, 0x11111111);
+    gba.bus.write32(0x03000100, 0x22222222);
+    gba.bus.write32(0x03007e10, 0x33333333);
+    gba.bus.write32(0x05000000, 0x44444444);
+    gba.bus.write16(MMIO.DISPCNT, 0x0403);
+    gba.bus.write16(MMIO.BG2PA, 0x0234);
+    gba.bus.write16(MMIO.IE, 0x0001);
+    gba.bus.write16(MMIO.RCNT, 0x0000);
+    gba.bus.write16(MMIO.SIOCNT, 0x1000); // Normal 32-bit mode, where SIODATA32 holds data
+    gba.bus.write16(MMIO.SIODATA32, 0xabcd);
+    // Clearing EWRAM 8 words per STMIA at 6 cycles a word takes about 1.5 frames.
+    expect(gba.runFrame(() => gba.armCpu.registers[15] === 0x08000004)).toBe('done');
+    expect(gba.runFrame(() => gba.armCpu.registers[15] === 0x08000004)).toBe('stopped');
+    expect(gba.frameCount).toBe(1);
+    expect(gba.bus.read32(0x02000100)).toBe(0);
+    expect(gba.bus.read32(0x03000100)).toBe(0);
+    expect(gba.bus.read32(0x03007e10)).toBe(0x33333333); // the top 0x200 bytes stay
+    expect(gba.bus.read32(0x05000000)).toBe(0x44444444); // bit 2 clear: the palette stays
+    expect(gba.bus.read16(MMIO.DISPCNT)).toBe(0x0080);
+    expect(gba.bus.peek(MMIO.BG2PA, 2).data).toEqual(new Uint8Array([0x00, 0x01]));
+    expect(gba.interrupts.ie).toBe(0);
+    // Bit 5 clear: the BIOS still writes 7 to SIODATA32's low byte (GBATEK "RegisterRamReset").
+    expect(gba.bus.read16(MMIO.SIODATA32)).toBe(0xab07);
   });
 });
 
