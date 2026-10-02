@@ -88,15 +88,16 @@ describe('DISPSTAT and VCOUNT', () => {
     expect(gba.bus.read16(DISPSTAT) & 1).toBe(0);
   });
 
-  it('the HBlank flag is set from HBlank to the end of the line', () => {
-    // The CPU sees it at the end of the `b .` (20 cycles) running when HBlank begins.
+  it('the HBlank flag is set from cycle 1006 of the line to its end', () => {
+    // GBATEK: "Although the drawing time is only 960 cycles (240*4), the H-Blank flag is "0" for a
+    // total of 1006 cycles." The CPU sees it at the end of the `b .` (20 cycles) running then.
     const gba = spinning();
     runToLine(gba, 10);
     expect(gba.bus.read16(DISPSTAT) & 2).toBe(0);
     gba.runFrame(() => (gba.bus.read16(DISPSTAT) & 2) !== 0);
     expect(gba.scanline).toBe(10);
-    expect(gba.scheduler.currentCycle % 1232).toBeGreaterThanOrEqual(960);
-    expect(gba.scheduler.currentCycle % 1232).toBeLessThan(960 + 20);
+    expect(gba.scheduler.currentCycle % 1232).toBeGreaterThanOrEqual(1006);
+    expect(gba.scheduler.currentCycle % 1232).toBeLessThan(1006 + 20);
     gba.runFrame(() => (gba.bus.read16(DISPSTAT) & 2) === 0);
     expect(gba.scanline).toBe(11);
   });

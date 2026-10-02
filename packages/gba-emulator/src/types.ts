@@ -31,6 +31,14 @@ export const HDRAW_CYCLES = 960;
 /** HBlank portion in cycles: 68 dots */
 export const HBLANK_CYCLES = 272;
 
+/**
+ * The cycle of a line at which HBlank begins for the rest of the machine: the DISPSTAT flag sets,
+ * the HBlank IRQ and HBlank DMA start, and the line's picture is complete (GBATEK "LCD I/O Display
+ * Status": "Although the drawing time is only 960 cycles (240*4), the H-Blank flag is "0" for a
+ * total of 1006 cycles."; mGBA video.h VIDEO_HDRAW_LENGTH).
+ */
+export const HBLANK_START_CYCLE = 1006;
+
 /** Target frame rate (Hz) */
 export const FRAME_RATE = CPU_FREQ / CYCLES_PER_FRAME; // ~59.7275 Hz
 

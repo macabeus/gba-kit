@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { Gba } from '../gba.js';
-import { CYCLES_PER_FRAME, CYCLES_PER_SCANLINE, EventId, HDRAW_CYCLES } from '../types.js';
+import { CYCLES_PER_FRAME, CYCLES_PER_SCANLINE, EventId, HBLANK_START_CYCLE } from '../types.js';
 
 /** ARM: `add r0, r0, #1` then `b` back to it — a loop that counts its iterations in r0. */
 const COUNT_LOOP = [0xe2800001, 0xeafffffd];
@@ -84,9 +84,9 @@ describe('Gba run loop: debugger stops', () => {
     // The frame ends with the instruction during which its last cycle passed.
     expect(gba.scheduler.currentCycle - CYCLES_PER_FRAME).toBeGreaterThanOrEqual(0);
     expect(gba.scheduler.currentCycle - CYCLES_PER_FRAME).toBeLessThan(LONGEST_INSTRUCTION);
-    expect(nextHBlank(gba)).toBe(CYCLES_PER_FRAME + HDRAW_CYCLES);
+    expect(nextHBlank(gba)).toBe(CYCLES_PER_FRAME + HBLANK_START_CYCLE);
     expect(gba.runFrame()).toBe('done');
-    expect(nextHBlank(gba)).toBe(2 * CYCLES_PER_FRAME + HDRAW_CYCLES);
+    expect(nextHBlank(gba)).toBe(2 * CYCLES_PER_FRAME + HBLANK_START_CYCLE);
   });
 
   it('a frame runs the loop at its ARM7TDMI cost from ROM', () => {
@@ -100,7 +100,7 @@ describe('Gba run loop: debugger stops', () => {
     const gba = boot(COUNT_LOOP);
     expect(gba.runScanline()).toBe('done');
     expect(gba.scanline).toBe(1);
-    expect(nextHBlank(gba)).toBe(CYCLES_PER_SCANLINE + HDRAW_CYCLES);
+    expect(nextHBlank(gba)).toBe(CYCLES_PER_SCANLINE + HBLANK_START_CYCLE);
     for (let i = 0; i < 227; i++) {
       gba.runScanline();
     }

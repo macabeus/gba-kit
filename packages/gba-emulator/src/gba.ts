@@ -37,8 +37,7 @@ import {
   DmaStartTiming,
   EventId,
   GbaButton,
-  HBLANK_CYCLES,
-  HDRAW_CYCLES,
+  HBLANK_START_CYCLE,
   TOTAL_SCANLINES,
   VISIBLE_SCANLINES,
 } from './types.js';
@@ -179,7 +178,7 @@ export class Gba {
 
     // Start at line 0, where the V-count comparison runs like on any other line
     this.display.setScanline(0);
-    this.#scheduleHDraw(this.scheduler.currentCycle);
+    this.#scheduleHBlank(this.scheduler.currentCycle);
   }
 
   /** Load a ROM into the system */
@@ -382,31 +381,30 @@ export class Gba {
 
   // ─── Scanline Timing ──────────────────────────────────────────────
 
-  /** A line began at the cycle `lineStart`: the PPU draws it now, and HBlank comes HDRAW_CYCLES later. */
-  #scheduleHDraw(lineStart: number): void {
-    // Render the scanline at the START of HDraw (not at HBlank).
-    // On real GBA, the PPU reads VRAM during HDraw. Games write sprite tile
-    // data during HBlank/VBlank and may clear it during HDraw (expecting the
-    // PPU to have already consumed it). Rendering here ensures the PPU sees
-    // the correct VRAM state before the CPU can modify it.
+  /** A line began at the cycle `lineStart`: its HBlank comes HBLANK_START_CYCLE later. */
+  #scheduleHBlank(lineStart: number): void {
+    this.scheduler.scheduleAt(EventId.HBlank, lineStart + HBLANK_START_CYCLE, (due) => this.#onHBlank(due));
+  }
+
+  #onHBlank(due: number): void {
+    // The PPU has drawn the line when HBlank begins, from the registers and memory as the CPU left
+    // them during the line's HDraw, so a write a V-count IRQ handler makes shows on that same line
+    // (mGBA video.c _startHblank calls drawScanline here).
     if (this.#currentScanline < VISIBLE_SCANLINES) {
       this.ppu.renderScanline(this.#currentScanline, this.bus);
     }
 
-    this.scheduler.scheduleAt(EventId.HBlank, lineStart + HDRAW_CYCLES, (due) => this.#onHBlank(due));
-  }
-
-  #onHBlank(due: number): void {
     this.#eventSink?.({ kind: 'hblank', scanline: this.#currentScanline });
     this.display.enterHBlank(due);
 
-    // HBlank DMA (PPU already rendered at the start of HDraw)
     if (this.#currentScanline < VISIBLE_SCANLINES) {
       this.dma.trigger(DmaStartTiming.HBlank, due);
     }
 
     // The line ends 1232 cycles after it began, on the hardware grid however late this ran.
-    this.scheduler.scheduleAt(EventId.HBlankEnd, due + HBLANK_CYCLES, (end) => this.#onHBlankEnd(end));
+    this.scheduler.scheduleAt(EventId.HBlankEnd, due + CYCLES_PER_SCANLINE - HBLANK_START_CYCLE, (end) =>
+      this.#onHBlankEnd(end),
+    );
   }
 
   #onHBlankEnd(due: number): void {
@@ -424,7 +422,7 @@ export class Gba {
       this.#onVBlankStart(due);
     }
 
-    this.#scheduleHDraw(due);
+    this.#scheduleHBlank(due);
   }
 
   #onVBlankStart(due: number): void {
@@ -529,7 +527,7 @@ export class Gba {
     this.apu.reset();
     this.#installBiosStub();
     this.display.setScanline(0);
-    this.#scheduleHDraw(this.scheduler.currentCycle);
+    this.#scheduleHBlank(this.scheduler.currentCycle);
   }
 
   /**

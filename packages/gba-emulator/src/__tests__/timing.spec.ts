@@ -1,6 +1,6 @@
 /**
  * The cycle model: wait states from WAITCNT, instruction costs, one clock read mid-run, DMA and
- * interrupt timing. The expected numbers come from the
+ * interrupt timing, and the PPU drawing a line at HBlank. The expected numbers come from the
  * hardware where a test ROM measured them (mgba-suite src/timing.c, src/timer-irq.c) and from GBATEK.
  */
 import { describe, expect, it } from 'vitest';
@@ -195,5 +195,38 @@ describe('DMA and interrupt timing', () => {
     scheduler.tick(1);
     expect(irq.irqPending()).toBe(true);
     expect(irq.halted).toBe(false);
+  });
+
+  it('the PPU draws a line at HBlank: a V-count IRQ handler’s palette write shows on its own line', () => {
+    const HANDLER = [
+      0xe3a00405, // mov r0, #0x05000000
+      0xe3a0101f, // mov r1, #0x1f
+      0xe1c010b0, // strh r1, [r0]       backdrop red
+      0xe3a00301, // mov r0, #0x04000000
+      0xe2800c02, // add r0, r0, #0x200
+      0xe3a01004, // mov r1, #4
+      0xe1c010b2, // strh r1, [r0, #2]   acknowledge the V-count IRQ
+      0xe12fff1e, // bx lr
+    ];
+    const gba = machine([
+      0xe3a00301, // mov r0, #0x04000000
+      0xe3a01000, // mov r1, #0
+      0xe1c010b0, // strh r1, [r0]       DISPCNT: mode 0, nothing on, the backdrop shows
+      0xe59f1018, // ldr r1, =0x5020
+      0xe1c010b4, // strh r1, [r0, #4]   DISPSTAT: LYC 80, V-count IRQ
+      0xe2802c02, // add r2, r0, #0x200
+      0xe3a01004, // mov r1, #4
+      0xe1c210b0, // strh r1, [r2]       IE: V-count
+      0xe3a01001, // mov r1, #1
+      0xe1c210b8, // strh r1, [r2, #8]   IME
+      0xeafffffe, // b .
+      0x00005020,
+    ]);
+    HANDLER.forEach((w, i) => gba.bus.write32(IWRAM + i * 4, w));
+    gba.bus.write32(0x03007ffc, IWRAM);
+    gba.runFrame();
+    const pixel = (line: number): number => gba.ppu.getFramebuffer()[line * 240]!;
+    expect(pixel(80)).not.toBe(pixel(79));
+    expect(pixel(80)).toBe(pixel(159));
   });
 });

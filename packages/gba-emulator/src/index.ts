@@ -44,6 +44,7 @@ export {
   FRAME_RATE,
   GbaButton,
   HBLANK_CYCLES,
+  HBLANK_START_CYCLE,
   HDRAW_CYCLES,
   IrqFlag,
   MMIO,
