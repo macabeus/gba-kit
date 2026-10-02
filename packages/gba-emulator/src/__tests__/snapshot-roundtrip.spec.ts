@@ -139,6 +139,30 @@ describe('snapshot round trip', () => {
     expect(fresh.serialize()).toEqual(original);
   });
 
+  it('memory control, DMA3’s Game Pak DRQ bit and the BIOS latch are restored; old snapshots take the BIOS’s values', () => {
+    const gba = boot(TIMER_SPIN);
+    gba.bus.write32(0x04000800, 0x0e000020);
+    gba.bus.write16(0x040000de, 0x0800);
+    gba.bus.latchBiosOpcode(0xe3a02004);
+    gba.runFrame();
+    const snap = gba.serialize();
+    expect(snap.bus.memoryControl).toBe(0x0e000020);
+    expect(snap.dma.channels[3]!.gamePakDrq).toBe(true);
+    expect(snap.bus.lastBiosRead).toBe(0xe3a02004);
+
+    const fresh = boot(TIMER_SPIN);
+    fresh.deserialize(snap);
+    expect(fresh.serialize()).toEqual(snap);
+    expect(fresh.bus.read32(0)).toBe(0xe3a02004);
+
+    const legacy = { ...snap, bus: { ...snap.bus }, dma: { channels: snap.dma.channels.map((c) => ({ ...c })) } };
+    delete legacy.bus.memoryControl;
+    delete legacy.dma.channels[3]!.gamePakDrq;
+    fresh.deserialize(legacy);
+    expect(fresh.bus.read32(0x04000800)).toBe(0x0d000020);
+    expect(fresh.bus.read16(0x040000de) & 0x0800).toBe(0);
+  });
+
   it('frameCount is restored, and an old snapshot without it reads as 0', () => {
     const gba = boot(TIMER_SPIN);
     gba.runFrame();

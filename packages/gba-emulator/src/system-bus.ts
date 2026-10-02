@@ -5,15 +5,21 @@
  * appropriate subsystem based on address ranges.
  *
  * Memory map:
- *   0x00000000-0x00003FFF  BIOS (16 KB)
+ *   0x00000000-0x00003FFF  BIOS (16 KB, readable only while the CPU executes in it)
  *   0x02000000-0x0203FFFF  EWRAM (256 KB)
  *   0x03000000-0x03007FFF  IWRAM (32 KB)
  *   0x04000000-0x040003FE  I/O Registers (MMIO)
+ *   0x04000800             Internal Memory Control (mirrored every 64 KB)
  *   0x05000000-0x050003FF  Palette RAM (1 KB)
  *   0x06000000-0x06017FFF  VRAM (96 KB)
  *   0x07000000-0x070003FF  OAM (1 KB)
  *   0x08000000-0x09FFFFFF  Game Pak ROM (up to 32 MB)
  *   0x0E000000-0x0E00FFFF  Game Pak SRAM (64 KB)
+ *
+ * Reads of unmapped memory return open bus: the last opcode the CPU fetched.
+ *
+ * References: GBATEK "GBA Memory Map", "GBA I/O Map", "GBA Unpredictable Things";
+ * mGBA src/gba/memory.c and src/gba/io.c; NanoBoyAdvance src/nba/src/bus.
  */
 import type { MemoryBus } from '@gba-kit/arm-emulator';
 
@@ -23,7 +29,7 @@ import type { InputController } from './input.js';
 import type { InterruptController } from './interrupts.js';
 import type { EepromSnapshot, SystemBusSnapshot } from './savestate.js';
 import type { TimerController } from './timers.js';
-import { MMIO } from './types.js';
+import { BIOS_LATCH_AFTER_BOOT, MMIO } from './types.js';
 import type { WriteOrigin } from './write-source.js';
 
 /** A committed write reported to a data watchpoint. */
@@ -80,6 +86,94 @@ const MIN_SAVE_ID = Math.min(...SAVE_TYPE_STRINGS.map(([prefix]) => prefix.lengt
 
 /** The EEPROM chip's array: 64 Kbit, which a 4 Kbit cartridge uses the first 512 bytes of. */
 const EEPROM_BYTES = 0x2000;
+
+/**
+ * The CPU as the bus sees it: where it executes, which decides whether the BIOS is readable, and
+ * the opcodes in its prefetch pipeline, which are what an open-bus read returns. `ArmCpu` is one.
+ */
+export interface BusCpu {
+  readonly registers: Uint32Array;
+  readonly cpsr: number;
+  /** [$+8] in ARM state, [$+4] in Thumb state while the instruction at $ executes */
+  readonly prefetchedOpcode: number;
+  /** [$+4] in ARM state, [$+2] in Thumb state */
+  readonly decodedOpcode: number;
+}
+
+const BIOS_SIZE = 0x4000;
+const CPSR_THUMB = 1 << 5;
+
+const IO_BASE = 0x04000000;
+
+/** The I/O register file: offsets 0x000-0x3FF. Above it the region is unmapped but for memory control. */
+const IO_SIZE = 0x400;
+
+/**
+ * GBATEK "Memory Control - 4000800h": a 32-bit register, mirrored every 64 KB of the I/O region.
+ * The BIOS leaves it at 0D000020h. Bits 0-3, 5, 24-31 are read/write; the others read 0.
+ */
+const MEMORY_CONTROL = 0x800;
+const MEMORY_CONTROL_RESET = 0x0d000020;
+const MEMORY_CONTROL_MASK = 0xff00002f;
+
+/** The halfwords the APU decodes: SOUND1CNT_L-SOUNDBIAS (0x8C and 0x8E are unused) and wave RAM. */
+function isApuRegister(offset: number): boolean {
+  return offset >= 0x60 && offset < 0xa0 && offset !== 0x8c && offset !== 0x8e;
+}
+
+const FIFO_A = 0xa0;
+const FIFO_B = 0xa4;
+const DMA_FIRST = 0xb0;
+const DMA_END = 0xe0;
+const TIMERS_FIRST = 0x100;
+const TIMERS_END = 0x110;
+
+/** An I/O halfword a write sets and a read sees as open bus; a debugger still sees the write. */
+const WRITE_ONLY = -1;
+/** An unused I/O halfword: writes go nowhere, reads see open bus. */
+const UNUSED = -2;
+
+/**
+ * How each I/O halfword the register file stores reads back: the mask of its readable bits,
+ * WRITE_ONLY or UNUSED. A mask of 0 is an unused halfword that reads 0. The registers a subsystem
+ * owns (sound, DMA, timers, keypad, interrupts, WAITCNT, POSTFLG) are decoded
+ * before this table. GBATEK "GBA I/O Map"; mGBA io.c GBAIORead.
+ */
+const IO_READ_MASKS = ((): Int32Array => {
+  const table = new Int32Array(IO_SIZE >> 1).fill(UNUSED);
+  const set = (offset: number, mask: number, halfwords = 1): void => {
+    table.fill(mask, offset >> 1, (offset >> 1) + halfwords);
+  };
+  set(0x000, 0xffff); // DISPCNT
+  set(0x002, 0x0001); // green swap
+  set(0x004, 0xffff, 2); // DISPSTAT, VCOUNT
+  set(0x008, 0xdfff, 2); // BG0CNT, BG1CNT: bit 13 (area overflow) exists on BG2 and BG3 only
+  set(0x00c, 0xffff, 2); // BG2CNT, BG3CNT
+  set(0x010, WRITE_ONLY, 0x1c); // BGxHOFS/VOFS, BG2/BG3 PA-PD, X, Y, WIN0H-WIN1V
+  set(0x048, 0x3f3f, 2); // WININ, WINOUT
+  set(0x04c, WRITE_ONLY); // MOSAIC
+  set(0x050, 0x3fff); // BLDCNT
+  set(0x052, 0x1f1f); // BLDALPHA
+  set(0x054, WRITE_ONLY); // BLDY
+  set(FIFO_A, WRITE_ONLY, 4); // FIFO_A, FIFO_B
+  // The serial port's registers hold what is written to them; no transfer logic stands behind them.
+  set(0x120, 0xffff, 6); // SIODATA32/SIOMULTI0-3, SIOCNT, SIOMLT_SEND
+  set(0x134, 0xffff); // RCNT
+  set(0x136, 0);
+  set(0x140, 0xffff); // JOYCNT
+  set(0x142, 0);
+  set(0x150, 0xffff, 5); // JOY_RECV, JOY_TRANS, JOYSTAT
+  set(0x15a, 0);
+  set(0x206, 0); // the high half of WAITCNT's word
+  set(0x20a, 0); // the high half of IME's word
+  set(0x302, 0);
+  return table;
+})();
+
+/** The halfword `value` writes into `current` through the byte lanes `mask` selects. */
+function merge(current: number, value: number, mask: number): number {
+  return ((current & ~mask) | (value & mask)) >>> 0;
+}
 
 function matchesAt(rom: Uint8Array, at: number, text: string): boolean {
   for (let i = 0; i < text.length; i++) {
@@ -140,8 +234,15 @@ export class GbaSystemBus implements MemoryBus {
   /** POSTFLG register */
   #postflg = 0;
 
-  /** Last BIOS read value (for open-bus protection) */
-  #lastBiosRead = 0;
+  /**
+   * The BIOS read-protection latch: the last BIOS word read while the CPU executed in the BIOS,
+   * which is what a BIOS read from anywhere else returns (GBATEK "BIOS Memory"). The real BIOS
+   * leaves [0DCh+8] in it at boot.
+   */
+  #biosLatch = BIOS_LATCH_AFTER_BOOT;
+
+  /** Internal Memory Control (0x04000800) */
+  #memoryControl = MEMORY_CONTROL_RESET;
 
   // Subsystem references (set during GBA construction)
   #interrupts!: InterruptController;
@@ -150,8 +251,14 @@ export class GbaSystemBus implements MemoryBus {
   #input!: InputController;
   #apu!: Apu;
 
-  /** Display control registers (written via MMIO, read by PPU) */
-  readonly mmioRegisters = new Uint8Array(0x400);
+  /** Until a CPU is connected, the bus sees one held in reset: at PC 0 with an empty pipeline. */
+  #cpu: BusCpu = { registers: new Uint32Array(16), cpsr: 0xd3, prefetchedOpcode: 0, decodedOpcode: 0 };
+
+  /**
+   * The I/O register file. Display registers are stored here and the PPU reads them from it; the
+   * bytes of a write-only register hold the last value written, which debug views show.
+   */
+  readonly mmioRegisters = new Uint8Array(IO_SIZE);
 
   /** Callback when BG2/BG3 reference point registers are written (for PPU ref point reload) */
   onBgRefPointWrite?: (bgIndex: 2 | 3, isX: boolean) => void;
@@ -281,12 +388,22 @@ export class GbaSystemBus implements MemoryBus {
     dma: DmaController;
     input: InputController;
     apu: Apu;
+    cpu: BusCpu;
   }): void {
     this.#interrupts = parts.interrupts;
     this.#timers = parts.timers;
     this.#dma = parts.dma;
     this.#input = parts.input;
     this.#apu = parts.apu;
+    this.#cpu = parts.cpu;
+  }
+
+  /**
+   * Set the BIOS read-protection latch to the opcode the BIOS fetched last, for BIOS code the
+   * HLE runs without fetching it (an SWI, which the real BIOS leaves through the same code).
+   */
+  latchBiosOpcode(opcode: number): void {
+    this.#biosLatch = opcode >>> 0;
   }
 
   /** Load BIOS ROM data */
@@ -390,9 +507,11 @@ export class GbaSystemBus implements MemoryBus {
    * arrays without any of the bus's side effects (an EEPROM read through the bus
    * clocks its serial protocol; this never does). `readable` counts the leading
    * bytes that map to something; the rest of `data` is zero and must not be shown
-   * as memory contents. Mirrors resolve to their canonical bytes. MMIO is decoded
-   * the way a CPU read would see it, which for the registers modelled here is
-   * side-effect free.
+   * as memory contents. Mirrors resolve to their canonical bytes. The BIOS reads
+   * whole, whatever its read protection would give the CPU. MMIO is decoded the way
+   * a CPU read sees it, side-effect free, except that a write-only register shows
+   * the value last written to it and an unused one shows 0, where the CPU would
+   * read open bus.
    */
   peek(address: number, length: number): { data: Uint8Array; readable: number } {
     const data = new Uint8Array(length);
@@ -412,17 +531,19 @@ export class GbaSystemBus implements MemoryBus {
     const offset = addr & 0x00ffffff;
     switch ((addr >>> 24) & 0xff) {
       case 0x00:
-        return offset < 0x4000 ? this.#bios[offset]! : null;
+        return offset < BIOS_SIZE ? this.#bios[offset]! : null;
       case 0x02:
         return this.ewram[addr & 0x3ffff]!;
       case 0x03:
         return this.iwram[addr & 0x7fff]!;
       case 0x04:
-        return offset < 0x400 ? this.#mmioRead8(addr) : null;
+        return this.#isIoMapped(offset) ? (this.#ioRead16(offset & ~1, true) >>> ((offset & 1) * 8)) & 0xff : null;
       case 0x05:
         return this.palette[addr & 0x3ff]!;
-      case 0x06:
-        return this.vram[this.#mirrorVram(addr)]!;
+      case 0x06: {
+        const vramOffset = this.#vramOffset(addr);
+        return vramOffset < 0 ? 0 : this.vram[vramOffset]!;
+      }
       case 0x07:
         return this.oam[addr & 0x3ff]!;
       case 0x08:
@@ -461,7 +582,7 @@ export class GbaSystemBus implements MemoryBus {
           this.iwram[addr & 0x7fff] = value;
           break;
         case 0x04:
-          if ((addr & 0x00ffffff) >= 0x400) {
+          if (!this.#isIoMapped(addr & 0x00ffffff)) {
             return written;
           }
           this.#mmioWrite8(addr, value);
@@ -469,9 +590,14 @@ export class GbaSystemBus implements MemoryBus {
         case 0x05:
           this.palette[addr & 0x3ff] = value;
           break;
-        case 0x06:
-          this.vram[this.#mirrorVram(addr)] = value;
+        case 0x06: {
+          const vramOffset = this.#vramOffset(addr);
+          if (vramOffset < 0) {
+            return written;
+          }
+          this.vram[vramOffset] = value;
           break;
+        }
         case 0x07:
           this.oam[addr & 0x3ff] = value;
           break;
@@ -514,16 +640,15 @@ export class GbaSystemBus implements MemoryBus {
     const offset = addr & 0x00ffffff;
     switch ((addr >>> 24) & 0xff) {
       case 0x00:
-        return offset < 0x4000 ? { region: 'BIOS' } : null;
+        return offset < BIOS_SIZE ? { region: 'BIOS' } : null;
       case 0x02:
         return { region: 'EWRAM' };
       case 0x03:
         return { region: 'IWRAM' };
       case 0x04:
-        // The register file this bus backs, exactly: mmioRegisters is 0x400 bytes and
-        // every access is masked into it. Nothing models the memory-control register
-        // at 0x04000800, so reporting it as I/O would assert something untrue.
-        return offset < 0x400 ? { region: 'MMIO' } : null;
+        // The register file and the memory-control register mirrored above it; the rest
+        // of the region decodes nothing.
+        return this.#isIoMapped(offset) ? { region: 'MMIO' } : null;
       case 0x05:
         return { region: 'palette RAM' };
       case 0x06:
@@ -536,7 +661,8 @@ export class GbaSystemBus implements MemoryBus {
       case 0x0b:
       case 0x0c:
         // The wait-state mirrors all address the same cartridge, so what decides is
-        // the offset into it — past the end of the loaded ROM reads as 0.
+        // the offset into it — past the end of the loaded ROM nothing answers, and a read
+        // there returns the address the cartridge bus last carried.
         return (addr & 0x01ffffff) < this.#rom.length ? { region: 'ROM' } : null;
       case 0x0d:
         // Not cartridge data: a wide read here is an EEPROM serial transaction that
@@ -568,7 +694,7 @@ export class GbaSystemBus implements MemoryBus {
     const region = (address >>> 24) & 0xff;
     switch (region) {
       case 0x00:
-        return this.#readBios8(address);
+        return (this.#readBios32(address & ~3) >>> ((address & 3) * 8)) & 0xff;
       case 0x02:
         return this.ewram[address & 0x3ffff]!;
       case 0x03:
@@ -577,8 +703,10 @@ export class GbaSystemBus implements MemoryBus {
         return this.#mmioRead8(address);
       case 0x05:
         return this.palette[address & 0x3ff]!;
-      case 0x06:
-        return this.vram[this.#mirrorVram(address)]!;
+      case 0x06: {
+        const offset = this.#vramOffset(address);
+        return offset < 0 ? 0 : this.vram[offset]!;
+      }
       case 0x07:
         return this.oam[address & 0x3ff]!;
       case 0x08:
@@ -594,7 +722,7 @@ export class GbaSystemBus implements MemoryBus {
       case 0x0f:
         return this.#hasSram ? this.sram[address & 0xffff]! : 0xff;
       default:
-        return 0; // Open bus
+        return (this.#openBus() >>> ((address & 3) * 8)) & 0xff;
     }
   }
 
@@ -611,7 +739,7 @@ export class GbaSystemBus implements MemoryBus {
     const region = (addr >>> 24) & 0xff;
     switch (region) {
       case 0x00:
-        return this.#readBios8(addr) | (this.#readBios8(addr + 1) << 8);
+        return (this.#readBios32(addr & ~3) >>> ((addr & 2) * 8)) & 0xffff;
       case 0x02:
         return this.#read16From(this.ewram, addr & 0x3ffff);
       case 0x03:
@@ -620,8 +748,10 @@ export class GbaSystemBus implements MemoryBus {
         return this.#mmioRead16(addr);
       case 0x05:
         return this.#read16From(this.palette, addr & 0x3ff);
-      case 0x06:
-        return this.#read16From(this.vram, this.#mirrorVram(addr));
+      case 0x06: {
+        const offset = this.#vramOffset(addr);
+        return offset < 0 ? 0 : this.#read16From(this.vram, offset);
+      }
       case 0x07:
         return this.#read16From(this.oam, addr & 0x3ff);
       case 0x08:
@@ -643,7 +773,7 @@ export class GbaSystemBus implements MemoryBus {
         return byte | (byte << 8);
       }
       default:
-        return 0;
+        return (this.#openBus() >>> ((addr & 2) * 8)) & 0xffff;
     }
   }
 
@@ -671,8 +801,10 @@ export class GbaSystemBus implements MemoryBus {
         return this.#mmioRead32(addr);
       case 0x05:
         return this.#read32From(this.palette, addr & 0x3ff);
-      case 0x06:
-        return this.#read32From(this.vram, this.#mirrorVram(addr));
+      case 0x06: {
+        const offset = this.#vramOffset(addr);
+        return offset < 0 ? 0 : this.#read32From(this.vram, offset);
+      }
       case 0x07:
         return this.#read32From(this.oam, addr & 0x3ff);
       case 0x08:
@@ -694,7 +826,7 @@ export class GbaSystemBus implements MemoryBus {
         return (byte | (byte << 8) | (byte << 16) | (byte << 24)) >>> 0;
       }
       default:
-        return 0;
+        return this.#openBus();
     }
   }
 
@@ -721,16 +853,12 @@ export class GbaSystemBus implements MemoryBus {
         }
         break;
       case 0x06:
-        // VRAM: 8-bit writes duplicate to halfword in BG area only.
-        // 8-bit writes to OBJ VRAM area are ignored on real hardware.
+        // VRAM: an 8-bit write stores the byte on both halves of its halfword in BG VRAM,
+        // and OBJ VRAM drops it.
         {
-          const a = this.#mirrorVram(address);
-          const dispcnt = this.mmioRegisters[0]! | (this.mmioRegisters[1]! << 8);
-          const mode = dispcnt & 7;
-          // OBJ boundary: 0x10000 in tile modes (0-2), 0x14000 in bitmap modes (3-5)
-          const objBoundary = mode >= 3 ? 0x14000 : 0x10000;
-          if (a >= objBoundary) {
-            committed = false; // Ignore 8-bit writes to OBJ VRAM
+          const a = this.#vramOffset(address);
+          if (a < 0 || a >= this.#objVramBoundary()) {
+            committed = false;
             break;
           }
           const aligned = a & ~1;
@@ -774,9 +902,15 @@ export class GbaSystemBus implements MemoryBus {
       case 0x05:
         this.#write16To(this.palette, addr & 0x3ff, value);
         break;
-      case 0x06:
-        this.#write16To(this.vram, this.#mirrorVram(addr), value);
+      case 0x06: {
+        const offset = this.#vramOffset(addr);
+        if (offset < 0) {
+          committed = false;
+          break;
+        }
+        this.#write16To(this.vram, offset, value);
         break;
+      }
       case 0x07:
         this.#write16To(this.oam, addr & 0x3ff, value);
         break;
@@ -823,9 +957,15 @@ export class GbaSystemBus implements MemoryBus {
       case 0x05:
         this.#write32To(this.palette, addr & 0x3ff, value);
         break;
-      case 0x06:
-        this.#write32To(this.vram, this.#mirrorVram(addr), value);
+      case 0x06: {
+        const offset = this.#vramOffset(addr);
+        if (offset < 0) {
+          committed = false;
+          break;
+        }
+        this.#write32To(this.vram, offset, value);
         break;
+      }
       case 0x07:
         this.#write32To(this.oam, addr & 0x3ff, value);
         break;
@@ -854,31 +994,74 @@ export class GbaSystemBus implements MemoryBus {
     }
   }
 
-  // ─── BIOS Access ──────────────────────────────────────────────────
+  // ─── Open Bus ─────────────────────────────────────────────────────
 
-  #readBios8(address: number): number {
-    // TODO: proper open-bus protection (only readable during BIOS execution)
-    const value = this.#bios[address & 0x3fff]!;
-    this.#lastBiosRead = value;
-    return value;
+  /**
+   * What a read of unmapped memory returns: the bus still carries the CPU's last instruction
+   * fetch (GBATEK "GBA Unpredictable Things"; mGBA GBALoadBad; NanoBoyAdvance Bus::ReadOpenBus).
+   * In ARM state that is [$+8]. In Thumb state the fetch is the halfword [$+4], and the other half
+   * of the word comes from the bus the code runs from: a 16-bit bus repeats [$+4], the 32-bit BIOS
+   * and OAM buses and IWRAM keep the neighbouring halfword of the same word.
+   */
+  #openBus(): number {
+    const cpu = this.#cpu;
+    const fetched = cpu.prefetchedOpcode;
+    if ((cpu.cpsr & CPSR_THUMB) === 0) {
+      return fetched >>> 0;
+    }
+    // registers[15] is $+2 while the instruction at $ executes
+    const pc = (cpu.registers[15]! - 2) >>> 0;
+    const decoded = cpu.decodedOpcode;
+    switch (pc >>> 24) {
+      case 0x00:
+      case 0x07: {
+        if (pc & 2) {
+          return (decoded | (fetched << 16)) >>> 0; // [$+2], [$+4]
+        }
+        const next =
+          pc >>> 24 === 0x00
+            ? this.#read16From(this.#bios, (pc + 6) & 0x3ffe)
+            : this.#read16From(this.oam, (pc + 6) & 0x3fe);
+        return (fetched | (next << 16)) >>> 0; // [$+4], [$+6]
+      }
+      case 0x03:
+        return pc & 2 ? (decoded | (fetched << 16)) >>> 0 : (fetched | (decoded << 16)) >>> 0;
+      default:
+        return (fetched | (fetched << 16)) >>> 0;
+    }
   }
 
+  /** The open-bus halfword on the lane `address` selects. */
+  #openBus16(address: number): number {
+    return (this.#openBus() >>> ((address & 2) * 8)) & 0xffff;
+  }
+
+  // ─── BIOS Access ──────────────────────────────────────────────────
+
+  /**
+   * The BIOS word at `address` (word-aligned). The BIOS answers only while the CPU executes in
+   * it, and each such read sets the protection latch; a read from code anywhere else returns the
+   * latch (GBATEK "BIOS Memory"; NanoBoyAdvance Bus::ReadBIOS). Past 16 KB nothing answers.
+   */
   #readBios32(address: number): number {
-    const offset = address & 0x3fff;
-    this.#lastBiosRead =
-      (this.#bios[offset]! |
-        (this.#bios[offset + 1]! << 8) |
-        (this.#bios[offset + 2]! << 16) |
-        (this.#bios[offset + 3]! << 24)) >>>
-      0;
-    return this.#lastBiosRead;
+    if (address >= BIOS_SIZE) {
+      return this.#openBus();
+    }
+    if (this.#cpu.registers[15]! < BIOS_SIZE) {
+      this.#biosLatch = this.#read32From(this.#bios, address);
+    }
+    return this.#biosLatch;
   }
 
   // ─── ROM Access ───────────────────────────────────────────────────
 
+  // Past the end of the cartridge, nothing drives the shared address/data lines, and a halfword
+  // read returns the low 16 bits of the halfword address that was latched on them:
+  // (address / 2) & 0xFFFF (GBATEK "GBA Unpredictable Things"; mGBA LOAD_CART).
+
   #readRom8(address: number): number {
     const offset = address & 0x01ffffff;
-    return offset < this.#rom.length ? this.#rom[offset]! : 0;
+    return offset < this.#rom.length ? this.#rom[offset]! : ((address >>> 1) >>> ((address & 1) * 8)) & 0xff;
   }
 
   #readRom16(address: number): number {
@@ -886,7 +1069,7 @@ export class GbaSystemBus implements MemoryBus {
     if (offset + 1 < this.#rom.length) {
       return this.#rom[offset]! | (this.#rom[offset + 1]! << 8);
     }
-    return 0;
+    return (address >>> 1) & 0xffff;
   }
 
   #readRom32(address: number): number {
@@ -900,7 +1083,7 @@ export class GbaSystemBus implements MemoryBus {
         0
       );
     }
-    return 0;
+    return (((address >>> 1) & 0xffff) | (((address + 2) >>> 1) << 16)) >>> 0;
   }
 
   // ─── VRAM Mirroring ───────────────────────────────────────────────
@@ -917,8 +1100,10 @@ export class GbaSystemBus implements MemoryBus {
         return (0x03000000 | (address & 0x7fff)) >>> 0;
       case 0x05:
         return (0x05000000 | (address & 0x3ff)) >>> 0;
-      case 0x06:
-        return (0x06000000 | this.#mirrorVram(address)) >>> 0;
+      case 0x06: {
+        const offset = this.#vramOffset(address);
+        return offset < 0 ? address >>> 0 : (0x06000000 | offset) >>> 0;
+      }
       case 0x07:
         return (0x07000000 | (address & 0x3ff)) >>> 0;
       case 0x0e:
@@ -929,55 +1114,71 @@ export class GbaSystemBus implements MemoryBus {
     }
   }
 
-  #mirrorVram(address: number): number {
-    let offset = address & 0x1ffff;
-    // VRAM is 96KB. Addresses 0x10000-0x17FFF mirror to 0x10000-0x17FFF.
-    // Addresses 0x18000-0x1FFFF mirror back to 0x10000-0x17FFF.
-    if (offset >= 0x18000) {
-      offset -= 0x8000;
-    }
-    return offset;
+  /** Where OBJ VRAM starts: 0x10000 in the tile modes (0-2), 0x14000 in the bitmap modes (3-5). */
+  #objVramBoundary(): number {
+    return (this.mmioRegisters[0]! & 7) >= 3 ? 0x14000 : 0x10000;
   }
 
-  // ─── MMIO Read ────────────────────────────────────────────────────
+  /**
+   * The VRAM byte `address` selects, or -1 where nothing answers. VRAM is 96 KB in a 128 KB
+   * window: 0x18000-0x1FFFF mirrors the 32 KB OBJ area at 0x10000-0x17FFF. In the bitmap modes
+   * the frame buffers reach 0x14000, and the first half of that mirror, 0x18000-0x1BFFF, would land
+   * on bitmap memory below the OBJ boundary; there reads return 0 and writes are dropped
+   * (mGBA LOAD_VRAM/STORE_VRAM; NanoBoyAdvance ReadVRAM_OBJ).
+   */
+  #vramOffset(address: number): number {
+    const offset = address & 0x1ffff;
+    if (offset < 0x18000) {
+      return offset;
+    }
+    if (offset < 0x1c000 && this.#objVramBoundary() === 0x14000) {
+      return -1;
+    }
+    return offset - 0x8000;
+  }
+
+  // ─── I/O Registers ────────────────────────────────────────────────
+
+  // I/O sits on a 16-bit bus, so every access reaches a register through #ioRead16 and #ioWrite16
+  // whatever its width: a byte access drives one byte lane of the halfword, and a word access two
+  // halfwords (GBATEK "GBA I/O Map"; mGBA GBAIOWrite8/GBAIOWrite32). A register owned by a
+  // subsystem is decoded by that subsystem; display and serial registers live in mmioRegisters.
+
+  /** Whether `offset` (into the I/O region) decodes to a register. */
+  #isIoMapped(offset: number): boolean {
+    return offset < IO_SIZE || (offset & 0xfffc) === MEMORY_CONTROL;
+  }
 
   #mmioRead8(address: number): number {
-    // Special-case registers that need live computation
-    const aligned = address & ~1;
-    const shift = (address & 1) * 8;
-    const value16 = this.#mmioRead16(aligned);
-    return (value16 >> shift) & 0xff;
+    return (this.#ioRead16(address & 0x00fffffe, false) >>> ((address & 1) * 8)) & 0xff;
   }
 
   #mmioRead16(address: number): number {
-    const reg = address & 0x3fe;
+    return this.#ioRead16(address & 0x00fffffe, false);
+  }
 
-    switch (address & 0x04fffffe) {
-      // Timers
-      case MMIO.TM0CNT_L:
-        return this.#timers.readCounter(0);
-      case MMIO.TM0CNT_H:
-        return this.#timers.readControl(0);
-      case MMIO.TM1CNT_L:
-        return this.#timers.readCounter(1);
-      case MMIO.TM1CNT_H:
-        return this.#timers.readControl(1);
-      case MMIO.TM2CNT_L:
-        return this.#timers.readCounter(2);
-      case MMIO.TM2CNT_H:
-        return this.#timers.readControl(2);
-      case MMIO.TM3CNT_L:
-        return this.#timers.readCounter(3);
-      case MMIO.TM3CNT_H:
-        return this.#timers.readControl(3);
+  #mmioRead32(address: number): number {
+    const offset = address & 0x00fffffc;
+    return (this.#ioRead16(offset, false) | (this.#ioRead16(offset + 2, false) << 16)) >>> 0;
+  }
 
-      // Input
+  /**
+   * The I/O halfword at `offset` (even) as the CPU reads it. With `peek`, as a debugger sees it:
+   * the same value without side effects, the last write for a write-only register, and 0 where
+   * the CPU would read open bus.
+   */
+  #ioRead16(offset: number, peek: boolean): number {
+    if (offset >= IO_SIZE) {
+      if ((offset & 0xfffc) === MEMORY_CONTROL) {
+        return (this.#memoryControl >>> ((offset & 2) * 8)) & 0xffff;
+      }
+      return peek ? 0 : this.#openBus16(offset);
+    }
+    switch (IO_BASE | offset) {
       case MMIO.KEYINPUT:
         return this.#input.readKeyInput();
       case MMIO.KEYCNT:
         return this.#input.readKeyCnt();
-
-      // Interrupts
       case MMIO.IE:
         return this.#interrupts.readIe();
       case MMIO.IF:
@@ -987,250 +1188,184 @@ export class GbaSystemBus implements MemoryBus {
       case MMIO.WAITCNT:
         return this.#waitcnt;
       case MMIO.POSTFLG:
-        return this.#postflg;
+        return this.#postflg; // HALTCNT, the high byte, reads 0
+    }
+    if (offset >= TIMERS_FIRST && offset < TIMERS_END) {
+      const index = (offset - TIMERS_FIRST) >> 2;
+      return offset & 2 ? this.#timers.readControl(index) : this.#timers.readCounter(index);
+    }
+    if (offset >= DMA_FIRST && offset < DMA_END) {
+      return this.#dmaRead16(offset, peek);
+    }
+    if (isApuRegister(offset)) {
+      return this.#apu.readRegister(offset);
+    }
+    const mask = IO_READ_MASKS[offset >> 1]!;
+    if (mask >= 0) {
+      return this.#latch16(offset) & mask;
+    }
+    if (peek) {
+      return mask === WRITE_ONLY ? this.#latch16(offset) : 0;
+    }
+    return this.#openBus16(offset);
+  }
 
-      // DMA control registers (read-only: only CNT_H is readable)
-      case MMIO.DMA0CNT_H:
-        return this.#dma.readControl(0);
-      case MMIO.DMA1CNT_H:
-        return this.#dma.readControl(1);
-      case MMIO.DMA2CNT_H:
-        return this.#dma.readControl(2);
-      case MMIO.DMA3CNT_H:
-        return this.#dma.readControl(3);
-
-      default: {
-        // Audio registers (0x60-0x9F, handled by APU)
-        if (reg >= 0x60 && reg <= 0x9f) {
-          return this.#apu.readRegister(reg);
-        }
-        // Display registers stored in mmioRegisters array
-        return this.mmioRegisters[reg]! | (this.mmioRegisters[reg + 1]! << 8);
-      }
+  /** DMA registers: SAD and DAD are write-only, CNT_L reads 0, CNT_H is readable (GBATEK "DMA Transfers"). */
+  #dmaRead16(offset: number, peek: boolean): number {
+    const index = ((offset - DMA_FIRST) / 12) | 0;
+    const register = (offset - DMA_FIRST) % 12;
+    switch (register) {
+      case 0:
+      case 2:
+        return peek ? (this.#dma.readSrcLatch(index) >>> (register * 8)) & 0xffff : this.#openBus16(offset);
+      case 4:
+      case 6:
+        return peek ? (this.#dma.readDstLatch(index) >>> ((register - 4) * 8)) & 0xffff : this.#openBus16(offset);
+      case 8:
+        return peek ? this.#dma.readWordCountLatch(index) : 0;
+      default:
+        return this.#dma.readControl(index);
     }
   }
 
-  #mmioRead32(address: number): number {
-    return this.#mmioRead16(address) | (this.#mmioRead16(address + 2) << 16);
+  /** The halfword the register file holds at `offset`. */
+  #latch16(offset: number): number {
+    return this.mmioRegisters[offset]! | (this.mmioRegisters[offset + 1]! << 8);
   }
-
-  // ─── MMIO Write ───────────────────────────────────────────────────
 
   #mmioWrite8(address: number, value: number): void {
-    // Most MMIO registers are 16-bit; 8-bit writes need care.
-    // Reconstruct a 16-bit value and dispatch through the 16-bit handler
-    // for registers that need special handling (audio, timers, etc.).
-    const reg = address & 0x3ff;
-
-    if (address >= MMIO.HALTCNT && address <= MMIO.HALTCNT) {
-      // HALTCNT — write triggers halt
-      this.#interrupts.halted = true;
-      return;
-    }
-
-    // For registers that require special dispatch, merge with the existing
-    // byte and issue a 16-bit write so the subsystem handler sees the update.
-    const aligned = address & ~1;
-    const regAligned = aligned & 0x3fe;
-    if (
-      (regAligned >= 0x60 && regAligned <= 0x9e) || // Audio registers
-      regAligned === 0xa0 ||
-      regAligned === 0xa4 // FIFO
-    ) {
-      this.mmioRegisters[reg] = value & 0xff;
-      const lo = this.mmioRegisters[regAligned]!;
-      const hi = this.mmioRegisters[regAligned + 1]!;
-      this.#mmioWrite16(aligned, lo | (hi << 8));
-      return;
-    }
-
-    // Store in generic register array
-    this.mmioRegisters[reg] = value & 0xff;
+    const byte = value & 0xff;
+    this.#ioWrite16(address & 0x00fffffe, byte | (byte << 8), address & 1 ? 0xff00 : 0x00ff);
   }
 
   #mmioWrite16(address: number, value: number): void {
-    const reg = address & 0x3fe;
-
-    switch (address & 0x04fffffe) {
-      // Timers
-      case MMIO.TM0CNT_L:
-        this.#timers.writeReload(0, value);
-        return;
-      case MMIO.TM0CNT_H:
-        this.#timers.writeControl(0, value);
-        return;
-      case MMIO.TM1CNT_L:
-        this.#timers.writeReload(1, value);
-        return;
-      case MMIO.TM1CNT_H:
-        this.#timers.writeControl(1, value);
-        return;
-      case MMIO.TM2CNT_L:
-        this.#timers.writeReload(2, value);
-        return;
-      case MMIO.TM2CNT_H:
-        this.#timers.writeControl(2, value);
-        return;
-      case MMIO.TM3CNT_L:
-        this.#timers.writeReload(3, value);
-        return;
-      case MMIO.TM3CNT_H:
-        this.#timers.writeControl(3, value);
-        return;
-
-      // Input
-      case MMIO.KEYCNT:
-        this.#input.writeKeyCnt(value);
-        return;
-
-      // Interrupts
-      case MMIO.IE:
-        this.#interrupts.writeIe(value);
-        return;
-      case MMIO.IF:
-        this.#interrupts.writeIf(value);
-        return;
-      case MMIO.IME:
-        this.#interrupts.writeIme(value);
-        return;
-      case MMIO.WAITCNT:
-        this.#waitcnt = value & 0x5fff;
-        return;
-
-      // DMA
-      case MMIO.DMA0SAD:
-        this.#dma.writeSrcAddr(0, value);
-        return;
-      case MMIO.DMA0DAD:
-        this.#dma.writeDstAddr(0, value);
-        return;
-      case MMIO.DMA0CNT_L:
-        this.#dma.writeWordCount(0, value);
-        return;
-      case MMIO.DMA0CNT_H:
-        this.#dma.writeControl(0, value);
-        return;
-      case MMIO.DMA1SAD:
-        this.#dma.writeSrcAddr(1, value);
-        return;
-      case MMIO.DMA1DAD:
-        this.#dma.writeDstAddr(1, value);
-        return;
-      case MMIO.DMA1CNT_L:
-        this.#dma.writeWordCount(1, value);
-        return;
-      case MMIO.DMA1CNT_H:
-        this.#dma.writeControl(1, value);
-        return;
-      case MMIO.DMA2SAD:
-        this.#dma.writeSrcAddr(2, value);
-        return;
-      case MMIO.DMA2DAD:
-        this.#dma.writeDstAddr(2, value);
-        return;
-      case MMIO.DMA2CNT_L:
-        this.#dma.writeWordCount(2, value);
-        return;
-      case MMIO.DMA2CNT_H:
-        this.#dma.writeControl(2, value);
-        return;
-      case MMIO.DMA3SAD:
-        this.#dma.writeSrcAddr(3, value);
-        return;
-      case MMIO.DMA3DAD:
-        this.#dma.writeDstAddr(3, value);
-        return;
-      case MMIO.DMA3CNT_L:
-        this.#dma.writeWordCount(3, value);
-        return;
-      case MMIO.DMA3CNT_H:
-        this.#dma.writeControl(3, value);
-        return;
-
-      case MMIO.POSTFLG:
-        this.#postflg |= value & 1;
-        return;
-      case MMIO.HALTCNT:
-        this.#interrupts.halted = true;
-        return;
-
-      default: {
-        // Audio registers (0x60-0x9F, handled by APU)
-        if (reg >= 0x60 && reg <= 0x9f) {
-          this.#apu.writeRegister(reg, value);
-          // Also store in mmioRegisters for PPU/debug reads
-          this.mmioRegisters[reg] = value & 0xff;
-          this.mmioRegisters[reg + 1] = (value >> 8) & 0xff;
-          return;
-        }
-
-        // FIFO writes (32-bit, but may arrive as two 16-bit writes)
-        if (reg === 0xa0) {
-          this.#apu.writeFifo(0, value);
-          return;
-        }
-        if (reg === 0xa4) {
-          this.#apu.writeFifo(1, value);
-          return;
-        }
-
-        // Store in generic register array (display, etc.)
-        this.mmioRegisters[reg] = value & 0xff;
-        this.mmioRegisters[reg + 1] = (value >> 8) & 0xff;
-
-        // Detect writes to BG2/BG3 reference point registers — PPU must
-        // reload its internal accumulators (this is how per-scanline affine
-        // effects like Mode 7 floors work).
-        if (reg >= 0x28 && reg <= 0x2e) {
-          this.onBgRefPointWrite?.(2, reg < 0x2c);
-        } else if (reg >= 0x38 && reg <= 0x3e) {
-          this.onBgRefPointWrite?.(3, reg < 0x3c);
-        }
-        return;
-      }
-    }
+    this.#ioWrite16(address & 0x00fffffe, value & 0xffff, 0xffff);
   }
 
   #mmioWrite32(address: number, value: number): void {
-    // DMA source/dest addresses are 32-bit writes
-    switch (address & 0x04fffffc) {
-      case MMIO.DMA0SAD:
-        this.#dma.writeSrcAddr(0, value);
+    const offset = address & 0x00fffffc;
+    // The sound FIFOs take a whole word at once.
+    if (offset === FIFO_A || offset === FIFO_B) {
+      this.#storeLatch(offset, value & 0xffff, 0xffff);
+      this.#storeLatch(offset + 2, value >>> 16, 0xffff);
+      this.#apu.writeFifo(offset === FIFO_A ? 0 : 1, value);
+      return;
+    }
+    this.#ioWrite16(offset, value & 0xffff, 0xffff);
+    this.#ioWrite16(offset + 2, value >>> 16, 0xffff);
+  }
+
+  /**
+   * Write the byte lanes `mask` selects of the I/O halfword at `offset` (even). The register keeps
+   * its other byte: each case merges the written lanes into what the register holds and hands its
+   * owner the whole halfword.
+   */
+  #ioWrite16(offset: number, value: number, mask: number): void {
+    if (offset >= IO_SIZE) {
+      if ((offset & 0xfffc) === MEMORY_CONTROL) {
+        const shift = (offset & 2) * 8;
+        this.#memoryControl = (merge(this.#memoryControl, value << shift, mask << shift) & MEMORY_CONTROL_MASK) >>> 0;
+      }
+      return;
+    }
+    switch (IO_BASE | offset) {
+      case MMIO.KEYINPUT:
+        return; // read-only
+      case MMIO.KEYCNT:
+        this.#input.writeKeyCnt(merge(this.#input.readKeyCnt(), value, mask));
         return;
-      case MMIO.DMA0DAD:
-        this.#dma.writeDstAddr(0, value);
+      case MMIO.IE:
+        this.#interrupts.writeIe(merge(this.#interrupts.readIe(), value, mask));
         return;
-      case MMIO.DMA1SAD:
-        this.#dma.writeSrcAddr(1, value);
+      case MMIO.IF:
+        // Writing 1 acknowledges, so the lanes not written acknowledge nothing.
+        this.#interrupts.writeIf(value & mask);
         return;
-      case MMIO.DMA1DAD:
-        this.#dma.writeDstAddr(1, value);
+      case MMIO.IME:
+        this.#interrupts.writeIme(merge(this.#interrupts.readIme(), value, mask));
         return;
-      case MMIO.DMA2SAD:
-        this.#dma.writeSrcAddr(2, value);
+      case MMIO.WAITCNT:
+        this.#waitcnt = merge(this.#waitcnt, value, mask) & 0x5fff;
         return;
-      case MMIO.DMA2DAD:
-        this.#dma.writeDstAddr(2, value);
-        return;
-      case MMIO.DMA3SAD:
-        this.#dma.writeSrcAddr(3, value);
-        return;
-      case MMIO.DMA3DAD:
-        this.#dma.writeDstAddr(3, value);
-        return;
-      // FIFO A/B: 32-bit writes go directly to APU
-      case MMIO.FIFO_A:
-        this.#apu.writeFifo(0, value);
-        return;
-      case MMIO.FIFO_B:
-        this.#apu.writeFifo(1, value);
-        return;
-      default:
-        // Split into two 16-bit writes
-        this.#mmioWrite16(address, value & 0xffff);
-        this.#mmioWrite16(address + 2, (value >>> 16) & 0xffff);
+      case MMIO.POSTFLG:
+        // Two byte registers: POSTFLG, and HALTCNT, which halts the CPU when written.
+        if (mask & 0x00ff) {
+          this.#postflg |= value & 1;
+        }
+        if (mask & 0xff00) {
+          this.#interrupts.halted = true;
+        }
         return;
     }
+    if (offset >= TIMERS_FIRST && offset < TIMERS_END) {
+      const index = (offset - TIMERS_FIRST) >> 2;
+      if (offset & 2) {
+        this.#timers.writeControl(index, merge(this.#timers.readControl(index), value, mask));
+      } else {
+        this.#timers.writeReload(index, merge(this.#timers.readReload(index), value, mask));
+      }
+      return;
+    }
+    if (offset >= DMA_FIRST && offset < DMA_END) {
+      this.#dmaWrite16(offset, value, mask);
+      return;
+    }
+    if (isApuRegister(offset)) {
+      this.#apu.writeRegister(offset, this.#storeLatch(offset, value, mask));
+      return;
+    }
+    if (offset >= FIFO_A && offset < FIFO_A + 8) {
+      const halfword = this.#storeLatch(offset, value, mask);
+      if ((offset & 2) === 0) {
+        this.#apu.writeFifo(offset === FIFO_A ? 0 : 1, halfword);
+      }
+      return;
+    }
+    if (IO_READ_MASKS[offset >> 1] === UNUSED) {
+      return;
+    }
+    this.#storeLatch(offset, value, mask);
+    // A write to BG2X/BG2Y/BG3X/BG3Y, of any width, reloads the PPU's internal reference point
+    // (how per-scanline affine effects like Mode 7 floors work).
+    if (offset >= 0x28 && offset <= 0x2e) {
+      this.onBgRefPointWrite?.(2, offset < 0x2c);
+    } else if (offset >= 0x38 && offset <= 0x3e) {
+      this.onBgRefPointWrite?.(3, offset < 0x3c);
+    }
+  }
+
+  /** DMA registers: SAD and DAD are 32-bit latches written a halfword at a time. */
+  #dmaWrite16(offset: number, value: number, mask: number): void {
+    const index = ((offset - DMA_FIRST) / 12) | 0;
+    const register = (offset - DMA_FIRST) % 12;
+    switch (register) {
+      case 0:
+      case 2: {
+        const shift = register * 8;
+        this.#dma.writeSrcAddr(index, merge(this.#dma.readSrcLatch(index), value << shift, mask << shift));
+        return;
+      }
+      case 4:
+      case 6: {
+        const shift = (register - 4) * 8;
+        this.#dma.writeDstAddr(index, merge(this.#dma.readDstLatch(index), value << shift, mask << shift));
+        return;
+      }
+      case 8:
+        this.#dma.writeWordCount(index, merge(this.#dma.readWordCountLatch(index), value, mask));
+        return;
+      default:
+        this.#dma.writeControl(index, merge(this.#dma.readControl(index), value, mask));
+        return;
+    }
+  }
+
+  /** Merge the written lanes into the register file's halfword at `offset`; returns the halfword. */
+  #storeLatch(offset: number, value: number, mask: number): number {
+    const halfword = merge(this.#latch16(offset), value, mask);
+    this.mmioRegisters[offset] = halfword & 0xff;
+    this.mmioRegisters[offset + 1] = halfword >>> 8;
+    return halfword;
   }
 
   // ─── Byte Array Helpers ───────────────────────────────────────────
@@ -1270,7 +1405,8 @@ export class GbaSystemBus implements MemoryBus {
       hasSram: this.#hasSram,
       waitcnt: this.#waitcnt,
       postflg: this.#postflg,
-      lastBiosRead: this.#lastBiosRead,
+      lastBiosRead: this.#biosLatch,
+      memoryControl: this.#memoryControl,
       eeprom: this.#eeprom.serialize(),
     };
   }
@@ -1288,7 +1424,8 @@ export class GbaSystemBus implements MemoryBus {
     // say, like #rom, and a state of a cartridge without one must not take this one's away
     this.#waitcnt = snap.waitcnt;
     this.#postflg = snap.postflg;
-    this.#lastBiosRead = snap.lastBiosRead;
+    this.#biosLatch = snap.lastBiosRead >>> 0;
+    this.#memoryControl = snap.memoryControl ?? MEMORY_CONTROL_RESET;
     this.#eeprom.deserialize(snap.eeprom);
   }
 
@@ -1304,7 +1441,8 @@ export class GbaSystemBus implements MemoryBus {
     this.mmioRegisters.fill(0);
     this.#waitcnt = 0;
     this.#postflg = 0;
-    this.#lastBiosRead = 0;
+    this.#biosLatch = BIOS_LATCH_AFTER_BOOT;
+    this.#memoryControl = MEMORY_CONTROL_RESET;
   }
 }
 

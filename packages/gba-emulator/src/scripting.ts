@@ -1124,7 +1124,8 @@ export class ScriptingEngine {
 
   /**
    * The opcode stored at `address`, read the way a debugger reads memory: side-effect free, so no
-   * read watchpoint fires and no EEPROM transaction is clocked.
+   * read watchpoint fires and no EEPROM transaction is clocked, and as stored where the CPU's view
+   * differs, as the BIOS does while the CPU runs outside it.
    */
   #peekOpcode(address: number, size: 2 | 4): number {
     const { data } = this.#gba.bus.peek(address, size);

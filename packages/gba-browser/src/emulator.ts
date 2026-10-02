@@ -260,7 +260,8 @@ export class EmulatorBridge {
 
     for (let i = 0; i < count; i++) {
       // Code is read the way a debugger reads memory: side-effect free, so no read watchpoint
-      // fires and no EEPROM transaction is clocked.
+      // fires and no EEPROM transaction is clocked, and as stored where the CPU's view differs,
+      // as the BIOS does while the CPU runs outside it.
       const { data } = this.#gba.bus.peek(addr, isThumb ? 2 : 4);
       if (isThumb) {
         const instr = data[0]! | (data[1]! << 8);

@@ -25,6 +25,8 @@ import { GbaSystemBus } from './system-bus.js';
 import { TimerController } from './timers.js';
 import {
   BIOS_IRQ_STUB_PUSH,
+  BIOS_LATCH_AFTER_IRQ,
+  BIOS_LATCH_AFTER_SWI,
   BOOT_STACK_POINTERS,
   CYCLES_PER_SCANLINE,
   DmaStartTiming,
@@ -110,6 +112,25 @@ export class Gba {
     this.ppu = new Ppu();
     this.apu = new Apu();
 
+    // The HLE BIOS reaches this machine's interrupt controller and no other.
+    this.#biosEnv = {
+      onIntrWait: (flags) => {
+        this.interrupts.intrWaitFlags = flags;
+      },
+    };
+
+    // Create CPU with GBA BIOS SWI handler. The real BIOS leaves every SWI through the same
+    // code, so its read-protection latch holds that code's last fetch afterwards (mGBA GBASwi16).
+    this.armCpu = new ArmCpu(this.bus, {
+      swiHandler: (cpu, swiNumber) => {
+        handleSwi(cpu, swiNumber, this.#biosEnv);
+        this.bus.latchBiosOpcode(BIOS_LATCH_AFTER_SWI);
+      },
+    });
+    for (const [mode, sp] of BOOT_STACK_POINTERS) {
+      this.armCpu.setBankedSP(mode, sp);
+    }
+
     // Wire subsystem references
     this.bus.connect({
       interrupts: this.interrupts,
@@ -117,6 +138,7 @@ export class Gba {
       dma: this.dma,
       input: this.input,
       apu: this.apu,
+      cpu: this.armCpu,
     });
 
     // Connect APU to timers for DirectSound FIFO playback
@@ -142,19 +164,6 @@ export class Gba {
       setDmaSource: (channel, origin) => this.bus.setDmaSource(channel, origin),
       clearDmaSource: () => this.bus.clearDmaSource(),
     });
-
-    // The HLE BIOS reaches this machine's interrupt controller and no other.
-    this.#biosEnv = {
-      onIntrWait: (flags) => {
-        this.interrupts.intrWaitFlags = flags;
-      },
-    };
-
-    // Create CPU with GBA BIOS SWI handler
-    this.armCpu = new ArmCpu(this.bus, { swiHandler: (cpu, swiNumber) => handleSwi(cpu, swiNumber, this.#biosEnv) });
-    for (const [mode, sp] of BOOT_STACK_POINTERS) {
-      this.armCpu.setBankedSP(mode, sp);
-    }
 
     // Install HLE BIOS IRQ handler stub
     this.#installBiosStub();
@@ -588,5 +597,9 @@ export class Gba {
     this.bus.writeBios32(0x90, 0xe8bd500f);
     // 0x94: SUBS PC, LR, #4               — return from IRQ, restore CPSR
     this.bus.writeBios32(0x94, 0xe25ef004);
+    // 0x9C: fetched while 0x94 executes, so the BIOS read-protection latch holds it after an IRQ,
+    // as it holds the real BIOS's [0x13C+8]. The LDR PC at 0x8C fetches 0x94 the same way: during
+    // the user handler the latch holds the SUBS, the real BIOS's [0x134+8].
+    this.bus.writeBios32(0x9c, BIOS_LATCH_AFTER_IRQ);
   }
 }

@@ -35,6 +35,8 @@ interface DmaChannel {
   wordSize: boolean;
   /** Start timing */
   startTiming: DmaStartTiming;
+  /** Game Pak DRQ (DMA3CNT_H bit 11): stored and readable; DMA0-2 have no such bit */
+  gamePakDrq: boolean;
   /** IRQ on completion */
   irqEnable: boolean;
   /** DMA enabled */
@@ -96,6 +98,7 @@ export class DmaController {
         repeat: false,
         wordSize: false,
         startTiming: DmaStartTiming.Immediately,
+        gamePakDrq: false,
         irqEnable: false,
         enabled: false,
         startOrigin: ZERO_ORIGIN,
@@ -106,6 +109,21 @@ export class DmaController {
   /** Set memory access functions (called during system bus setup to break circular dep) */
   setMemoryAccess(memory: DmaMemoryAccess): void {
     this.#memory = memory;
+  }
+
+  /** DMAx_SAD as last written. The register is write-only: the CPU reads open bus there, a debugger reads this. */
+  readSrcLatch(index: number): number {
+    return this.#channels[index]!.srcLatch;
+  }
+
+  /** DMAx_DAD as last written (write-only, like DMAx_SAD). */
+  readDstLatch(index: number): number {
+    return this.#channels[index]!.dstLatch;
+  }
+
+  /** DMAx_CNT_L as last written (write-only: the CPU reads 0 there). */
+  readWordCountLatch(index: number): number {
+    return this.#channels[index]!.wordCountLatch;
   }
 
   /** Write source address (DMAx_SAD) — 27-bit for DMA0, 28-bit for DMA1-3 */
@@ -134,6 +152,7 @@ export class DmaController {
       ((ch.srcControl & 3) << 7) |
       (ch.repeat ? 1 << 9 : 0) |
       (ch.wordSize ? 1 << 10 : 0) |
+      (ch.gamePakDrq ? 1 << 11 : 0) |
       ((ch.startTiming & 3) << 12) |
       (ch.irqEnable ? 1 << 14 : 0) |
       (ch.enabled ? 1 << 15 : 0)
@@ -149,6 +168,7 @@ export class DmaController {
     ch.srcControl = ((value >> 7) & 3) as DmaAddrControl;
     ch.repeat = (value & (1 << 9)) !== 0;
     ch.wordSize = (value & (1 << 10)) !== 0;
+    ch.gamePakDrq = index === 3 && (value & (1 << 11)) !== 0;
     ch.startTiming = ((value >> 12) & 3) as DmaStartTiming;
     ch.irqEnable = (value & (1 << 14)) !== 0;
     ch.enabled = (value & (1 << 15)) !== 0;
@@ -319,6 +339,7 @@ export class DmaController {
         repeat: ch.repeat,
         wordSize: ch.wordSize,
         startTiming: ch.startTiming,
+        gamePakDrq: ch.gamePakDrq,
         irqEnable: ch.irqEnable,
         enabled: ch.enabled,
       })),
@@ -341,6 +362,7 @@ export class DmaController {
       ch.repeat = s.repeat;
       ch.wordSize = s.wordSize;
       ch.startTiming = s.startTiming as DmaStartTiming;
+      ch.gamePakDrq = s.gamePakDrq ?? false;
       ch.irqEnable = s.irqEnable;
       ch.enabled = s.enabled;
     }
@@ -361,6 +383,7 @@ export class DmaController {
       ch.repeat = false;
       ch.wordSize = false;
       ch.startTiming = DmaStartTiming.Immediately;
+      ch.gamePakDrq = false;
       ch.irqEnable = false;
       ch.enabled = false;
       this.#scheduler.cancel(DMA_EVENT_IDS[i]!);

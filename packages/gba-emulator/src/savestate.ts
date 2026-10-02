@@ -77,6 +77,8 @@ export interface DmaChannelSnapshot {
   repeat: boolean;
   wordSize: boolean;
   startTiming: number;
+  /** DMA3CNT_H bit 11. Older snapshots omit it and restore as false. */
+  gamePakDrq?: boolean;
   irqEnable: boolean;
   enabled: boolean;
 }
@@ -120,7 +122,10 @@ export interface SystemBusSnapshot {
   hasSram: boolean;
   waitcnt: number;
   postflg: number;
+  /** The BIOS read-protection latch: the last BIOS word read while the CPU executed in the BIOS. */
   lastBiosRead: number;
+  /** Internal Memory Control (0x04000800). Older snapshots omit it and restore as 0x0D000020, the BIOS's value. */
+  memoryControl?: number;
   eeprom: EepromSnapshot;
 }
 

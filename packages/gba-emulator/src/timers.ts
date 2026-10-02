@@ -75,6 +75,11 @@ export class TimerController {
     return ch.counter & 0xffff;
   }
 
+  /** The reload value as last written. TMxCNT_L reads the counter, so this is the write side's register. */
+  readReload(index: number): number {
+    return this.#channels[index]!.reload;
+  }
+
   /** Write timer reload value (TM0CNT_L etc.). Does NOT update running counter. */
   writeReload(index: number, value: number): void {
     this.#channels[index]!.reload = value & 0xffff;

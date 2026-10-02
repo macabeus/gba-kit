@@ -58,6 +58,16 @@ export const BOOT_STACK_POINTERS: ReadonlyArray<readonly [mode: number, sp: numb
 export const BIOS_IRQ_STUB_PUSH = 0xe92d500f;
 
 /**
+ * The opcodes the BIOS read-protection latch holds when code outside the BIOS reads it: the last
+ * opcode the real BIOS fetched before handing control back (GBATEK "BIOS Memory"). After boot it
+ * is [0DCh+8], after an SWI [188h+8], and after an IRQ [13Ch+8], the word the installed IRQ stub
+ * places behind its own return. During an IRQ handler it is [134h+8], the stub's return itself.
+ */
+export const BIOS_LATCH_AFTER_BOOT = 0xe129f000;
+export const BIOS_LATCH_AFTER_SWI = 0xe3a02004;
+export const BIOS_LATCH_AFTER_IRQ = 0xe55ec002;
+
+/**
  * The stub as something reading the machine's stack sees it: the mode it runs in,
  * and where the interrupted lr sits in the block it pushed. The offset is counted
  * off {@link BIOS_IRQ_STUB_PUSH}, since `stmfd` lays its registers out lowest

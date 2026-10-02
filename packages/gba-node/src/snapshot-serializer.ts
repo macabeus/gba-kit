@@ -63,6 +63,7 @@ export function serializeSnapshot(snap: GbaSnapshot): any {
       waitcnt: snap.bus.waitcnt,
       postflg: snap.bus.postflg,
       lastBiosRead: snap.bus.lastBiosRead,
+      memoryControl: snap.bus.memoryControl,
       eeprom: {
         data: typedArrayToBase64(snap.bus.eeprom.data),
         addrBits: snap.bus.eeprom.addrBits,
@@ -139,6 +140,7 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
       waitcnt: data.bus.waitcnt,
       postflg: data.bus.postflg,
       lastBiosRead: data.bus.lastBiosRead,
+      memoryControl: data.bus.memoryControl,
       eeprom: {
         data: base64ToUint8Array(data.bus.eeprom.data),
         addrBits: data.bus.eeprom.addrBits,
