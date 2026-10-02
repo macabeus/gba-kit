@@ -2,8 +2,9 @@
  * GBA PPU — Core
  *
  * Implements PpuInterface. The coordinator calls `beginScanline` at the start of every one
- * of the 228 lines and `renderScanline` once per visible line. Line-start work holds the
- * PPU's internal state, so it stays right wherever in the line the image is drawn:
+ * of the 228 lines, `latchDispcnt` 40 cycles into it, and `renderScanline` once per visible
+ * line. This work holds the PPU's internal state, so it stays right wherever in the line the
+ * image is drawn:
  * - the affine reference points step at the end of each visible line and reload from
  *   BGxX/BGxY at frame start and after a write;
  * - the BG mosaic counter steps with them;
@@ -68,7 +69,7 @@ export class Ppu implements PpuInterface {
   #refWritten = 0;
 
   /**
-   * DISPCNT sampled at the last three line starts, oldest first. A layer shows when it is
+   * DISPCNT sampled at the last three latches, oldest first. A layer shows when it is
    * enabled both in the oldest sample and in DISPCNT now, so enabling takes effect two lines
    * later and disabling at once (NBA ppu.cc LatchDISPCNT, `dispcnt_latch[0] & dispcnt`).
    */
@@ -190,6 +191,19 @@ export class Ppu implements PpuInterface {
     return this.#framebuffer;
   }
 
+  /**
+   * DISPCNT's layer enables pass through a three-line latch, shifted 40 cycles into the line on
+   * visible lines (and the line after them) and on the last three VBlank lines, so a change made
+   * earlier in VBlank is complete by line 0 (NanoBoyAdvance ppu.cc LatchDISPCNT).
+   */
+  latchDispcnt(line: number, bus: GbaSystemBus): void {
+    if (line <= VISIBLE_SCANLINES || line >= TOTAL_SCANLINES - 3) {
+      this.#dispcntLatch[0] = this.#dispcntLatch[1]!;
+      this.#dispcntLatch[1] = this.#dispcntLatch[2]!;
+      this.#dispcntLatch[2] = read16(bus.mmioRegisters, 0x00);
+    }
+  }
+
   /** Line-start work for `line` (0-227); runs before that line renders. */
   beginScanline(line: number, bus: GbaSystemBus): void {
     const mmio = bus.mmioRegisters;
@@ -198,14 +212,6 @@ export class Ppu implements PpuInterface {
     // The end of the previous visible line steps the BG mosaic counter and the affine points.
     if (line >= 1 && line <= VISIBLE_SCANLINES) {
       this.#finishVisibleLine(line - 1, mmio, dispcnt);
-    }
-
-    // DISPCNT is latched on visible lines (and the line after them) and on the last three
-    // VBlank lines, so a change made earlier in VBlank is complete by line 0.
-    if (line <= VISIBLE_SCANLINES || line >= TOTAL_SCANLINES - 3) {
-      this.#dispcntLatch[0] = this.#dispcntLatch[1]!;
-      this.#dispcntLatch[1] = this.#dispcntLatch[2]!;
-      this.#dispcntLatch[2] = dispcnt;
     }
 
     // Each window's vertical flip-flop turns on at its top line and off at its bottom line,

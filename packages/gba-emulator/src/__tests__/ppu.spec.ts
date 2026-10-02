@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { Gba } from '../gba.js';
 import { Ppu } from '../ppu/ppu.js';
 import { GbaSystemBus } from '../system-bus.js';
+import { DISPCNT_LATCH_CYCLE, EventId, HBLANK_START_CYCLE } from '../types.js';
 
 /** A 15-bit colour as the framebuffer shows it (each 5-bit channel shifted left by 3). */
 function rgb(r: number, g: number, b: number): number {
@@ -16,8 +17,8 @@ const WHITE = 0x7fff;
 
 /**
  * A PPU over a bare bus, driven line by line the way the coordinator does: each line
- * starts (`beginScanline`), then `atLineStart` may change the machine, then the line
- * renders. All 128 sprites start disabled.
+ * starts (`beginScanline`) and latches DISPCNT (`latchDispcnt`), then `duringLine` may
+ * change the machine, then the line renders. All 128 sprites start disabled.
  */
 function setup() {
   const bus = new GbaSystemBus();
@@ -37,10 +38,11 @@ function setup() {
   for (let i = 0; i < 128; i++) {
     oam(i, 1 << 9, 0, 0);
   }
-  const frame = (atLineStart?: (line: number) => void) => {
+  const frame = (duringLine?: (line: number) => void) => {
     for (let line = 0; line < 228; line++) {
       ppu.beginScanline(line, bus);
-      atLineStart?.(line);
+      ppu.latchDispcnt(line, bus);
+      duringLine?.(line);
       if (line < 160) {
         ppu.renderScanline(line, bus);
       }
@@ -501,6 +503,28 @@ describe('PPU: DISPCNT layer latch', () => {
 });
 
 describe('PPU: machine wiring', () => {
+  it('DISPCNT is latched 40 cycles into the line: a write before then makes that line’s latch', () => {
+    const start = () => {
+      const gba = new Gba();
+      gba.loadRom(new Uint8Array([0xfe, 0xff, 0xff, 0xea])); // b .
+      gba.runScanline(); // the first cycle of line 1
+      const lineStart = gba.scheduler.dueCycle(EventId.HBlank) - HBLANK_START_CYCLE;
+      expect(gba.scheduler.dueCycle(EventId.DispcntLatch)).toBe(lineStart + DISPCNT_LATCH_CYCLE);
+      return { gba, lineStart };
+    };
+
+    const early = start().gba;
+    early.bus.write16(0x04000000, 1 << 8);
+    early.runScanline();
+    expect(early.ppu.serialize().dispcntLatch![2]).toBe(1 << 8);
+
+    const { gba: late, lineStart } = start();
+    expect(late.runFrame(() => late.scheduler.currentCycle >= lineStart + DISPCNT_LATCH_CYCLE)).toBe('stopped');
+    late.bus.write16(0x04000000, 1 << 8);
+    late.runScanline();
+    expect(late.ppu.serialize().dispcntLatch![2]).toBe(0x0080); // the boot value: forced blank
+  });
+
   it('BG2PA and BG2PD power on as 1.0, so a bitmap shows one to one', () => {
     const gba = new Gba();
     gba.loadRom(new Uint8Array([0xfe, 0xff, 0xff, 0xea])); // b .

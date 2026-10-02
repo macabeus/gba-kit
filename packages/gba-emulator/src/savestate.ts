@@ -173,7 +173,7 @@ export interface PpuSnapshot {
   bg3RefY: number;
   /** BG2X, BG2Y, BG3X, BG3Y written since the last line start (bits 0-3). */
   refWritten?: number;
-  /** DISPCNT sampled at the last three line starts, oldest first. */
+  /** DISPCNT sampled at the last three latches, 40 cycles into the line, oldest first. */
   dispcntLatch?: number[];
   /** WIN0/WIN1 vertical flip-flops (bits 0-1) and horizontal flip-flops (bits 2-3). */
   windowFlags?: number;

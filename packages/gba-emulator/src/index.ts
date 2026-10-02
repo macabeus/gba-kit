@@ -39,6 +39,7 @@ export {
   CPU_FREQ,
   CYCLES_PER_FRAME,
   CYCLES_PER_SCANLINE,
+  DISPCNT_LATCH_CYCLE,
   DmaAddrControl,
   DmaStartTiming,
   EventId,

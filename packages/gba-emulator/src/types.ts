@@ -39,6 +39,12 @@ export const HBLANK_CYCLES = 272;
  */
 export const HBLANK_START_CYCLE = 1006;
 
+/**
+ * The cycle of a line at which the PPU latches DISPCNT for its layer enables (NanoBoyAdvance
+ * ppu.cc: `scheduler.Add(40, PPU_latch_dispcnt)` at every line start that latches).
+ */
+export const DISPCNT_LATCH_CYCLE = 40;
+
 /** Target frame rate (Hz) */
 export const FRAME_RATE = CPU_FREQ / CYCLES_PER_FRAME; // ~59.7275 Hz
 
@@ -122,6 +128,8 @@ export const enum EventId {
   Irq,
   /** A Normal-mode serial transfer completing (SerialPort) */
   Serial,
+  /** The PPU latching DISPCNT, DISPCNT_LATCH_CYCLE into a line */
+  DispcntLatch,
   /** Sentinel — total count of event types */
   Count,
 }

@@ -376,6 +376,31 @@ describe('snapshot round trip', () => {
     expect(fresh.bus.readBackup()![0x10010]).toBe(0x42);
   });
 
+  it('the DISPCNT latch event survives a restore; an old snapshot without its slot schedules it at the next line', () => {
+    const gba = boot(TIMER_SPIN);
+    gba.runFrame();
+    gba.runScanline(); // at the start of line 1, before its DISPCNT latch
+    const snap = gba.serialize();
+    expect(snap.scheduler.events[EventId.DispcntLatch]!.active).toBe(true);
+
+    const fresh = boot(TIMER_SPIN);
+    fresh.deserialize(snap);
+    expect(fresh.serialize()).toEqual(snap);
+    gba.runFrame();
+    fresh.runFrame();
+    expect(fresh.serialize()).toEqual(gba.serialize());
+
+    const legacy = {
+      ...snap,
+      scheduler: { ...snap.scheduler, events: snap.scheduler.events.slice(0, EventId.DispcntLatch) },
+    };
+    const old = boot(TIMER_SPIN);
+    old.deserialize(legacy);
+    expect(old.scheduler.isScheduled(EventId.DispcntLatch)).toBe(false);
+    expect(old.runScanline()).toBe('done');
+    expect(old.scheduler.isScheduled(EventId.DispcntLatch)).toBe(true);
+  });
+
   it('frameCount is restored, and an old snapshot without it reads as 0', () => {
     const gba = boot(TIMER_SPIN);
     gba.runFrame();

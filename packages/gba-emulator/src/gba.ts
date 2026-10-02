@@ -34,6 +34,7 @@ import {
   BIOS_LATCH_AFTER_SWI,
   BOOT_STACK_POINTERS,
   CYCLES_PER_SCANLINE,
+  DISPCNT_LATCH_CYCLE,
   DmaStartTiming,
   EventId,
   GbaButton,
@@ -54,6 +55,8 @@ const CARTRIDGE_ENTRY = 0x08000000;
 export interface PpuInterface {
   /** Line-start work, at the first cycle of every scanline (0-227) */
   beginScanline(line: number, bus: GbaSystemBus): void;
+  /** Latch DISPCNT, DISPCNT_LATCH_CYCLE into every scanline (0-227) */
+  latchDispcnt(line: number, bus: GbaSystemBus): void;
   /** Render a single visible scanline */
   renderScanline(line: number, bus: GbaSystemBus): void;
   /** Get the framebuffer */
@@ -376,12 +379,18 @@ export class Gba {
   // ─── Scanline Timing ──────────────────────────────────────────────
 
   /**
-   * A line began at the cycle `lineStart`: the PPU takes its line-start state (DISPCNT latch, affine
-   * reference points, mosaic counters, the OBJ line), and HBlank comes HBLANK_START_CYCLE later.
+   * A line began at the cycle `lineStart`: the PPU takes its line-start state (affine reference
+   * points, mosaic counters, window flip-flops, the OBJ line), latches DISPCNT DISPCNT_LATCH_CYCLE
+   * later, and HBlank comes HBLANK_START_CYCLE later.
    */
   #beginLine(lineStart: number): void {
     this.ppu.beginScanline(this.#currentScanline, this.bus);
+    this.scheduler.scheduleAt(EventId.DispcntLatch, lineStart + DISPCNT_LATCH_CYCLE, () => this.#onDispcntLatch());
     this.scheduler.scheduleAt(EventId.HBlank, lineStart + HBLANK_START_CYCLE, (due) => this.#onHBlank(due));
+  }
+
+  #onDispcntLatch(): void {
+    this.ppu.latchDispcnt(this.#currentScanline, this.bus);
   }
 
   #onHBlank(due: number): void {
@@ -493,6 +502,11 @@ export class Gba {
     }
     if (this.scheduler.isScheduled(EventId.HBlankEnd)) {
       this.scheduler.reattach(EventId.HBlankEnd, (due) => this.#onHBlankEnd(due));
+    }
+    // A snapshot from before the DISPCNT latch event restores without it: that one line keeps the
+    // previous line's latch, and the next line start schedules it again.
+    if (this.scheduler.isScheduled(EventId.DispcntLatch)) {
+      this.scheduler.reattach(EventId.DispcntLatch, () => this.#onDispcntLatch());
     }
     this.interrupts.reattachEvents();
     this.timers.reattachEvents();
