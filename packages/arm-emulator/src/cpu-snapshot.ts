@@ -13,4 +13,10 @@ export interface CpuSnapshot {
   usrBankedR8to12: Uint32Array;
   spsr: Uint32Array;
   halted: boolean;
+  /**
+   * The prefetch pipeline: [address of the decoded opcode (0xFFFFFFFF when flushed), decoded
+   * opcode, fetched opcode, 1 in Thumb state]. Snapshots taken before the pipeline was modelled
+   * lack it and restore with a flushed pipeline, which refills from memory at the next step.
+   */
+  pipeline?: Uint32Array;
 }

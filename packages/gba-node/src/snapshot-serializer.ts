@@ -39,6 +39,7 @@ export function serializeSnapshot(snap: GbaSnapshot): any {
       usrBankedR8to12: typedArrayToBase64(snap.cpu.usrBankedR8to12),
       spsr: typedArrayToBase64(snap.cpu.spsr),
       halted: snap.cpu.halted,
+      pipeline: snap.cpu.pipeline ? typedArrayToBase64(snap.cpu.pipeline) : undefined,
     },
     currentScanline: snap.currentScanline,
     inIrqHandler: snap.inIrqHandler,
@@ -116,6 +117,8 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
       usrBankedR8to12: base64ToUint32Array(data.cpu.usrBankedR8to12),
       spsr: base64ToUint32Array(data.cpu.spsr),
       halted: data.cpu.halted,
+      // Absent from states saved before the CPU modelled its prefetch pipeline.
+      pipeline: data.cpu.pipeline ? base64ToUint32Array(data.cpu.pipeline) : undefined,
     },
     currentScanline: data.currentScanline,
     inIrqHandler: data.inIrqHandler,

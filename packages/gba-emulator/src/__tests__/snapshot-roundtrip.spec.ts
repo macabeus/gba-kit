@@ -120,6 +120,25 @@ describe('snapshot round trip', () => {
     expect(fresh.serialize()).toEqual(snap);
   });
 
+  it("the CPU's prefetch pipeline is restored; an old snapshot without it refills from memory", () => {
+    const gba = boot(TIMER_SPIN);
+    gba.runFrame();
+    const snap = gba.serialize();
+    // Spinning on `b .`: the decoded opcode is the branch itself, at its own address.
+    expect(snap.cpu.pipeline![0]).toBe(0x08000010);
+    expect(snap.cpu.pipeline![1]).toBe(TIMER_SPIN[4]! >>> 0);
+    gba.runFrame();
+    const original = gba.serialize();
+
+    const legacy = { ...snap, cpu: { ...snap.cpu } };
+    delete legacy.cpu.pipeline;
+    const fresh = boot(TIMER_SPIN);
+    fresh.deserialize(legacy);
+    fresh.runFrame();
+    // The ROM is the memory the pipeline would refill from, so the two runs meet again.
+    expect(fresh.serialize()).toEqual(original);
+  });
+
   it('frameCount is restored, and an old snapshot without it reads as 0', () => {
     const gba = boot(TIMER_SPIN);
     gba.runFrame();

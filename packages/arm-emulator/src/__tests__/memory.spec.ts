@@ -91,13 +91,12 @@ describe('GbaMemory', () => {
       expect(mem.read16(0x02000000)).toBe(0x1234);
     });
 
-    it('aligns halfword reads', () => {
+    it('aligns halfword reads without rotating them', () => {
+      // MemoryBus contract: the bus returns the aligned halfword and the CPU rotates a misaligned
+      // LDRH, the same as GbaSystemBus.
       const mem = new GbaMemory();
       mem.write16(0x02000000, 0xaabb);
-      // Unaligned read rotates on ARMv4T
-      const val = mem.read16(0x02000001);
-      // (0xaabb >>> 8) | (0xaabb << 24) = 0xbb0000aa >>> 0
-      expect(val >>> 0).toBe(((0xaabb >>> 8) | (0xaabb << 24)) >>> 0);
+      expect(mem.read16(0x02000001)).toBe(0xaabb);
     });
 
     it('masks values to 16 bits', () => {
@@ -114,12 +113,20 @@ describe('GbaMemory', () => {
       expect(mem.read32(0x02000000)).toBe(0x12345678);
     });
 
-    it('rotates on unaligned word read', () => {
+    it('aligns word reads without rotating them', () => {
       const mem = new GbaMemory();
       mem.write32(0x02000000, 0x04030201);
-      // Reading from addr+1 (misaligned by 1 byte) rotates by 8
-      const val = mem.read32(0x02000001);
-      expect(val >>> 0).toBe(0x01040302);
+      for (const offset of [1, 2, 3]) {
+        expect(mem.read32(0x02000000 + offset)).toBe(0x04030201);
+      }
+    });
+
+    it('aligns misaligned writes', () => {
+      const mem = new GbaMemory();
+      mem.write32(0x02000003, 0x04030201);
+      mem.write16(0x02000005, 0xbbaa);
+      expect(mem.read32(0x02000000)).toBe(0x04030201);
+      expect(mem.read16(0x02000004)).toBe(0xbbaa);
     });
 
     it('handles unsigned values above 0x7fffffff', () => {

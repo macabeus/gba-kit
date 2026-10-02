@@ -15,6 +15,12 @@ export const SENTINEL_ADDR = 0xdeadbeee;
 /**
  * Abstract memory bus that the CPU reads/writes through.
  *
+ * Every access carries the address the CPU (or DMA) drives, misaligned ones included, and the bus
+ * aligns it the way the addressed memory does: a 16- or 32-bit memory ignores the low address
+ * bits of a halfword or word access, while an 8-bit memory (GBA SRAM) uses them to pick the byte.
+ * Reads return the aligned data unrotated; the CPU applies the ARM7TDMI rules for misaligned
+ * loads (rotation, LDRSH sign extension).
+ *
  * The full GBA emulator injects GbaSystemBus (dispatches to PPU, APU, etc.).
  */
 export interface MemoryBus {
