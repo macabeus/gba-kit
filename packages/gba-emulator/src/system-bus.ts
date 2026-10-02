@@ -1563,8 +1563,8 @@ export class GbaSystemBus implements MemoryBus {
       return;
     }
     this.#storeLatch(offset, value, mask);
-    // A write to BG2X/BG2Y/BG3X/BG3Y, of any width, has the PPU reload its internal reference
-    // point at the next line start (how per-scanline affine effects like Mode 7 floors work).
+    // A write to BG2X/BG2Y/BG3X/BG3Y, of any width, reloads the PPU's internal reference point
+    // (how per-scanline affine effects like Mode 7 floors work).
     if (offset >= 0x28 && offset <= 0x2e) {
       this.onBgRefPointWrite?.(2, offset < 0x2c);
     } else if (offset >= 0x38 && offset <= 0x3e) {

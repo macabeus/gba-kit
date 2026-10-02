@@ -157,7 +157,7 @@ export class Gba {
     this.apu.connectDma(this.dma);
 
     // Wire PPU ref point reload: when the game writes BG2X/BG2Y/BG3X/BG3Y, the PPU reloads
-    // its internal accumulator at the next line start (for per-scanline affine effects).
+    // its internal accumulator (for per-scanline affine effects).
     this.ppu.mmioRegisters = this.bus.mmioRegisters;
     this.bus.onBgRefPointWrite = (bgIndex, isX) => {
       this.ppu.reloadBgRefPoint(bgIndex, isX);

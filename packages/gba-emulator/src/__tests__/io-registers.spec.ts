@@ -134,15 +134,12 @@ describe('I/O writes of every width reach the register that owns the address', (
     expect(gba.interrupts.halted).toBe(false);
   });
 
-  it('a write of any width to BG2X/BG3Y reloads the internal reference point at the next line start', () => {
+  it('a write of any width to BG2X reloads the internal reference point', () => {
     const gba = boot();
     gba.bus.write8(IO + 0x29, 0x10);
+    expect(gba.ppu.serialize().bg2RefX).toBe(0x1000);
     gba.bus.write8(IO + 0x3e, 0x02); // BG3Y, low byte of the high half
-    expect(gba.ppu.serialize().refWritten).toBe(0b1001); // BG2X and BG3Y marked written
-    gba.runScanline();
-    const ppu = gba.ppu.serialize();
-    expect(ppu.bg2RefX).toBe(0x1000);
-    expect(ppu.bg3RefY).toBe(0x20000);
+    expect(gba.ppu.serialize().bg3RefY).toBe(0x20000);
   });
 });
 

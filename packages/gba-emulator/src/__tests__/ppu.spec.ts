@@ -18,7 +18,8 @@ const WHITE = 0x7fff;
 /**
  * A PPU over a bare bus, driven line by line the way the coordinator does: each line
  * starts (`beginScanline`) and latches DISPCNT (`latchDispcnt`), then `duringLine` may
- * change the machine, then the line renders. All 128 sprites start disabled.
+ * change the machine, then the line renders, then `inHBlank` may change it again. All 128
+ * sprites start disabled.
  */
 function setup() {
   const bus = new GbaSystemBus();
@@ -38,7 +39,7 @@ function setup() {
   for (let i = 0; i < 128; i++) {
     oam(i, 1 << 9, 0, 0);
   }
-  const frame = (duringLine?: (line: number) => void) => {
+  const frame = (duringLine?: (line: number) => void, inHBlank?: (line: number) => void) => {
     for (let line = 0; line < 228; line++) {
       ppu.beginScanline(line, bus);
       ppu.latchDispcnt(line, bus);
@@ -46,6 +47,7 @@ function setup() {
       if (line < 160) {
         ppu.renderScanline(line, bus);
       }
+      inHBlank?.(line);
     }
   };
   const px = (x: number, y: number) => ppu.getFramebuffer()[y * 240 + x]!;
@@ -314,12 +316,26 @@ describe('PPU: affine reference points', () => {
     expect(t.px(0, 5)).toBe(row(5));
   });
 
-  it('a write during a line reloads the point from the next line', () => {
+  it('a write before the line is drawn is that line’s origin (GBATEK: copied immediately)', () => {
     const t = rows();
     t.frame();
     t.frame((line) => {
       if (line === 20) {
         t.io32(0x2c, 50 << 8); // BG2Y = row 50
+      }
+    });
+    expect(t.px(0, 19)).toBe(row(19));
+    expect(t.px(0, 20)).toBe(row(50));
+    expect(t.px(0, 21)).toBe(row(51));
+  });
+
+  it('a write in HBlank is the next line’s origin, with no end-of-line step on top', () => {
+    const t = rows();
+    t.frame();
+    t.frame(undefined, (line) => {
+      if (line === 20) {
+        t.io(0x2c, 50 << 8); // BG2Y low half = row 50
+        t.io(0x2e, 0);
       }
     });
     expect(t.px(0, 20)).toBe(row(20));

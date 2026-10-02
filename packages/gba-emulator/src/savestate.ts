@@ -171,7 +171,7 @@ export interface PpuSnapshot {
   bg2RefY: number;
   bg3RefX: number;
   bg3RefY: number;
-  /** BG2X, BG2Y, BG3X, BG3Y written since the last line start (bits 0-3). */
+  /** BG2X, BG2Y, BG3X, BG3Y written since the last line was drawn (bits 0-3). */
   refWritten?: number;
   /** DISPCNT sampled at the last three latches, 40 cycles into the line, oldest first. */
   dispcntLatch?: number[];

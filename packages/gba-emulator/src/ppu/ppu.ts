@@ -65,7 +65,7 @@ export class Ppu implements PpuInterface {
   #bg2RefY = 0;
   #bg3RefX = 0;
   #bg3RefY = 0;
-  /** Reference point registers written since the last line start (REF_* bits). */
+  /** Reference point registers written since the last line was drawn (REF_* bits). */
   #refWritten = 0;
 
   /**
@@ -175,16 +175,20 @@ export class Ppu implements PpuInterface {
   }
 
   /**
-   * A write to BG2X/BG2Y/BG3X/BG3Y: the internal reference point reloads that axis from the
-   * register at the next line start, so a write during a line takes effect on the next one.
-   * GBATEK, LCD I/O BG Rotation/Scaling; NBA background.cc InitBackground (`bgx.written`).
+   * A write to BG2X/BG2Y/BG3X/BG3Y copies the register into that axis's internal reference point
+   * at once. GBATEK, LCD I/O BG Rotation/Scaling: "Writing to a reference point register by
+   * software outside of the Vblank period does immediately copy the new value to the corresponding
+   * internal register, that means: in the current frame, the new value specifies the origin of the
+   * <current> scanline". A write before the line is drawn is that line's origin; one after it (in
+   * HBlank) stays marked, so the next line start restores it over the end-of-line step and it is
+   * the next line's origin (mGBA video-software.c `bg->sx = bg->refx`, stepped after each line).
    */
   reloadBgRefPoint(bgIndex: 2 | 3, isX: boolean): void {
-    if (bgIndex === 2) {
-      this.#refWritten |= isX ? REF_BG2X : REF_BG2Y;
-    } else {
-      this.#refWritten |= isX ? REF_BG3X : REF_BG3Y;
+    const axis = bgIndex === 2 ? (isX ? REF_BG2X : REF_BG2Y) : isX ? REF_BG3X : REF_BG3Y;
+    if (this.mmioRegisters) {
+      this.#reloadAffineRefs(this.mmioRegisters, axis);
     }
+    this.#refWritten |= axis;
   }
 
   getFramebuffer(): Uint32Array {
@@ -257,6 +261,8 @@ export class Ppu implements PpuInterface {
     if (line < 0 || line >= SCREEN_HEIGHT) {
       return;
     }
+    // The line is drawn from the reference points as they stand, writes included.
+    this.#refWritten = 0;
 
     const mmio = bus.mmioRegisters;
     const dispcnt = read16(mmio, 0x00);
@@ -395,7 +401,7 @@ export class Ppu implements PpuInterface {
     return this.#bgMosaicY === 0 ? mosaicSizeY : 0;
   }
 
-  /** Reload the axes in `which` (REF_* bits) from BGxX/BGxY and clear their written flags. */
+  /** Reload the axes in `which` (REF_* bits) from BGxX/BGxY and clear their written marks. */
   #reloadAffineRefs(mmio: Uint8Array, which: number): void {
     if (which & REF_BG2X) {
       this.#bg2RefX = readSigned28_8(mmio, 0x28);
@@ -409,7 +415,7 @@ export class Ppu implements PpuInterface {
     if (which & REF_BG3Y) {
       this.#bg3RefY = readSigned28_8(mmio, 0x3c);
     }
-    this.#refWritten = 0;
+    this.#refWritten &= ~which;
   }
 
   /**
