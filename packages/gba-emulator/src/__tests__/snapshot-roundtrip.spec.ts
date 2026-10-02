@@ -168,6 +168,66 @@ describe('snapshot round trip', () => {
     expect(fresh.ppu.getFramebuffer()[0]).toBe(0xff0000f8);
   });
 
+  it("the APU's wave RAM banks, force-75% bit and FIFO latch survive a restore", () => {
+    /** Channel 3 playing bank 0 at forced 75% in dimension mode, bank 1 filled, FIFO A half-written. */
+    const scene = (): Gba => {
+      const gba = boot(TIMER_SPIN);
+      const io8 = (offset: number, value: number) => gba.bus.write8(0x04000000 + offset, value);
+      io8(0x84, 0x80);
+      io8(0x81, 0x44); // channel 3 left + right
+      io8(0x80, 0x77);
+      io8(0x82, 0x02);
+      io8(0x70, 0x40); // the CPU fills bank 0
+      for (let i = 0; i < 16; i++) {
+        io8(0x90 + i, 0x9f);
+      }
+      io8(0x70, 0x00); // ...then bank 1
+      for (let i = 0; i < 16; i++) {
+        io8(0x90 + i, 0x31);
+      }
+      io8(0x70, 0xa0); // play both banks
+      io8(0x73, 0x80); // force 75%
+      io8(0x75, 0x87); // restart at the top sample rate
+      gba.bus.write16(0x040000a2, 0x4433);
+      gba.runFrame();
+      return gba;
+    };
+
+    const original = scene();
+    const snap = original.serialize();
+    expect(snap.apu!.ch3.waveRam.length).toBe(32);
+    expect(snap.apu!.ch3.forceVolume).toBe(true);
+    expect(snap.apu!.dsA.latch).toBe(0x44330000);
+    original.bus.write16(0x040000a0, 0x2211);
+    original.runFrame();
+
+    const restored = boot(TIMER_SPIN);
+    restored.deserialize(snap);
+    expect(restored.serialize()).toEqual(snap);
+    restored.bus.write16(0x040000a0, 0x2211);
+    restored.runFrame();
+    expect(restored.serialize()).toEqual(original.serialize());
+  });
+
+  it('an older APU snapshot with one wave RAM bank, no force-75% bit and no FIFO latch loads', () => {
+    const gba = boot(TIMER_SPIN);
+    gba.runFrame();
+    const snap = gba.serialize();
+    const ch3 = { ...snap.apu!.ch3, waveRam: new Uint8Array(16).fill(0x5a) };
+    delete ch3.forceVolume;
+    const dsA = { ...snap.apu!.dsA };
+    delete dsA.latch;
+    const legacy = { ...snap, apu: { ...snap.apu!, ch3, dsA } };
+
+    const fresh = boot(TIMER_SPIN);
+    fresh.deserialize(legacy);
+    const apu = fresh.serialize().apu!;
+    // the single bank served playback and the CPU alike, so both banks take it
+    expect(Array.from(apu.ch3.waveRam)).toEqual(new Array(32).fill(0x5a));
+    expect(apu.ch3.forceVolume).toBe(false);
+    expect(apu.dsA.latch).toBe(0);
+  });
+
   it('held buttons survive a restore', () => {
     const gba = boot(TIMER_SPIN);
     gba.pressButton(GbaButton.A);

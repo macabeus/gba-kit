@@ -1012,7 +1012,7 @@ export class GbaSystemBus implements MemoryBus {
       default: {
         // Audio registers (0x60-0x9F, handled by APU)
         if (reg >= 0x60 && reg <= 0x9f) {
-          return this.#apu.readRegister(reg);
+          return this.#apu.readRegister16(reg);
         }
         // Display registers stored in mmioRegisters array
         return this.mmioRegisters[reg]! | (this.mmioRegisters[reg + 1]! << 8);
@@ -1027,9 +1027,8 @@ export class GbaSystemBus implements MemoryBus {
   // ─── MMIO Write ───────────────────────────────────────────────────
 
   #mmioWrite8(address: number, value: number): void {
-    // Most MMIO registers are 16-bit; 8-bit writes need care.
-    // Reconstruct a 16-bit value and dispatch through the 16-bit handler
-    // for registers that need special handling (audio, timers, etc.).
+    // HALTCNT and the sound registers act on single bytes; every other byte goes to the
+    // register file.
     const reg = address & 0x3ff;
 
     if (address >= MMIO.HALTCNT && address <= MMIO.HALTCNT) {
@@ -1038,19 +1037,9 @@ export class GbaSystemBus implements MemoryBus {
       return;
     }
 
-    // For registers that require special dispatch, merge with the existing
-    // byte and issue a 16-bit write so the subsystem handler sees the update.
-    const aligned = address & ~1;
-    const regAligned = aligned & 0x3fe;
-    if (
-      (regAligned >= 0x60 && regAligned <= 0x9e) || // Audio registers
-      regAligned === 0xa0 ||
-      regAligned === 0xa4 // FIFO
-    ) {
-      this.mmioRegisters[reg] = value & 0xff;
-      const lo = this.mmioRegisters[regAligned]!;
-      const hi = this.mmioRegisters[regAligned + 1]!;
-      this.#mmioWrite16(aligned, lo | (hi << 8));
+    // Audio registers, wave RAM and FIFOs (0x60-0xA7) take bytes natively
+    if (reg >= 0x60 && reg <= 0xa7) {
+      this.#apu.writeRegister8(reg, value);
       return;
     }
 
@@ -1165,22 +1154,9 @@ export class GbaSystemBus implements MemoryBus {
         return;
 
       default: {
-        // Audio registers (0x60-0x9F, handled by APU)
-        if (reg >= 0x60 && reg <= 0x9f) {
-          this.#apu.writeRegister(reg, value);
-          // Also store in mmioRegisters for PPU/debug reads
-          this.mmioRegisters[reg] = value & 0xff;
-          this.mmioRegisters[reg + 1] = (value >> 8) & 0xff;
-          return;
-        }
-
-        // FIFO writes (32-bit, but may arrive as two 16-bit writes)
-        if (reg === 0xa0) {
-          this.#apu.writeFifo(0, value);
-          return;
-        }
-        if (reg === 0xa4) {
-          this.#apu.writeFifo(1, value);
+        // Audio registers, wave RAM and FIFOs (0x60-0xA7, handled by APU)
+        if (reg >= 0x60 && reg <= 0xa7) {
+          this.#apu.writeRegister16(reg, value);
           return;
         }
 
@@ -1228,12 +1204,10 @@ export class GbaSystemBus implements MemoryBus {
       case MMIO.DMA3DAD:
         this.#dma.writeDstAddr(3, value);
         return;
-      // FIFO A/B: 32-bit writes go directly to APU
+      // FIFO A/B: a 32-bit write queues one word
       case MMIO.FIFO_A:
-        this.#apu.writeFifo(0, value);
-        return;
       case MMIO.FIFO_B:
-        this.#apu.writeFifo(1, value);
+        this.#apu.writeRegister32(address & 0x3fc, value);
         return;
       default:
         // Split into two 16-bit writes

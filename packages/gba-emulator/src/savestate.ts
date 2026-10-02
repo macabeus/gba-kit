@@ -159,6 +159,8 @@ export interface DirectSoundSnapshot {
   readIndex: number;
   writeIndex: number;
   size: number;
+  /** The FIFO register's 32-bit input latch. Older snapshots lack it and restore it as 0. */
+  latch?: number;
   currentSample: number;
   enableLeft: boolean;
   enableRight: boolean;
@@ -205,12 +207,15 @@ export interface PsgChannel2Snapshot {
 }
 
 export interface PsgChannel3Snapshot {
+  /** Both wave RAM banks, 32 bytes, bank 0 first. Older snapshots hold one 16-byte bank, restored into both. */
   waveRam: Uint8Array;
   enabled: boolean;
   dacEnabled: boolean;
   lengthCounter: number;
   lengthEnabled: boolean;
   volumeCode: number;
+  /** SOUND3CNT_H bit 15, force 75% volume. Older snapshots lack it and restore it as false. */
+  forceVolume?: boolean;
   frequency: number;
   frequencyTimer: number;
   sampleIndex: number;
