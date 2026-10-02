@@ -417,6 +417,7 @@ export class Gba {
       this.#frameCount++;
     }
     this.display.setScanline(this.#currentScanline, due);
+    this.dma.triggerVideoCapture(this.#currentScanline, due);
 
     if (this.#currentScanline === VISIBLE_SCANLINES) {
       this.#onVBlankStart(due);

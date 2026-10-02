@@ -26,7 +26,7 @@
 import type { DmaController } from '../dma.js';
 import type { ApuSnapshot } from '../savestate.js';
 import type { TimerController } from '../timers.js';
-import { CPU_FREQ } from '../types.js';
+import { CPU_FREQ, MMIO } from '../types.js';
 import { DirectSoundChannel } from './direct-sound.js';
 import { FRAME_SEQUENCER_PERIOD, PsgChannel1, PsgChannel2, PsgChannel3, PsgChannel4 } from './psg.js';
 
@@ -110,13 +110,13 @@ export class Apu {
       if (this.#dsA.timerSelect === 0) {
         this.#dsA.popSample();
         if (this.#dsA.needsRefill()) {
-          this.#dma?.triggerSoundFifo(1);
+          this.#dma?.requestSoundFifo(MMIO.FIFO_A);
         }
       }
       if (this.#dsB.timerSelect === 0) {
         this.#dsB.popSample();
         if (this.#dsB.needsRefill()) {
-          this.#dma?.triggerSoundFifo(2);
+          this.#dma?.requestSoundFifo(MMIO.FIFO_B);
         }
       }
     });
@@ -126,13 +126,13 @@ export class Apu {
       if (this.#dsA.timerSelect === 1) {
         this.#dsA.popSample();
         if (this.#dsA.needsRefill()) {
-          this.#dma?.triggerSoundFifo(1);
+          this.#dma?.requestSoundFifo(MMIO.FIFO_A);
         }
       }
       if (this.#dsB.timerSelect === 1) {
         this.#dsB.popSample();
         if (this.#dsB.needsRefill()) {
-          this.#dma?.triggerSoundFifo(2);
+          this.#dma?.requestSoundFifo(MMIO.FIFO_B);
         }
       }
     });

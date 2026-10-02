@@ -81,6 +81,8 @@ export interface DmaChannelSnapshot {
   gamePakDrq?: boolean;
   irqEnable: boolean;
   enabled: boolean;
+  /** The channel's data latch. Older snapshots omit it and restore as 0. */
+  latch?: number;
 }
 
 export interface DmaSnapshot {
