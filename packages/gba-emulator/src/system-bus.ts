@@ -638,7 +638,7 @@ export class GbaSystemBus implements MemoryBus {
         if (!this.#hasSram) {
           return 0xffff;
         }
-        // SRAM has 8-bit bus: wider reads replicate the byte
+        // SRAM has an 8-bit bus: a wider read returns the addressed byte on every lane
         const byte = this.sram[address & 0xffff]!;
         return byte | (byte << 8);
       }
@@ -689,7 +689,7 @@ export class GbaSystemBus implements MemoryBus {
         if (!this.#hasSram) {
           return 0xffffffff;
         }
-        // SRAM has 8-bit bus: wider reads replicate the byte
+        // SRAM has an 8-bit bus: a wider read returns the addressed byte on every lane
         const byte = this.sram[address & 0xffff]!;
         return (byte | (byte << 8) | (byte << 16) | (byte << 24)) >>> 0;
       }
@@ -788,8 +788,9 @@ export class GbaSystemBus implements MemoryBus {
       case 0x0e:
       case 0x0f:
         if (this.#hasSram) {
-          // SRAM has 8-bit bus: wider writes only write the low byte
-          this.sram[address & 0xffff] = value & 0xff;
+          // SRAM has an 8-bit bus: a halfword store writes the byte on the lane A0 selects
+          // (mGBA GBAStore16: `if (address & 1) value >>= 8`).
+          this.sram[address & 0xffff] = (value >>> ((address & 1) * 8)) & 0xff;
         } else {
           committed = false;
         }
@@ -836,8 +837,9 @@ export class GbaSystemBus implements MemoryBus {
       case 0x0e:
       case 0x0f:
         if (this.#hasSram) {
-          // SRAM has 8-bit bus: wider writes only write the low byte
-          this.sram[address & 0xffff] = value & 0xff;
+          // SRAM has an 8-bit bus: a word store writes the byte on the lane A1-A0 select
+          // (mGBA STORE_SRAM: `value >> (8 * (address & 3))`).
+          this.sram[address & 0xffff] = (value >>> ((address & 3) * 8)) & 0xff;
         } else {
           committed = false;
         }

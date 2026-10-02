@@ -159,8 +159,11 @@ export class DmaController {
       // (Re-)enabling DMA always reloads addresses and word count from latches,
       // whether transitioning from disabled→enabled OR re-writing while enabled.
       // Real GBA hardware reloads on any control write with enable=1.
-      ch.srcAddr = ch.srcLatch;
-      ch.dstAddr = ch.dstLatch;
+      // The channel's address counters hold transfer-width units: a misaligned SAD/DAD loses its
+      // low bits here (mGBA GBADMAWriteCNT_HI: `nextSource &= -width`).
+      const alignMask = ch.wordSize ? ~3 : ~1;
+      ch.srcAddr = (ch.srcLatch & alignMask) >>> 0;
+      ch.dstAddr = (ch.dstLatch & alignMask) >>> 0;
       ch.wordCount = ch.wordCountLatch === 0 ? (index === 3 ? 0x10000 : 0x4000) : ch.wordCountLatch;
 
       if (ch.startTiming === DmaStartTiming.Immediately) {
@@ -272,7 +275,7 @@ export class DmaController {
       ch.wordCount = ch.wordCountLatch === 0 ? (index === 3 ? 0x10000 : 0x4000) : ch.wordCountLatch;
 
       if (ch.dstControl === DmaAddrControl.IncrementReload) {
-        ch.dstAddr = ch.dstLatch;
+        ch.dstAddr = (ch.dstLatch & (ch.wordSize ? ~3 : ~1)) >>> 0;
       }
     } else {
       ch.enabled = false;
