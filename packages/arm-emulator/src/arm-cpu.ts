@@ -11,6 +11,7 @@
  * - GBATEK: http://problemkaputt.de/gbatek.htm
  */
 import type { CpuSnapshot } from './cpu-snapshot.js';
+import { multiplyCarry, multiplyLongCarry } from './multiply-carry.js';
 import type { CpsrFlags, DebugHooks, ExecutionResult, ExternalCall, MemoryBus, MemoryWrite } from './types.js';
 import { LR, PC, SENTINEL_ADDR, SP } from './types.js';
 import { addWithFlags, asr, bit, bits, isNegative, lsl, lsr, ror, signExtend, subWithFlags } from './utils.js';
@@ -1215,8 +1216,9 @@ export class ArmCpu {
         result = rdVal | rsVal;
         break;
       case 0xd:
+        // MUL Rd, Rs is MULS Rd, Rs, Rd: Rd is the multiplier.
         result = Math.imul(rdVal, rsVal);
-        carry = false;
+        carry = multiplyCarry(rsVal, rdVal, 0);
         break;
       case 0xe:
         result = rdVal & ~rsVal;
@@ -1736,17 +1738,18 @@ export class ArmCpu {
     const rs = bits(instr, 11, 8);
     const rm = instr & 0xf;
 
-    let result = Math.imul(this.registers[rm]! | 0, this.registers[rs]! | 0);
-    if (accumulate) {
-      result = (result + (this.registers[rn]! | 0)) | 0;
-    }
+    const multiplicand = this.registers[rm]!;
+    const multiplier = this.registers[rs]!;
+    const accumulator = accumulate ? this.registers[rn]! : 0;
+    const result = (Math.imul(multiplicand, multiplier) + accumulator) | 0;
 
     this.registers[rd] = result >>> 0;
 
     if (setFlags) {
       this.setN((result & 0x80000000) !== 0);
       this.setZ(result >>> 0 === 0);
-      // C is unpredictable on ARMv4T, V is unchanged
+      // C is the multiplier's internal carry (multiply-carry.ts); V is unchanged.
+      this.setC(multiplyCarry(multiplicand, multiplier, accumulator));
     }
   }
 
@@ -1757,37 +1760,18 @@ export class ArmCpu {
     const setFlags = bit(instr, 20) === 1;
     const rdHi = bits(instr, 19, 16);
     const rdLo = bits(instr, 15, 12);
-    const rs = bits(instr, 11, 8);
-    const rm = instr & 0xf;
+    const multiplicand = this.registers[instr & 0xf]!;
+    const multiplier = this.registers[bits(instr, 11, 8)]!;
+    const accLo = accumulate ? this.registers[rdLo]! : 0;
+    const accHi = accumulate ? this.registers[rdHi]! : 0;
 
-    let resultHi: number;
-    let resultLo: number;
-
-    if (isSigned) {
-      // SMULL/SMLAL: signed 32x32 -> 64
-      const a = this.registers[rm]! | 0;
-      const b = this.registers[rs]! | 0;
-      // Use BigInt for 64-bit precision
-      const product = BigInt(a) * BigInt(b);
-      resultLo = Number(product & 0xffffffffn) >>> 0;
-      resultHi = Number((product >> 32n) & 0xffffffffn) >>> 0;
-    } else {
-      // UMULL/UMLAL: unsigned 32x32 -> 64
-      const a = this.registers[rm]! >>> 0;
-      const b = this.registers[rs]! >>> 0;
-      const product = BigInt(a) * BigInt(b);
-      resultLo = Number(product & 0xffffffffn) >>> 0;
-      resultHi = Number((product >> 32n) & 0xffffffffn) >>> 0;
-    }
-
-    if (accumulate) {
-      // Add to existing RdHi:RdLo
-      const accLo = this.registers[rdLo]! >>> 0;
-      const accHi = this.registers[rdHi]! >>> 0;
-      const sum = BigInt(resultHi) * 0x100000000n + BigInt(resultLo) + BigInt(accHi) * 0x100000000n + BigInt(accLo);
-      resultLo = Number(sum & 0xffffffffn) >>> 0;
-      resultHi = Number((sum >> 32n) & 0xffffffffn) >>> 0;
-    }
+    // 32x32 -> 64 with BigInt for 64-bit precision, plus RdHi:RdLo for UMLAL/SMLAL.
+    const product = isSigned
+      ? BigInt(multiplicand | 0) * BigInt(multiplier | 0)
+      : BigInt(multiplicand >>> 0) * BigInt(multiplier >>> 0);
+    const sum = product + ((BigInt(accHi >>> 0) << 32n) | BigInt(accLo >>> 0));
+    const resultLo = Number(sum & 0xffffffffn) >>> 0;
+    const resultHi = Number((sum >> 32n) & 0xffffffffn) >>> 0;
 
     this.registers[rdLo] = resultLo;
     this.registers[rdHi] = resultHi;
@@ -1795,7 +1779,8 @@ export class ArmCpu {
     if (setFlags) {
       this.setN((resultHi & 0x80000000) !== 0);
       this.setZ(resultHi === 0 && resultLo === 0);
-      // C, V are unpredictable
+      // C is the multiplier's internal carry (multiply-carry.ts); V is unchanged.
+      this.setC(multiplyLongCarry(multiplicand, multiplier, accLo, accHi, isSigned));
     }
   }
 

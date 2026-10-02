@@ -1703,4 +1703,51 @@ describe('ArmCpu', () => {
       expect(cpu.registers[0]).toBe(0x08000108);
     });
   });
+
+  describe('multiply carry flag', () => {
+    // C after a flag-setting multiply comes from the Booth multiplier (multiply-carry.ts). The
+    // long-multiply rows are hardware results from mgba-suite src/multiply-long.c (CPSR >> 28).
+    it.each([
+      [0xffffffff, 0xffffffff, false, true],
+      [0x7fffffff, 0xffffffff, false, true],
+      [0x00000000, 0x80000000, true, false],
+      [0x80000000, 0x80000000, false, true],
+      [0xffffffff, 0x00000001, false, false],
+      [0xffffffff, 0x80000001, false, true],
+      [0x80000001, 0x7fffffff, true, true],
+    ])('SMULLS/UMULLS %s * %s: C = %s / %s', (rm, rs, smullC, umullC) => {
+      for (const [instr, expected] of [
+        [0xe0d10392 /* smulls r0, r1, r2, r3 */, smullC],
+        [0xe0910392 /* umulls r0, r1, r2, r3 */, umullC],
+      ] as const) {
+        const { cpu } = setupArmCpu([instr]);
+        cpu.registers[2] = rm;
+        cpu.registers[3] = rs;
+        cpu.step();
+        expect(cpu.getC()).toBe(expected);
+      }
+    });
+
+    it.each([
+      [0x12345678, 0x80000000, true], // all four cycles: the last Booth digit is negative
+      [0x12345678, 0xc0000000, false],
+      [0x89abcdef, 0x00000055, true], // one cycle
+      [0xdeadbeef, 0x0000beef, true],
+      [0x12345678, 0x00000055, false],
+    ])('MULS %s * %s: C = %s, in ARM and Thumb', (rm, rs, expected) => {
+      const arm = setupArmCpu([0xe0100392 /* muls r0, r2, r3 */]);
+      arm.cpu.cpsr = MODE_SYS | (expected ? 0 : 1 << 29);
+      arm.cpu.registers[2] = rm;
+      arm.cpu.registers[3] = rs;
+      arm.cpu.step();
+      expect(arm.cpu.getC()).toBe(expected);
+
+      const thumb = setupThumbCpu([0x4348 /* muls r0, r1 (r0 = r1 * r0) */]);
+      thumb.cpu.registers[1] = rm;
+      thumb.cpu.registers[0] = rs;
+      thumb.cpu.step();
+      expect(thumb.cpu.getC()).toBe(expected);
+      expect(thumb.cpu.registers[0]).toBe(Math.imul(rm, rs) >>> 0);
+    });
+  });
 });
