@@ -26,6 +26,11 @@ const KEY_MAP: Record<string, number> = {
 
 export type EmulatorState = 'idle' | 'running' | 'paused';
 
+/** How long a step runs looking for the instruction it stops at: a second of emulated time. */
+const STEP_FRAMES = 60;
+/** How long `runToAddress` runs looking for its address: ten seconds of emulated time. */
+const RUN_TO_ADDRESS_FRAMES = 600;
+
 export interface Breakpoint {
   address: number;
   enabled: boolean;
@@ -45,6 +50,8 @@ export class EmulatorBridge {
   #callbacks: EmulatorCallbacks | null = null;
   #breakpoints: Map<number, Breakpoint> = new Map();
   #hitBreakpoint = false;
+  /** Where the bridge last resumed the CPU: a breakpoint there lets that one instruction run. */
+  #resumeAddress: number | null = null;
   /** Whether the CPU's debug-hook slot currently holds this bridge's breakpoint hooks.
    *  The slot is shared with any other driver of the same `Gba` (a debug session), so
    *  the bridge only ever clears what it installed. */
@@ -119,6 +126,7 @@ export class EmulatorBridge {
 
     // Install breakpoint hooks if any breakpoints are set
     this.#updateDebugHooks();
+    this.#resumeAddress = this.#gba.armCpu.registers[15]!;
 
     this.#emulationLoop();
   }
@@ -144,15 +152,16 @@ export class EmulatorBridge {
     if (this.#state !== 'paused') {
       return;
     }
-    const cycles = this.#gba.armCpu.step();
-    this.#gba.scheduler.tick(cycles);
+    this.#runUntil(() => true, STEP_FRAMES);
     this.#renderFrame();
     this.#callbacks?.onFrame();
   }
 
   /** Run a single emulation frame and render to the attached canvas. */
   runOneFrame(): void {
+    this.#resumeAddress = this.#gba.armCpu.registers[15]!;
     this.#gba.runFrame();
+    this.#resumeAddress = null;
     this.#renderFrame();
     this.#callbacks?.onFrame();
   }
@@ -167,17 +176,7 @@ export class EmulatorBridge {
     const targetPC = currentPC + instrSize;
 
     // Run until we reach the next instruction or hit a breakpoint
-    for (let i = 0; i < 100_000; i++) {
-      const cycles = this.#gba.armCpu.step();
-      this.#gba.scheduler.tick(cycles);
-      if (this.#gba.armCpu.registers[15]! === targetPC) {
-        break;
-      }
-      if (this.#breakpoints.has(this.#gba.armCpu.registers[15]!)) {
-        break;
-      }
-    }
-
+    this.#runUntil((pc) => pc === targetPC, STEP_FRAMES);
     this.#renderFrame();
     this.#callbacks?.onFrame();
   }
@@ -187,15 +186,41 @@ export class EmulatorBridge {
     if (this.#state !== 'paused') {
       return;
     }
-    for (let i = 0; i < 10_000_000; i++) {
-      const cycles = this.#gba.armCpu.step();
-      this.#gba.scheduler.tick(cycles);
-      if (this.#gba.armCpu.registers[15]! === address) {
+    this.#runUntil((pc) => pc === address, RUN_TO_ADDRESS_FRAMES);
+    this.#renderFrame();
+    this.#callbacks?.onFrame();
+  }
+
+  /**
+   * Run the machine through its own loop, which takes interrupts, sleeps through a halt and keeps
+   * DMA and sound in time, until the instruction about to run is at a PC `reached` accepts, a
+   * breakpoint stops it, or `frames` frames have passed. The instruction at the PC it starts from
+   * runs first, and nothing is asked while the CPU sleeps.
+   */
+  #runUntil(reached: (pc: number) => boolean, frames: number): void {
+    const cpu = this.#gba.armCpu;
+    const start = cpu.registers[15]!;
+    let first = true;
+    const shouldStop = (): boolean => {
+      if (this.#gba.interrupts.halted) {
+        return false;
+      }
+      const pc = cpu.registers[15]!;
+      if (first) {
+        first = false;
+        if (pc === start) {
+          return false;
+        }
+      }
+      return reached(pc);
+    };
+    this.#resumeAddress = start;
+    for (let i = 0; i < frames; i++) {
+      if (this.#gba.runFrame(shouldStop) !== 'done') {
         break;
       }
     }
-    this.#renderFrame();
-    this.#callbacks?.onFrame();
+    this.#resumeAddress = null;
   }
 
   // ─── Breakpoints ──────────────────────────────────────────────────
@@ -398,6 +423,7 @@ export class EmulatorBridge {
     }
 
     this.#gba.runFrame();
+    this.#resumeAddress = null;
     this.#renderFrame();
     this.#callbacks?.onFrame();
 
@@ -439,6 +465,11 @@ export class EmulatorBridge {
     if (hasBreakpoints) {
       const hooks: DebugHooks = {
         onInstructionPre: (address: number) => {
+          const resumed = this.#resumeAddress === address;
+          this.#resumeAddress = null;
+          if (resumed) {
+            return 'continue';
+          }
           const bp = this.#breakpoints.get(address);
           if (bp?.enabled) {
             this.#hitBreakpoint = true;

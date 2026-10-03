@@ -172,3 +172,52 @@ describe('EmulatorBridge over a machine the debug session moves', () => {
     expect(seen).toBe(withBreakpoint);
   });
 });
+
+/** The fixture's one `swi 0x05` (VBlankIntrWait), in wait_vblank. */
+function vblankIntrWait(rom: Uint8Array): number {
+  for (let i = 0; i < rom.length; i += 2) {
+    if ((rom[i]! | (rom[i + 1]! << 8)) === 0xdf05) {
+      return 0x08000000 + i;
+    }
+  }
+  throw new Error('no swi 0x05 in the fixture');
+}
+
+describe('EmulatorBridge stepping', () => {
+  it('steps over VBlankIntrWait: the interrupt wakes the BIOS, and the step lands after the swi', async () => {
+    const { bridge, rom } = await bootShared();
+    const swi = vblankIntrWait(rom);
+    bridge.runToAddress(swi);
+    expect(bridge.cpu.registers[15]).toBe(swi);
+    const frame = bridge.gba.frameCount;
+
+    bridge.stepOver();
+    expect(bridge.cpu.registers[15]).toBe(swi + 2);
+    expect(bridge.cpu.getT()).toBe(true);
+    expect(bridge.gba.interrupts.halted).toBe(false);
+    // The wait ends at the next VBlank, line 160 of this frame or the next.
+    expect(bridge.gba.frameCount - frame).toBeLessThanOrEqual(1);
+  });
+
+  it('a step from a breakpoint runs the instruction under it: the swi enters the BIOS at its vector', async () => {
+    const { bridge, rom } = await bootShared();
+    const swi = vblankIntrWait(rom);
+    bridge.addBreakpoint(swi);
+    bridge.runOneFrame();
+    expect(bridge.cpu.registers[15]).toBe(swi);
+
+    bridge.stepInstruction();
+    expect(bridge.cpu.registers[15]).toBe(0x08); // the SWI vector
+    expect(bridge.cpu.getT()).toBe(false);
+
+    // Run on from inside the BIOS: through the wait and the interrupt, to the breakpoint at the next call.
+    const visits = bridge.gba.onHardwareEvent;
+    let vblanks = 0;
+    bridge.gba.onHardwareEvent = (event) => void (event.kind === 'vblank' && vblanks++);
+    bridge.runOneFrame();
+    bridge.gba.onHardwareEvent = visits;
+    expect(bridge.cpu.registers[15]).toBe(swi);
+    expect(vblanks).toBe(1);
+    bridge.removeBreakpoint(swi);
+  });
+});
