@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import { handleSwi } from '../bios.js';
+import { Gba } from '../gba.js';
+import type { GbaSystemBus } from '../system-bus.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -187,9 +189,11 @@ describe('GBA BIOS (HLE)', () => {
     expect(sqrt.cpu.step()).toBe(104 - 5);
   });
 
-  it('a decompression costs per byte it reads and writes', () => {
-    // LZ77UnCompWram of 4 literal bytes, every access 1 cycle (mGBA _unLz77): 20 and the header
-    // load (2); the flag byte (14 + 2); per byte 14 + 18, its load (2) and store (1).
+  it('a decompression costs the BIOS loop it stands for, per byte it reads and writes', () => {
+    // LZ77UnCompWram of 4 literal bytes, every access 1 cycle (BIOS 0x10FC): the header's load (2),
+    // the source check (2) and the routine's fixed 35; the flag byte, 4 instructions and its load
+    // (2); per byte, the flag's test and the branch back (4 + 3 + 2) and the literal: 4 instructions,
+    // its load (2), its store (1) and a taken branch (2).
     const { cpu, mem } = setupArmCpu([armSwi(0x11), armBx(LR)]);
     mem.write32(0x02000000, 0x00000410);
     mem.write32(0x02000004, 0x43424100);
@@ -197,7 +201,7 @@ describe('GBA BIOS (HLE)', () => {
     cpu.registers[0] = 0x02000000;
     cpu.registers[1] = 0x02000100;
     const dispatch = 42 + 1;
-    expect(cpu.step()).toBe(1 + dispatch + 20 + 2 + 14 + 2 + 4 * (14 + 18 + 2 + 1) + 2);
+    expect(cpu.step()).toBe(1 + dispatch + 2 + 2 + 35 + 4 + 2 + 4 * (9 + 9) + 2);
     expect(mem.read32(0x02000100)).toBe(0x44434241);
   });
 
@@ -490,5 +494,168 @@ describe('BIOS unpacking and decompression', () => {
     });
     expect([wide.mem.read16(DST), wide.mem.read16(DST + 2), wide.mem.read16(DST + 4)]).toEqual([1, 3, 0]);
     expect(wide.cpu.registers[3]).toBe(0xfffd); // the last difference
+  });
+});
+
+/**
+ * Run an ARM `swi n` from IWRAM on a whole machine, whose memory regions have their own wait
+ * states; returns the machine and the SWI's cycles.
+ */
+function callOnMachine(
+  n: number,
+  regs: number[],
+  setup: (bus: GbaSystemBus) => void = () => {},
+): { gba: Gba; cycles: number } {
+  const gba = new Gba();
+  setup(gba.bus);
+  gba.bus.write32(0x03000000, armSwi(n));
+  regs.forEach((value, r) => (gba.armCpu.registers[r] = value >>> 0));
+  gba.armCpu.registers[15] = 0x03000000;
+  return { gba, cycles: gba.armCpu.step() };
+}
+
+const writeBytes = (bus: GbaSystemBus, address: number, bytes: number[]): void =>
+  bytes.forEach((b, i) => bus.write8(address + i, b & 0xff));
+const writeHalfwords = (bus: GbaSystemBus, address: number, values: number[]): void =>
+  values.forEach((v, i) => bus.write16(address + i * 2, v & 0xffff));
+
+describe('BIOS calls cost what the real BIOS’s code takes', () => {
+  // Every count below is the real BIOS run instruction by instruction on this emulator's CPU, from
+  // the same swi in IWRAM, with the data in EWRAM (2 wait states) unless named.
+  const VRAM = 0x06000000;
+  const rl = [0x30, 0x00, 0x01, 0x00, 0x80 | 127, 0x61, 125, ...Array.from({ length: 126 }, (_, i) => i)];
+  const diff = [0x81, 64, 0, 0, ...Array.from({ length: 64 }, (_, i) => i * 3)];
+  const text = (t: string): number[] => t.split('').map((c) => c.charCodeAt(0));
+  const lz = [
+    0x10,
+    64,
+    0,
+    0,
+    0x00,
+    ...text('abcdefgh'),
+    0xff,
+    ...Array(8).fill([0x30, 0x07]).flat(),
+    0x00,
+    ...text('ijklmnop'),
+  ];
+  // A tree of two leaves, 5 and 10; bitstream 0xA5C30000.
+  const huff = (bits: number): number[] => [0x20 | bits, 8, 0, 0, 0x01, 0xc0, 0x05, 0x0a, 0x00, 0x00, 0xc3, 0xa5];
+
+  it('the decompressors: per byte read and stored, by where the data sits', () => {
+    const at = (bytes: number[]) => (bus: GbaSystemBus) => writeBytes(bus, SRC, bytes);
+    expect(callOnMachine(0x14, [SRC, DST], at(rl)).cycles).toBe(3197);
+    expect(callOnMachine(0x15, [SRC, VRAM], at(rl)).cycles).toBe(4633);
+    expect(callOnMachine(0x16, [SRC, DST], at(diff)).cycles).toBe(1174);
+    expect(callOnMachine(0x17, [SRC, VRAM], at(diff)).cycles).toBe(1464);
+    expect(callOnMachine(0x18, [SRC, DST], at(diff)).cycles).toBe(630);
+    expect(callOnMachine(0x11, [SRC, DST], at(lz)).cycles).toBe(1346);
+    expect(callOnMachine(0x12, [SRC, VRAM], at(lz)).cycles).toBe(1860);
+    expect(callOnMachine(0x13, [SRC, DST], at(huff(4))).cycles).toBe(915);
+    expect(callOnMachine(0x13, [SRC, DST], at(huff(0))).cycles).toBe(531);
+  });
+
+  it('BitUnPack per unit, and BgAffineSet and ObjAffineSet per set, multiplies included', () => {
+    const info = 0x02020000;
+    const bitUnPack = callOnMachine(0x10, [SRC, DST, info], (bus) => {
+      writeBytes(
+        bus,
+        SRC,
+        Array.from({ length: 16 }, (_, i) => i * 17),
+      );
+      writeHalfwords(bus, info, [16, 0x0401]); // 16 bytes, 1 bit to 4 bits
+      bus.write32(info + 4, 0);
+    });
+    expect(bitUnPack.cycles).toBe(3427);
+    const bg = callOnMachine(0x0e, [SRC, DST, 2], (bus) => {
+      bus.write32(SRC, 0x1000);
+      bus.write32(SRC + 4, 0x2000);
+      writeHalfwords(bus, SRC + 8, [120, 80, 0x100, 0x180, 0x4000, 0]);
+      bus.write32(SRC + 20, -0x800 >>> 0);
+      bus.write32(SRC + 24, 0x300);
+      writeHalfwords(bus, SRC + 28, [-8, 160, 0x7fff, -0x200, 0xc000, 0]);
+    });
+    expect(bg.cycles).toBe(312);
+    const obj = callOnMachine(0x0f, [SRC, 0x07000006, 2, 8], (bus) =>
+      writeHalfwords(bus, SRC, [0x100, 0x180, 0x4000, 0, 0x7fff, -0x200, 0xc000, 0]),
+    );
+    expect(obj.cycles).toBe(182);
+  });
+
+  it('CpuSet per unit by width, and a zero length that the source check returns on at once', () => {
+    // GBATEK "CpuSet"; BIOS 0xB4C: a halfword copy runs 6 instructions per unit, a word fill 4.
+    expect(callOnMachine(0x0b, [SRC, VRAM, 256]).cycles).toBe(3425);
+    expect(callOnMachine(0x0b, [0x03000100, 0x03001000, 256 | (1 << 24) | (1 << 26)]).cycles).toBe(1888);
+    expect(callOnMachine(0x0b, [SRC, DST, 0]).cycles).toBe(83);
+  });
+
+  it('a refused source runs the prologue, the check and the return; ArcTan2 returns early on an axis', () => {
+    expect(callOnMachine(0x14, [0x100, DST]).cycles).toBe(92);
+    expect(callOnMachine(0x0a, [0, -5]).cycles).toBe(81);
+  });
+});
+
+describe('BIOS unpacking edge cases, as the real BIOS runs them', () => {
+  const info = 0x02020000;
+  const unpack = (length: number, widths: number, offset: number, bytes: number[]) => (m: GbaMemory) => {
+    bytes.forEach((b, i) => m.write8(SRC + i, b));
+    m.write16(info, length);
+    m.write16(info + 2, widths);
+    m.write32(info + 4, offset);
+  };
+
+  it('BitUnPack stores a word once its units reach 32 bits, losing the top bits of the unit past them', () => {
+    // 8-bit units into 5-bit ones: the seventh starts at bit 30.
+    const { cpu, mem } = call(0x10, [SRC, DST, info], unpack(7, 0x0508, 0, [1, 2, 3, 4, 5, 6, 0x1f]));
+    expect(mem.read32(DST)).toBe((0xc0000000 | (6 << 25) | (5 << 20) | (4 << 15) | (3 << 10) | (2 << 5) | 1) >>> 0);
+    expect([cpu.registers[1], cpu.registers[3]]).toEqual([DST + 4, 0]);
+  });
+
+  it('BitUnPack reads a source unit wider than 8 bits as 0', () => {
+    // 9-bit units: the BIOS's mask, 0xFF >> (8 - 9), shifts out every bit.
+    const { mem } = call(0x10, [SRC, DST, info], unpack(4, 0x0809, 0x80000001, [0xff, 0xff, 0xff, 0xff]));
+    expect(mem.read32(DST)).toBe(0x01010101);
+  });
+
+  it('HuffUnComp with a data size of 0 stores a word of zero every 4 leaves', () => {
+    const { cpu, mem } = call(0x13, [SRC, DST], (m) => {
+      [0x20, 8, 0, 0, 0x01, 0xc0, 0x05, 0x0a, 0x00, 0x00, 0xc3, 0xa5].forEach((b, i) => m.write8(SRC + i, b));
+      m.write32(DST, 0xcccccccc);
+      m.write32(DST + 4, 0xcccccccc);
+    });
+    expect([mem.read32(DST), mem.read32(DST + 4)]).toEqual([0, 0]);
+    expect([cpu.registers[0], cpu.registers[1], cpu.registers[3]]).toEqual([SRC + 12, DST + 8, 0]);
+  });
+
+  it('HuffUnComp shifts each leaf in from the top of the word, and r3 keeps the last word', () => {
+    // 4-bit data, 8 leaves per word: bits 1010 0101 pick 10, 5, 10, 5, 5, 10, 5, 10, and the first
+    // leaf ends in the low nibble.
+    const { cpu, mem } = call(0x13, [SRC, DST], (m) => {
+      [0x24, 8, 0, 0, 0x01, 0xc0, 0x05, 0x0a, 0x00, 0x00, 0xc3, 0xa5].forEach((b, i) => m.write8(SRC + i, b));
+    });
+    expect(mem.read32(DST)).toBe(0xa5a55a5a);
+    expect(cpu.registers[3]).toBe(mem.read32(DST + 4));
+  });
+
+  it('BgAffineSet leaves the last set’s pa in r3', () => {
+    const bg = call(0x0e, [SRC, DST, 1], (m) => {
+      m.write16(SRC + 12, 0x7fff); // sx; sy 0, angle 0
+    });
+    expect(bg.cpu.registers[3]).toBe(0x7fff);
+  });
+
+  it('Diff16bitUnFilter leaves the source check’s 0xBA4 in r3 when it runs one unit', () => {
+    const { cpu } = call(0x18, [SRC, DST, 0, 0x55], (m) => {
+      m.write32(SRC, 0x00000282);
+      m.write16(SRC + 4, 0x1234);
+    });
+    expect(cpu.registers[3]).toBe(0xba4);
+  });
+
+  it('a decompressor refuses its source after loading the header, so r0 ends past it', () => {
+    expect(call(0x14, [0x100, DST]).cpu.registers[0]).toBe(0x104);
+  });
+
+  it('ArcTan2 adds its octant’s base angle without wrapping: a zero ratio below the x axis gives 0x10000', () => {
+    expect(call(0x0a, [70000, -3]).cpu.registers[0]).toBe(0x10000);
   });
 });

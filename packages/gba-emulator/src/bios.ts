@@ -7,11 +7,12 @@
  * IntrWait, VBlankIntrWait, CustomHalt, SoftReset) run instead as ARM code
  * from the BIOS image (bios-image.ts), entered through the SWI exception.
  *
- * Each call reports the cycles the real BIOS code would take, so a call costs the time it does on
- * hardware: the dispatch and return every SWI goes through, plus a per-function cost where the
- * function's loop is long enough to matter (mGBA src/gba/bios.c GBASwi16 and its stall counts).
- * Where mGBA counts none, the costs come from the real BIOS's own code run on this emulator's
- * cycle model.
+ * Each call reports the cycles the real BIOS code takes, so a call costs the time it does on
+ * hardware: the dispatch and return every SWI goes through, plus the function's own code. Div,
+ * Sqrt, ArcTan and CpuFastSet take mGBA's counts, which match hardware (src/gba/bios.c GBASwi16
+ * and its stall counts; mgba-suite Timing). The other functions follow the real BIOS's own code:
+ * their loops' instructions and memory accesses, and fixed costs measured from the real BIOS run
+ * on this emulator's CPU.
  *
  * The functions follow the real BIOS's algorithms, fixed-point arithmetic and edge cases included,
  * and leave r0, r1 and r3 as it does wherever those hold a result or a pointer the call advanced.
@@ -86,37 +87,37 @@ export function handleSwi(cpu: BiosCpu, swiNumber: number): number | null {
       cycles = swiGetBiosChecksum(cpu);
       break;
     case 0x0e:
-      swiBgAffineSet(cpu);
+      cycles = swiBgAffineSet(cpu);
       break;
     case 0x0f:
-      swiObjAffineSet(cpu);
+      cycles = swiObjAffineSet(cpu);
       break;
     case 0x10:
-      swiBitUnPack(cpu);
+      cycles = swiBitUnPack(cpu);
       break;
     case 0x11:
-      cycles = swiLz77UnCompWram(cpu);
+      cycles = lz77Decompress(cpu, false);
       break;
     case 0x12:
-      cycles = swiLz77UnCompVram(cpu);
+      cycles = lz77Decompress(cpu, true);
       break;
     case 0x13:
-      swiHuffUnComp(cpu);
+      cycles = swiHuffUnComp(cpu);
       break;
     case 0x14:
-      swiRlUnCompWram(cpu);
+      cycles = rlDecompress(cpu, false);
       break;
     case 0x15:
-      swiRlUnCompVram(cpu);
+      cycles = rlDecompress(cpu, true);
       break;
     case 0x16:
-      swiDiffUnFilter(cpu, 1, false);
+      cycles = swiDiffUnFilter(cpu, 1, false);
       break;
     case 0x17:
-      swiDiffUnFilter(cpu, 1, true);
+      cycles = swiDiffUnFilter(cpu, 1, true);
       break;
     case 0x18:
-      swiDiffUnFilter(cpu, 2, false);
+      cycles = swiDiffUnFilter(cpu, 2, false);
       break;
     case 0x19:
       cycles = swiSoundBias(cpu);
@@ -143,12 +144,18 @@ function readableSource(source: number): boolean {
 }
 
 /**
- * CpuSet's and CpuFastSet's check: a length in r2 that is not zero, and a source whose first byte
- * and the byte r2's count of words later both pass `readableSource` (the BIOS's check at 0xBA4).
+ * The BIOS's source check at 0xBA4: a length that is not zero, and a source whose first byte and
+ * the byte `length` (bits 0-24) later both pass `readableSource`. CpuSet and CpuFastSet pass the
+ * bytes r2 counts, BitUnPack its source length, and the decompressors the size in their header,
+ * from past the header.
  */
-function readableBlock(source: number, control: number): boolean {
-  const bytes = ((control << 11) >>> 9) & 0x01ffffff;
-  return bytes !== 0 && readableSource(source) && readableSource((source + bytes) >>> 0);
+function readableRange(source: number, length: number): boolean {
+  return length !== 0 && readableSource(source) && readableSource((source + (length & 0x01ffffff)) >>> 0);
+}
+
+/** The bytes CpuSet's and CpuFastSet's check covers: r2's count of words. */
+function copyCheckLength(control: number): number {
+  return (control << 11) >>> 9;
 }
 
 // ─── Cycle costs ──────────────────────────────────────────────────
@@ -169,8 +176,44 @@ function swiDispatchCycles(cpu: BiosCpu): number {
 }
 
 /**
- * The internal cycles of a multiply in the BIOS's code, by how many top bytes of the product are
- * sign bits (mGBA bios.c _mulWait).
+ * The real BIOS's code runs from its own ROM, which fetches an opcode in 1 cycle, so each of its
+ * instructions costs 1 cycle, plus: for a load, its access and an internal cycle; for a store, its
+ * access; for a taken branch, 2 fetches to refill the pipeline; for a register-specified shift, an
+ * internal cycle; for a multiply, its internal cycles (GBATEK "ARM CPU Instruction Cycle Times").
+ * The loops below are counted that way from the BIOS's code, at the addresses given. The stacks
+ * sit in IWRAM, where an access takes 1 cycle. Each function's fixed cost (its prologue, the source
+ * check, its return) is the real BIOS's code run on this emulator's cycle model.
+ */
+/** The refill after a taken branch. */
+const TAKEN = 2;
+/** A load from and a store to the stack, past their instructions' cycle. */
+const STACK_LOAD = 2;
+const STACK_STORE = 1;
+/** A load from the BIOS ROM's own tables, past its instruction's cycle. */
+const BIOS_LOAD = 2;
+
+/** A load's cycles past its instruction's: the access, and the internal cycle that writes the register. */
+function loadCycles(memory: MemoryBus, address: number, width: 1 | 2 | 4): number {
+  return memory.accessCycles(address, width, false) + 1;
+}
+
+/** A store's cycles past its instruction's: the access. */
+function storeCycles(memory: MemoryBus, address: number, width: 1 | 2 | 4): number {
+  return memory.accessCycles(address, width, false);
+}
+
+/**
+ * The source check returns after its first test when the length is zero (BIOS 0xBA4), and takes
+ * these cycles more for any other length.
+ */
+function sourceCheckCycles(length: number): number {
+  return length === 0 ? 0 : 2;
+}
+
+/**
+ * The internal cycles of a multiply whose operand is `value`: 1 to 4, by how many of its top bytes
+ * are sign bits (GBATEK "ARM CPU Instruction Cycle Times"; mGBA bios.c _mulWait, which ArcTan's
+ * counts apply to each product).
  */
 function multiplyWait(value: number): number {
   const v = value | 0;
@@ -263,45 +306,40 @@ function arcTanCycles(tan: number): number {
   return cycles;
 }
 
-/** ArcTan2 reduces the angle to an octant and runs ArcTan on the smaller coordinate over the larger (mGBA _ArcTan2). */
-function arcTan2Cycles(xValue: number, yValue: number): number {
-  const x = xValue | 0;
-  const y = yValue | 0;
-  if (x === 0 || y === 0) {
-    return 11;
+/**
+ * ArcTan2 (BIOS 0x4FC) tests y and then x for zero, and returns at once on an axis. Otherwise it
+ * picks the octant with up to three more compares, runs Div on the smaller coordinate shifted left
+ * by 14 over the larger, and ArcTan on that ratio.
+ */
+const ARCTAN2_AXIS_CYCLES = 28;
+const ARCTAN2_CYCLES = 60;
+
+/**
+ * CpuSet (BIOS 0xB4C) moves one unit per pass of a Thumb loop: a word copy runs 5 instructions
+ * (compare, branch out, LDMIA, STMIA, branch back), a halfword copy one more to step its offset. A
+ * fill loads its unit once before the loop and runs one instruction fewer per unit. Reaching the
+ * 16-bit loops takes one more branch, and reaching a copy loop one more than a fill's.
+ */
+const CPUSET_CYCLES = 47;
+const CPUSET_REFUSED_CYCLES = 37;
+
+function cpuSetCycles(memory: MemoryBus, src: number, dst: number, count: number, width: 2 | 4, fill: boolean): number {
+  const halfword = width === 2 ? 1 : 0;
+  const store = storeCycles(memory, dst, width);
+  const path = CPUSET_CYCLES + halfword * TAKEN;
+  if (fill) {
+    return path + 1 + loadCycles(memory, src, width) + count * (4 + halfword + TAKEN + store);
   }
-  const yOverX = ((y << 14) / x) | 0;
-  const xOverY = ((x << 14) / y) | 0;
-  if (y >= 0) {
-    if (x >= 0 ? x >= y : -x >= y) {
-      return arcTanCycles(yOverX);
-    }
-    return arcTanCycles(xOverY);
-  }
-  if (x <= 0 ? -x > -y : x >= -y) {
-    return arcTanCycles(yOverX);
-  }
-  return arcTanCycles(xOverY);
+  return path + TAKEN + count * (5 + halfword + TAKEN + loadCycles(memory, src, width) + store);
 }
 
 /**
- * CpuSet and CpuFastSet run a loop from the BIOS ROM (mGBA hle-bios.s): per unit a compare, a
- * load (N, then I), a store (N) and the branch back; a fill loads once before the loop instead.
- * CpuFastSet moves 8 words per LDM/STM pair. Around the loop, CpuFastSet spends 48 cycles, as
- * measured on hardware (mgba-suite Timing "CpuSet": 256 words EWRAM to EWRAM), and CpuSet 3
- * fewer, the difference between the two functions' setup and exit code in hle-bios.s.
+ * CpuFastSet moves 8 words per LDM/STM pair, with 5 more instructions per block for a fill and 7
+ * for a copy (mGBA hle-bios.s). Around the loop it spends 48 cycles, as measured on hardware
+ * (mgba-suite Timing "CpuSet": 256 words EWRAM to EWRAM).
  */
-const CPUSET_FIXED_CYCLES = 45;
 const CPUFASTSET_FIXED_CYCLES = 48;
-
-function cpuSetCycles(cpu: BiosCpu, src: number, dst: number, count: number, width: 2 | 4, fill: boolean): number {
-  const store = cpu.memory.accessCycles(dst, width, false);
-  const load = cpu.memory.accessCycles(src, width, false);
-  if (fill) {
-    return CPUSET_FIXED_CYCLES + load + 1 + count * (5 + store);
-  }
-  return CPUSET_FIXED_CYCLES + count * (7 + load + store);
-}
+const CPUFASTSET_REFUSED_CYCLES = 39;
 
 function cpuFastSetCycles(cpu: BiosCpu, src: number, dst: number, words: number, fill: boolean): number {
   const blocks = words >>> 3;
@@ -455,51 +493,52 @@ function swiArcTan(cpu: BiosCpu): number {
  *   r1 = y (signed 32-bit)
  *
  * Output:
- *   r0 = the angle of (x, y), 0x0000..0xFFFF for 0..2*pi
+ *   r0 = the angle of (x, y), 0x0000..0x10000 for 0..2*pi
  *   r1 = ArcTan's a for the ratio it took, unchanged on an axis
  *   r3 = 0x170, which the BIOS leaves there
  *
  * The BIOS reduces the angle to an octant and runs ArcTan on (smaller << 14) / larger, a 32-bit
- * signed division truncated toward zero (mGBA bios.c _ArcTan2).
+ * signed division truncated toward zero (mGBA bios.c _ArcTan2). It adds the octant's base angle
+ * without wrapping it, so a ratio of 0 just below the positive x axis gives 0x10000.
  */
 function swiArcTan2(cpu: BiosCpu): number {
   const x = cpu.registers[0]! | 0;
   const y = cpu.registers[1]! | 0;
-  const cycles = arcTan2Cycles(x, y);
-  let angle: number;
-  if (y === 0) {
-    angle = x >= 0 ? 0 : 0x8000;
-  } else if (x === 0) {
-    angle = y >= 0 ? 0x4000 : 0xc000;
-  } else {
-    const yOverX = (): number => arcTanOf(cpu, ((y << 14) / x) | 0);
-    const xOverY = (): number => arcTanOf(cpu, ((x << 14) / y) | 0);
-    if (y >= 0) {
-      if (x >= 0 && x >= y) {
-        angle = yOverX();
-      } else if (x < 0 && -x >= y) {
-        angle = yOverX() + 0x8000;
-      } else {
-        angle = 0x4000 - xOverY();
-      }
-    } else if (x <= 0 && -x > -y) {
-      angle = yOverX() + 0x8000;
-    } else if (x > 0 && x >= -y) {
-      angle = yOverX() + 0x10000;
-    } else {
-      angle = 0xc000 - xOverY();
-    }
-  }
-  cpu.registers[0] = angle & 0xffff;
   cpu.registers[3] = 0x170;
-  return cycles;
-}
-
-/** ArcTan for ArcTan2: the angle, with the polynomial's a left in r1. */
-function arcTanOf(cpu: BiosCpu, tan: number): number {
-  const { angle, a } = arcTan(tan);
+  // On an axis: x < 0 takes a branch and one more instruction; x = 0 takes the first test's branch
+  // and two more instructions and its own test, whose branch y < 0 takes.
+  if (y === 0) {
+    cpu.registers[0] = x >= 0 ? 0 : 0x8000;
+    return ARCTAN2_AXIS_CYCLES + (x >= 0 ? 0 : 3);
+  }
+  if (x === 0) {
+    cpu.registers[0] = y >= 0 ? 0x4000 : 0xc000;
+    return ARCTAN2_AXIS_CYCLES + (y >= 0 ? 5 : 7);
+  }
+  // Each octant: the ratio's operands, the base angle, whether ArcTan's angle is subtracted from
+  // it, and the cycles its compares and result code take past those of x >= y >= 0's.
+  let octant: [numerator: number, denominator: number, base: number, subtract: boolean, extra: number];
+  if (y >= 0) {
+    if (x >= 0 && x >= y) {
+      octant = [y, x, 0, false, 0];
+    } else if (x < 0 && -x >= y) {
+      octant = [y, x, 0x8000, false, 3];
+    } else {
+      octant = [x, y, 0x4000, true, x >= 0 ? 2 : 4];
+    }
+  } else if (x <= 0 && -x > -y) {
+    octant = [y, x, 0x8000, false, 5];
+  } else if (x > 0 && x >= -y) {
+    octant = [y, x, 0x10000, false, 3];
+  } else {
+    octant = [x, y, 0xc000, true, x > 0 ? 7 : 3];
+  }
+  const [numerator, denominator, base, subtract, extra] = octant;
+  const ratio = ((numerator << 14) / denominator) | 0;
+  const { angle, a } = arcTan(ratio);
+  cpu.registers[0] = (subtract ? base - angle : base + angle) >>> 0;
   cpu.registers[1] = a >>> 0;
-  return angle;
+  return ARCTAN2_CYCLES + extra + divCycles(numerator << 14, denominator) + arcTanCycles(ratio);
 }
 
 // ─── SWI 0x0B: CpuSet ──────────────────────────────────────────────
@@ -525,10 +564,11 @@ function swiCpuSet(cpu: BiosCpu): number {
   const word32 = (control & (1 << 26)) !== 0;
   // r3 ends as the BIOS's return address, which its exit pops through it: 0x170 on every path.
   cpu.registers[3] = 0x170;
-  if (!readableBlock(src, control)) {
-    return 0;
+  const length = copyCheckLength(control);
+  if (!readableRange(src, length)) {
+    return CPUSET_REFUSED_CYCLES + sourceCheckCycles(length);
   }
-  const cycles = cpuSetCycles(cpu, src, dst, count, word32 ? 4 : 2, fill);
+  const cycles = cpuSetCycles(cpu.memory, src, dst, count, word32 ? 4 : 2, fill);
 
   if (word32) {
     // LDMIA and STMIA, which ignore the addresses' bits 0-1 and write the pointers back to r0
@@ -576,8 +616,9 @@ function swiCpuFastSet(cpu: BiosCpu): number {
   // Round up to multiple of 8
   const count = ((control & 0x1fffff) + 7) & ~7;
   const fill = (control & (1 << 24)) !== 0;
-  if (!readableBlock(src, control)) {
-    return 0;
+  const length = copyCheckLength(control);
+  if (!readableRange(src, length)) {
+    return CPUFASTSET_REFUSED_CYCLES + sourceCheckCycles(length);
   }
   const cycles = cpuFastSetCycles(cpu, src, dst, count, fill);
 
@@ -647,32 +688,59 @@ function affineMatrix(sx: number, sy: number, angle: number): [pa: number, pb: n
  * startX = srcX - (pa * dstX + pb * dstY) and startY = srcY - (pc * dstX + pd * dstY), in 32-bit
  * integers from the truncated pa..pd (GBATEK "BgAffineSet"; checked against the real BIOS).
  */
-function swiBgAffineSet(cpu: BiosCpu): void {
+const BG_AFFINE_SET_CYCLES = 28;
+
+function swiBgAffineSet(cpu: BiosCpu): number {
+  const memory = cpu.memory;
   let src = cpu.registers[0]! >>> 0;
   let dst = cpu.registers[1]! >>> 0;
-  let count = cpu.registers[2]! >>> 0;
+  let cycles = BG_AFFINE_SET_CYCLES;
 
-  while (count--) {
-    const ox = cpu.memory.read32(src) | 0;
-    const oy = cpu.memory.read32((src + 4) >>> 0) | 0;
-    const cx = toS16(cpu.memory.read16((src + 8) >>> 0));
-    const cy = toS16(cpu.memory.read16((src + 10) >>> 0));
-    const sx = toS16(cpu.memory.read16((src + 12) >>> 0));
-    const sy = toS16(cpu.memory.read16((src + 14) >>> 0));
-    const angle = cpu.memory.read16((src + 16) >>> 0);
-    src = (src + 20) >>> 0;
+  for (let count = cpu.registers[2]! >>> 0; count > 0; count--) {
+    const ox = memory.read32(src) | 0;
+    const oy = memory.read32((src + 4) >>> 0) | 0;
+    const cx = toS16(memory.read16((src + 8) >>> 0));
+    const cy = toS16(memory.read16((src + 10) >>> 0));
+    const sx = toS16(memory.read16((src + 12) >>> 0));
+    const sy = toS16(memory.read16((src + 14) >>> 0));
+    const angle = memory.read16((src + 16) >>> 0);
 
     const [pa, pb, pc, pd] = affineMatrix(sx, sy, angle);
-    cpu.memory.write16(dst, pa & 0xffff);
-    cpu.memory.write16((dst + 2) >>> 0, pb & 0xffff);
-    cpu.memory.write16((dst + 4) >>> 0, pc & 0xffff);
-    cpu.memory.write16((dst + 6) >>> 0, pd & 0xffff);
-    cpu.memory.write32((dst + 8) >>> 0, (ox - Math.imul(pa, cx) - Math.imul(pb, cy)) >>> 0);
-    cpu.memory.write32((dst + 12) >>> 0, (oy - Math.imul(pc, cx) - Math.imul(pd, cy)) >>> 0);
+    memory.write16(dst, pa & 0xffff);
+    memory.write16((dst + 2) >>> 0, pb & 0xffff);
+    memory.write16((dst + 4) >>> 0, pc & 0xffff);
+    memory.write16((dst + 6) >>> 0, pd & 0xffff);
+    memory.write32((dst + 8) >>> 0, (ox - Math.imul(pa, cx) - Math.imul(pb, cy)) >>> 0);
+    memory.write32((dst + 12) >>> 0, (oy - Math.imul(pc, cx) - Math.imul(pd, cy)) >>> 0);
+    cpu.registers[3] = pa >>> 0;
+
+    // BIOS 0xC30: 42 instructions and the branch back; three halfword loads, an LDM of the three
+    // words and two sine-table loads; four multiplies by the scales and four multiply-accumulates
+    // by -cx, cy, -cx and -cy, each 1 internal cycle longer; two word and four halfword stores.
+    cycles +=
+      42 +
+      TAKEN +
+      loadCycles(memory, (src + 16) >>> 0, 2) +
+      loadCycles(memory, (src + 12) >>> 0, 2) +
+      loadCycles(memory, (src + 14) >>> 0, 2) +
+      memory.accessCycles(src, 4, false) +
+      2 * memory.accessCycles((src + 4) >>> 0, 4, true) +
+      1 +
+      2 * BIOS_LOAD +
+      2 * multiplyWait(sx) +
+      2 * multiplyWait(sy) +
+      2 * multiplyWait(-cx) +
+      multiplyWait(cy) +
+      multiplyWait(-cy) +
+      4 +
+      2 * storeCycles(memory, (dst + 8) >>> 0, 4) +
+      4 * storeCycles(memory, dst, 2);
+    src = (src + 20) >>> 0;
     dst = (dst + 16) >>> 0;
   }
   cpu.registers[0] = src;
   cpu.registers[1] = dst;
+  return cycles;
 }
 
 /** Interpret a u16 read as signed 16-bit */
@@ -697,19 +765,35 @@ function toS16(v: number): number {
  * Output: pa, pb, pc, pd at dest + 0, r3, 2*r3 and 3*r3; the next set starts 4*r3 later
  * (GBATEK "ObjAffineSet"; mGBA bios.c _ObjAffineSet).
  */
-function swiObjAffineSet(cpu: BiosCpu): void {
+const OBJ_AFFINE_SET_CYCLES = 20;
+
+function swiObjAffineSet(cpu: BiosCpu): number {
+  const memory = cpu.memory;
   let src = cpu.registers[0]! >>> 0;
   let dst = cpu.registers[1]! >>> 0;
-  const count = cpu.registers[2]! >>> 0;
   const stride = cpu.registers[3]! >>> 0;
+  let cycles = OBJ_AFFINE_SET_CYCLES;
 
-  for (let i = 0; i < count; i++) {
-    const sx = toS16(cpu.memory.read16(src));
-    const sy = toS16(cpu.memory.read16((src + 2) >>> 0));
-    const angle = cpu.memory.read16((src + 4) >>> 0);
+  for (let count = cpu.registers[2]! >>> 0; count > 0; count--) {
+    const sx = toS16(memory.read16(src));
+    const sy = toS16(memory.read16((src + 2) >>> 0));
+    const angle = memory.read16((src + 4) >>> 0);
 
+    // BIOS 0xCE4: 28 instructions and the branch back; three halfword loads and two sine-table
+    // loads; two multiplies by each scale; four halfword stores.
+    cycles +=
+      28 +
+      TAKEN +
+      loadCycles(memory, (src + 4) >>> 0, 2) +
+      loadCycles(memory, src, 2) +
+      loadCycles(memory, (src + 2) >>> 0, 2) +
+      2 * BIOS_LOAD +
+      2 * multiplyWait(sx) +
+      2 * multiplyWait(sy);
     affineMatrix(sx, sy, angle).forEach((value, k) => {
-      cpu.memory.write16((dst + k * stride) >>> 0, value & 0xffff);
+      const address = (dst + k * stride) >>> 0;
+      memory.write16(address, value & 0xffff);
+      cycles += storeCycles(memory, address, 2);
     });
 
     src = (src + 8) >>> 0;
@@ -717,6 +801,7 @@ function swiObjAffineSet(cpu: BiosCpu): void {
   }
   cpu.registers[0] = src;
   cpu.registers[1] = dst;
+  return cycles;
 }
 
 // ─── SWI 0x10: BitUnPack ───────────────────────────────────────────
@@ -734,51 +819,75 @@ function swiObjAffineSet(cpu: BiosCpu): void {
  *     u32 dataOffset   (value added to all non-zero source values;
  *                        bit 31: also add offset to zero values)
  *
- * Units fill 32-bit words from the low bits up, and the BIOS stores each word once it is full: a
- * last partial word stays unwritten, and r3 ends as the count of its bits. A unit the offset
- * carries past its width spills into the next unit's bits (mGBA bios.c _unBitPack; checked
- * against the real BIOS).
+ * Units fill 32-bit words from the low bits up, and the BIOS stores a word once its units reach 32
+ * bits: a unit that ends past bit 31 loses its top bits, a last partial word stays unwritten, and
+ * r3 ends as the count of its bits. A unit the offset carries past its width spills into the next
+ * unit's bits. A source unit wider than 8 bits reads as 0 (mGBA bios.c _unBitPack; checked against
+ * the real BIOS).
  */
-function swiBitUnPack(cpu: BiosCpu): void {
+const BIT_UNPACK_CYCLES = 59;
+const BIT_UNPACK_REFUSED_CYCLES = 43;
+
+function swiBitUnPack(cpu: BiosCpu): number {
+  const memory = cpu.memory;
   let src = cpu.registers[0]! >>> 0;
   let dst = cpu.registers[1]! >>> 0;
   const infoPtr = cpu.registers[2]! >>> 0;
-  if (!readableSource(src)) {
-    return;
-  }
 
-  const srcLength = cpu.memory.read16(infoPtr);
-  const srcBitWidth = cpu.memory.read8((infoPtr + 2) >>> 0);
-  const dstBitWidth = cpu.memory.read8((infoPtr + 3) >>> 0);
-  const dataOffset = cpu.memory.read32((infoPtr + 4) >>> 0);
+  const srcLength = memory.read16(infoPtr);
+  if (!readableRange(src, srcLength)) {
+    return BIT_UNPACK_REFUSED_CYCLES + loadCycles(memory, infoPtr, 2) + sourceCheckCycles(srcLength);
+  }
+  const srcBitWidth = memory.read8((infoPtr + 2) >>> 0);
+  const dstBitWidth = memory.read8((infoPtr + 3) >>> 0);
+  const dataOffset = memory.read32((infoPtr + 4) >>> 0);
 
   const addToZero = (dataOffset & 0x80000000) !== 0;
   const offsetValue = dataOffset & 0x7fffffff;
-  const srcMask = (1 << srcBitWidth) - 1;
+  const srcMask = srcBitWidth <= 8 ? 0xff >> (8 - srcBitWidth) : 0;
   let word = 0;
   let bitsUsed = 0;
+  let cycles =
+    BIT_UNPACK_CYCLES +
+    loadCycles(memory, infoPtr, 2) +
+    loadCycles(memory, (infoPtr + 2) >>> 0, 1) +
+    2 * loadCycles(memory, (infoPtr + 4) >>> 0, 4) +
+    loadCycles(memory, (infoPtr + 3) >>> 0, 1);
 
   for (let byteIdx = 0; byteIdx < srcLength; byteIdx++) {
-    const srcByte = cpu.memory.read8(src);
+    // BIOS 0xFA4: 6 instructions, one a register shift, and the load; after the byte's units, a
+    // compare and the branch back.
+    cycles += 7 + loadCycles(memory, src, 1) + 2 + TAKEN;
+    const srcByte = memory.read8(src);
     src = (src + 1) >>> 0;
     for (let bitPos = 0; bitPos < 8; bitPos += srcBitWidth) {
+      // BIOS 0xFBC: 13 instructions, three of them register shifts, and the branch back; the offset
+      // costs a stack load and an add, and a full word its store and two moves.
+      cycles += 16 + TAKEN;
       let value = (srcByte >>> bitPos) & srcMask;
       if (value !== 0 || addToZero) {
-        value += offsetValue;
+        value = (value + offsetValue) >>> 0;
+        cycles += 2 + STACK_LOAD;
+      } else {
+        cycles += TAKEN;
       }
       word = (word | (value << bitsUsed)) >>> 0;
       bitsUsed += dstBitWidth;
-      if (bitsUsed === 32) {
-        cpu.memory.write32(dst, word);
+      if (bitsUsed >= 32) {
+        memory.write32(dst, word);
+        cycles += 3 + storeCycles(memory, dst, 4);
         dst = (dst + 4) >>> 0;
         word = 0;
         bitsUsed = 0;
+      } else {
+        cycles += TAKEN;
       }
     }
   }
   cpu.registers[0] = src;
   cpu.registers[1] = dst;
   cpu.registers[3] = bitsUsed;
+  return cycles;
 }
 
 // ─── Decompressor output ────────────────────────────────────────────
@@ -808,7 +917,7 @@ class DecompressorOutput {
     this.#address = (address + 1) >>> 0;
     if (!this.#vram) {
       this.#memory.write8(address, byte);
-      return this.#memory.accessCycles(address, 1, false);
+      return storeCycles(this.#memory, address, 1);
     }
     if ((address & 1) === 0) {
       this.#held = byte;
@@ -816,7 +925,12 @@ class DecompressorOutput {
     }
     const halfword = (address & ~1) >>> 0;
     this.#memory.write16(halfword, this.#held | (byte << 8));
-    return this.#memory.accessCycles(halfword, 2, false);
+    return storeCycles(this.#memory, halfword, 2);
+  }
+
+  /** Whether the next byte completes a store: every byte in WRAM, every odd one in VRAM. */
+  get storesNext(): boolean {
+    return !this.#vram || (this.#address & 1) === 1;
   }
 
   /** The byte at `address` as a back-reference reads it: VRAM through its aligned halfword. */
@@ -865,31 +979,43 @@ class DecompressorOutput {
  * A reference is copied whole even past the size, as the BIOS does. r0 and r1 end past the data
  * read and written.
  */
-function lz77Decompress(cpu: BiosCpu, useHalfwordWrites: boolean): number {
-  let src = cpu.registers[0]! >>> 0;
-  if (!readableSource(src)) {
-    return 0;
-  }
+const LZ77_CYCLES = 35;
+const LZ77_REFUSED_CYCLES = 32;
+const LZ77_VRAM_CYCLES = 45;
+const LZ77_VRAM_REFUSED_CYCLES = 42;
 
-  // The BIOS's cycles, counted the way mGBA's _unLz77 counts them: a load is its access plus an I
-  // cycle, a store its access, and each pass of the loop adds the instructions around them.
+function lz77Decompress(cpu: BiosCpu, vram: boolean): number {
   const memory = cpu.memory;
-  const load = (address: number, width: 1 | 2 | 4): number => memory.accessCycles(address, width, false) + 1;
-  let cycles = 20 + load(src, 4);
+  const header = cpu.registers[0]! >>> 0;
+  let src = (header + 4) >>> 0;
+  let remaining = memory.read32(header) >>> 8;
+  let cycles = loadCycles(memory, header, 4) + sourceCheckCycles(remaining);
+  if (vram) {
+    cpu.registers[3] = 0;
+  }
+  if (!readableRange(src, remaining)) {
+    cpu.registers[0] = src;
+    return cycles + (vram ? LZ77_VRAM_REFUSED_CYCLES : LZ77_REFUSED_CYCLES);
+  }
+  cycles += vram ? LZ77_VRAM_CYCLES : LZ77_CYCLES;
+  const output = new DecompressorOutput(memory, cpu.registers[1]! >>> 0, vram);
 
-  let remaining = memory.read32(src) >>> 8;
-  src = (src + 4) >>> 0;
-  const output = new DecompressorOutput(memory, cpu.registers[1]! >>> 0, useHalfwordWrites);
-
+  // BIOS 0x1114 (WRAM, ARM) and 0x11B4 (VRAM): 4 instructions and the load per flag byte; per flag,
+  // 4 instructions to test it, then the literal or the reference, then 3 instructions and the
+  // branch back while data remains; after the eighth flag, 2 instructions and the branch back.
   while (remaining > 0) {
-    cycles += 14 + load(src, 1);
+    cycles += 4 + loadCycles(memory, src, 1);
     const flags = memory.read8(src);
     src = (src + 1) >>> 0;
 
     for (let i = 7; i >= 0 && remaining > 0; i--) {
-      cycles += 14 + 18;
+      cycles += 4 + 3 + TAKEN;
       if ((flags >> i) & 1) {
-        cycles += load(src, 1) + load((src + 1) >>> 0, 1);
+        // The reference: its branch, 10 instructions (13 for VRAM) and its two bytes, the first
+        // loaded twice; per byte, 4 instructions (VRAM: 15, three of them register shifts, and a
+        // halfword load), the load, the store, and the branch back but for the last byte.
+        cycles +=
+          TAKEN + (vram ? 13 : 10) + 2 * loadCycles(memory, src, 1) + loadCycles(memory, (src + 1) >>> 0, 1) - TAKEN;
         const byte1 = memory.read8(src);
         const byte2 = memory.read8((src + 1) >>> 0);
         src = (src + 2) >>> 0;
@@ -897,31 +1023,32 @@ function lz77Decompress(cpu: BiosCpu, useHalfwordWrites: boolean): number {
         const length = ((byte1 >> 4) & 0xf) + 3;
         let from = (output.address - (((byte1 & 0xf) << 8) | byte2) - 1) >>> 0;
         for (let j = 0; j < length; j++) {
-          cycles += useHalfwordWrites ? 10 + load(from & ~1, 2) + 4 : 10 + load(from, 1);
+          cycles += vram
+            ? 18 + TAKEN + loadCycles(memory, (from & ~1) >>> 0, 2)
+            : 4 + TAKEN + loadCycles(memory, from, 1);
           cycles += output.put(output.read(from));
           from = (from + 1) >>> 0;
-          remaining--;
         }
+        remaining -= length;
       } else {
-        cycles += load(src, 1);
+        // The literal: 4 instructions (VRAM: 7, one a register shift), its load, the store and the
+        // branch past the reference.
+        cycles += (vram ? 8 : 4) + TAKEN + loadCycles(memory, src, 1);
         cycles += output.put(memory.read8(src));
         src = (src + 1) >>> 0;
         remaining--;
       }
     }
+    if (remaining > 0) {
+      cycles += 2 + TAKEN;
+    }
   }
   cpu.registers[0] = src;
   cpu.registers[1] = output.end;
-  cpu.registers[3] = output.heldByte;
+  if (vram) {
+    cpu.registers[3] = output.heldByte;
+  }
   return cycles;
-}
-
-function swiLz77UnCompWram(cpu: BiosCpu): number {
-  return lz77Decompress(cpu, false);
-}
-
-function swiLz77UnCompVram(cpu: BiosCpu): number {
-  return lz77Decompress(cpu, true);
 }
 
 // ─── SWI 0x14/0x15: Run-Length Decompress ───────────────────────────
@@ -944,31 +1071,61 @@ function swiLz77UnCompVram(cpu: BiosCpu): number {
  * A run is written whole even past the size, as the BIOS does. r0 and r1 end past the data read
  * and written, and r3 holds the BIOS's return address, 0x170.
  */
-function rlDecompress(cpu: BiosCpu, useHalfwordWrites: boolean): void {
-  let src = cpu.registers[0]! >>> 0;
-  if (!readableSource(src)) {
-    return;
-  }
-  const memory = cpu.memory;
-  let remaining = memory.read32(src) >>> 8;
-  src = (src + 4) >>> 0;
-  const output = new DecompressorOutput(memory, cpu.registers[1]! >>> 0, useHalfwordWrites);
+const RL_CYCLES = 44;
+const RL_REFUSED_CYCLES = 42;
+const RL_VRAM_CYCLES = 48;
+const RL_VRAM_REFUSED_CYCLES = 45;
 
+function rlDecompress(cpu: BiosCpu, vram: boolean): number {
+  const memory = cpu.memory;
+  const header = cpu.registers[0]! >>> 0;
+  let src = (header + 4) >>> 0;
+  let remaining = memory.read32(header) >>> 8;
+  let cycles = loadCycles(memory, header, 4) + sourceCheckCycles(remaining);
+  cpu.registers[3] = 0x170;
+  if (!readableRange(src, remaining)) {
+    cpu.registers[0] = src;
+    return cycles + (vram ? RL_VRAM_REFUSED_CYCLES : RL_REFUSED_CYCLES);
+  }
+  cycles += vram ? RL_VRAM_CYCLES : RL_CYCLES;
+  const output = new DecompressorOutput(memory, cpu.registers[1]! >>> 0, vram);
+
+  // A byte's store: in WRAM, part of the byte's instructions; in VRAM, 3 instructions and the store
+  // when it completes a halfword, or else the branch past them.
+  const put = (byte: number): number => {
+    if (!vram) {
+      return output.put(byte);
+    }
+    const stores = output.storesNext;
+    const store = output.put(byte);
+    return stores ? 3 + store : TAKEN;
+  };
+
+  // BIOS 0x1286 (WRAM, Thumb) and 0x12D4 (VRAM): 8 instructions and the flag byte's load per block
+  // (VRAM: 11, with the flag parked on the stack and read back twice), then the run or the literal
+  // bytes, each byte's branch back but the last, and the branch to the next block.
   while (remaining > 0) {
+    cycles += (vram ? 11 + STACK_STORE + 2 * STACK_LOAD : 8) + loadCycles(memory, src, 1) + 1;
     const flag = memory.read8(src);
     src = (src + 1) >>> 0;
     if (flag & 0x80) {
+      // The run: its branch, 4 instructions (VRAM: 5, the byte parked on the stack) and the byte's
+      // load; per byte 4 instructions (VRAM: 8, a stack load and a register shift).
       const length = (flag & 0x7f) + 3;
+      cycles += TAKEN + (vram ? 5 + STACK_STORE : 4) + loadCycles(memory, src, 1);
       const data = memory.read8(src);
       src = (src + 1) >>> 0;
       for (let i = 0; i < length; i++) {
-        output.put(data);
+        cycles += (vram ? 9 + STACK_LOAD : 4) + TAKEN + put(data);
       }
       remaining -= length;
     } else {
+      // The literal bytes: 2 instructions; per byte 6 instructions (VRAM: 9 and a register shift)
+      // and its load.
       const length = (flag & 0x7f) + 1;
+      cycles += 2;
       for (let i = 0; i < length; i++) {
-        output.put(memory.read8(src));
+        cycles += (vram ? 10 : 6) + TAKEN + loadCycles(memory, src, 1) + put(memory.read8(src));
         src = (src + 1) >>> 0;
       }
       remaining -= length;
@@ -976,15 +1133,7 @@ function rlDecompress(cpu: BiosCpu, useHalfwordWrites: boolean): void {
   }
   cpu.registers[0] = src;
   cpu.registers[1] = output.end;
-  cpu.registers[3] = 0x170;
-}
-
-function swiRlUnCompWram(cpu: BiosCpu): void {
-  rlDecompress(cpu, false);
-}
-
-function swiRlUnCompVram(cpu: BiosCpu): void {
-  rlDecompress(cpu, true);
+  return cycles;
 }
 
 // ─── SWI 0x13: HuffUnComp ───────────────────────────────────────
@@ -1006,76 +1155,90 @@ function swiRlUnCompVram(cpu: BiosCpu): void {
  *                     bit 6 = right child is leaf
  *                     bit 7 = left child is leaf
  *   u32[] data: bitstream (MSB first within each 32-bit word)
+ *
+ * The BIOS shifts each leaf in from the top of a word, `(word >> size) | (leaf << (32 - size))`,
+ * and stores the word after (size & 7) + 4 leaves: 8 for 4-bit data, 4 for 8-bit data, and 4 for
+ * a size of 0, whose words stay 0. r0 ends past the last bitstream word read, r1 past the data,
+ * and r3 holds the last word.
  */
-function swiHuffUnComp(cpu: BiosCpu): void {
+const HUFF_CYCLES = 61;
+const HUFF_REFUSED_CYCLES = 44;
+
+function swiHuffUnComp(cpu: BiosCpu): number {
+  const memory = cpu.memory;
   const src = cpu.registers[0]! >>> 0;
-  const dst = cpu.registers[1]! >>> 0;
+  let dst = cpu.registers[1]! >>> 0;
+  // The check covers the first byte only.
   if (!readableSource(src)) {
-    return;
+    return HUFF_REFUSED_CYCLES;
   }
 
-  const header = cpu.memory.read32(src);
-  const bits = header & 0xf; // 4 or 8
-  const decompSize = header >>> 8;
+  const header = memory.read32(src);
+  const bits = header & 0xf;
+  const leavesPerWord = (bits & 7) + 4;
+  let remaining = header >>> 8;
+  const root = (src + 5) >>> 0;
+  let stream = (src + 4 + (memory.read8((src + 4) >>> 0) + 1) * 2) >>> 0;
+  let cycles =
+    HUFF_CYCLES +
+    loadCycles(memory, src, 1) +
+    STACK_STORE +
+    loadCycles(memory, src, 4) +
+    loadCycles(memory, (src + 4) >>> 0, 1);
 
-  if (decompSize === 0) {
-    return;
-  }
-
-  // Tree table
-  const treeSizeByte = cpu.memory.read8((src + 4) >>> 0);
-  const treeBytes = (treeSizeByte << 1) + 1;
-  const treeBase = (src + 5) >>> 0; // memory address of root node
-
-  // Bitstream starts after the tree, aligned to 4 bytes
-  let streamPos = (treeBase + treeBytes + 3) & ~3;
-
-  let remaining = decompSize;
-  let dstPos = dst;
-  let block = 0;
-  let bitsSeen = 0;
-
-  // Current node pointer (memory address in the tree)
-  let nPointer = treeBase;
-
+  let node = root;
+  let word = 0;
+  let leaves = 0;
+  // BIOS 0x1064 (ARM): 4 instructions and the load per bitstream word, which LDR rotates when the
+  // tree leaves it unaligned; after its 32 bits, 2 instructions and the branch back.
   while (remaining > 0) {
-    const bitstream = cpu.memory.read32(streamPos);
-    streamPos = (streamPos + 4) >>> 0;
-
-    for (let i = 31; i >= 0 && remaining > 0; i--) {
-      const currentBit = (bitstream >>> i) & 1;
-      const node = cpu.memory.read8(nPointer);
-      const offset = node & 0x3f;
-
-      // Child pair address (mgba formula)
-      const next = ((nPointer & ~1) + offset * 2 + 2) >>> 0;
-
-      const isRight = currentBit === 1;
-      const childAddr = isRight ? (next + 1) >>> 0 : next;
-      const isLeaf = isRight ? !!(node & 0x40) : !!(node & 0x80);
-
-      if (isLeaf) {
-        const value = cpu.memory.read8(childAddr);
-        block |= (value & ((1 << bits) - 1)) << bitsSeen;
-        bitsSeen += bits;
-
-        if (bitsSeen >= 32) {
-          cpu.memory.write32(dstPos, block >>> 0);
-          dstPos = (dstPos + 4) >>> 0;
-          remaining -= 4;
-          block = 0;
-          bitsSeen = 0;
-        }
-
-        // Reset to root
-        nPointer = treeBase;
+    cycles += 4 + loadCycles(memory, stream, 4);
+    const rotate = (stream & 3) * 8;
+    const aligned = memory.read32((stream & ~3) >>> 0);
+    let bitstream = ((aligned >>> rotate) | (aligned << (32 - rotate))) >>> 0;
+    stream = (stream + 4) >>> 0;
+    let bit = 0;
+    for (; bit < 32; bit++) {
+      // BIOS 0x1074: 15 instructions, one a register shift, and the node's two loads; the branch
+      // past the leaf code when the bit leads to another node.
+      cycles += 16 + 2 * loadCycles(memory, node, 1);
+      const right = bitstream >>> 31;
+      bitstream = (bitstream << 1) >>> 0;
+      const flags = memory.read8(node);
+      const child = ((node & ~1) + ((flags & 0x3f) + 1) * 2 + right) >>> 0;
+      if (((flags << right) & 0x80) === 0) {
+        cycles += TAKEN;
+        node = child;
       } else {
-        nPointer = childAddr;
+        // The leaf: 11 instructions, two of them register shifts, its load and a stack load; the
+        // word's store after its last leaf.
+        cycles += 13 + loadCycles(memory, child, 1) + STACK_LOAD;
+        const leaf = memory.read8(child);
+        word = ((word >>> bits) | (bits === 0 ? 0 : leaf << (32 - bits))) >>> 0;
+        node = root;
+        if (++leaves === leavesPerWord) {
+          memory.write32(dst, word);
+          cycles += storeCycles(memory, dst, 4);
+          dst = (dst + 4) >>> 0;
+          remaining -= 4;
+          leaves = 0;
+        }
+      }
+      // 3 instructions and the branch back while data remains, or the branch out.
+      cycles += 3 + TAKEN;
+      if (remaining <= 0) {
+        cycles += 1;
+        break;
       }
     }
+    if (bit === 32) {
+      cycles += 2 + TAKEN;
+    }
   }
-  cpu.registers[0] = streamPos;
-  cpu.registers[1] = dstPos;
+  cpu.registers[0] = stream;
+  cpu.registers[1] = dst;
+  cpu.registers[3] = word;
+  return cycles;
 }
 
 // ─── SWI 0x16-0x18: Differential unfilters ─────────────────────────
@@ -1090,35 +1253,56 @@ function swiHuffUnComp(cpu: BiosCpu): void {
  * Each unit of `unitBytes` is the previous unit plus the difference, wrapping at its width. The
  * VRAM variant of the 8-bit filter stores halfwords, so it stores each pair of bytes once the
  * second is known, and an odd last byte stays unwritten (GBATEK "Decompression Functions"; checked
- * against the real BIOS).
+ * against the real BIOS). The 16-bit filter leaves its last difference in r3, or the source
+ * check's 0xBA4 when it ran one unit; the 8-bit ones leave their return address, 0x170.
  */
-function swiDiffUnFilter(cpu: BiosCpu, unitBytes: 1 | 2, vram: boolean): void {
-  let src = cpu.registers[0]! >>> 0;
-  if (!readableSource(src)) {
-    return;
-  }
+const DIFF_CYCLES = 37;
+const DIFF_REFUSED_CYCLES = 35;
+const DIFF8_VRAM_CYCLES = 44;
+const DIFF8_VRAM_REFUSED_CYCLES = 42;
+
+function swiDiffUnFilter(cpu: BiosCpu, unitBytes: 1 | 2, vram: boolean): number {
   const memory = cpu.memory;
-  const size = memory.read32(src) >>> 8;
-  src = (src + 4) >>> 0;
+  const header = cpu.registers[0]! >>> 0;
+  let src = (header + 4) >>> 0;
+  const size = memory.read32(header) >>> 8;
+  let cycles = loadCycles(memory, header, 4) + sourceCheckCycles(size);
+  cpu.registers[3] = unitBytes === 1 ? 0x170 : 0xba4;
+  if (!readableRange(src, size)) {
+    cpu.registers[0] = src;
+    return cycles + (vram ? DIFF8_VRAM_REFUSED_CYCLES : DIFF_REFUSED_CYCLES);
+  }
+  cycles += vram ? DIFF8_VRAM_CYCLES : DIFF_CYCLES;
   let dst = cpu.registers[1]! >>> 0;
   const output = new DecompressorOutput(memory, dst, vram);
   let unit = 0;
-  let difference = 0;
   for (let remaining = size; remaining > 0; remaining -= unitBytes) {
+    const first = remaining === size;
+    // BIOS 0x133E, 0x136C and 0x13A4 (Thumb): the first unit takes 4 instructions, its load and
+    // its store; each next one 8 instructions, its load, its store and the branch back. The VRAM
+    // loop takes 11, one a register shift, and 4 more instructions and the store, or the branch
+    // past them, by whether the byte completes a halfword.
+    cycles += loadCycles(memory, src, unitBytes) + (first ? 4 : vram ? 13 : 10);
     if (unitBytes === 1) {
       unit = (unit + memory.read8(src)) & 0xff;
-      output.put(unit);
+      const stores = output.storesNext;
+      const store = output.put(unit);
+      cycles += !vram || first ? store : stores ? 4 + store + TAKEN : TAKEN;
     } else {
-      difference = memory.read16(src);
+      const difference = memory.read16(src);
       unit = (unit + difference) & 0xffff;
       memory.write16(dst, unit);
+      cycles += storeCycles(memory, dst, 2);
       dst = (dst + 2) >>> 0;
+      if (!first) {
+        cpu.registers[3] = difference;
+      }
     }
     src = (src + unitBytes) >>> 0;
   }
   cpu.registers[0] = src;
   cpu.registers[1] = unitBytes === 1 ? output.end : dst;
-  cpu.registers[3] = unitBytes === 1 ? 0x170 : difference;
+  return cycles;
 }
 
 // ─── SWI 0x01: RegisterRamReset ───────────────────────────────────
