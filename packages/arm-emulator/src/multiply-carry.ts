@@ -9,12 +9,15 @@
  * reads one bit of the carry vector.
  *
  * Research and algorithm: zaydlang and calc84maniac, "Solving the Mystery of ARM7TDMI Multiply
- * Carry Flag" (2024, https://bmchtech.github.io/post/multiply/), as implemented in NanoBoyAdvance
- * (src/nba/src/arm/handlers/arithmetic.inl: MultiplyCarrySimple, MultiplyCarryLo,
- * MultiplyCarryHi). The expected flags are hardware results from mgba-suite's multiply-long test.
+ * Carry Flag" (2024, https://bmchtech.github.io/post/multiply/), whose reference implementation
+ * simulates the whole Booth array (https://github.com/zaydlang/multiplication-algorithm, impl.h,
+ * zlib license). The functions below compute the carry alone, in the closed form calc84maniac
+ * wrote and published with the notice below in NanoBoyAdvance commit 61b0c90 (MultiplyCarrySimple,
+ * MultiplyCarryLo, MultiplyCarryHi). They are checked against the reference implementation, and
+ * mgba-suite's multiply-long test holds the hardware's flags.
  *
- * The functions below are a TypeScript port of that algorithm, altered from its original form:
- * translated to 32-bit JavaScript integer arithmetic. Its license follows.
+ * This file is a TypeScript translation of that closed form, altered from its original form: it
+ * computes with 32-bit JavaScript integers. Its license follows.
  *
  *   Copyright (C) 2024 zaydlang, calc84maniac
  *
