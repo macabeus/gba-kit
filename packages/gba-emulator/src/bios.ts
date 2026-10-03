@@ -49,7 +49,8 @@ interface BiosCpu {
  * @param cpu - The CPU instance
  * @param swiNumber - The SWI function number (0x00-0xFF)
  * @returns the cycles the BIOS spends from the SWI vector to its return branch, or null for a call
- *   the BIOS image runs as ARM code, which the CPU enters through the SWI exception
+ *   the BIOS image runs as ARM code, which the CPU enters through the SWI exception: the calls that
+ *   steer the CPU itself, and the inputs the real BIOS never returns from
  */
 export function handleSwi(cpu: BiosCpu, swiNumber: number): number | null {
   if (runsInBiosCode(swiNumber)) {
@@ -57,7 +58,7 @@ export function handleSwi(cpu: BiosCpu, swiNumber: number): number | null {
   }
   // Read before the call, which may change the registers.
   const dispatch = swiDispatchCycles(cpu);
-  let cycles = 0;
+  let cycles: number | null = 0;
   switch (swiNumber) {
     case 0x01:
       cycles = swiRegisterRamReset(cpu);
@@ -130,7 +131,7 @@ export function handleSwi(cpu: BiosCpu, swiNumber: number): number | null {
       // HardReset (0x26) return at once here; m4a games carry their own copy of the driver.
       break;
   }
-  return dispatch + cycles;
+  return cycles === null ? null : dispatch + cycles;
 }
 
 /**
@@ -696,7 +697,8 @@ function swiBgAffineSet(cpu: BiosCpu): number {
   let dst = cpu.registers[1]! >>> 0;
   let cycles = BG_AFFINE_SET_CYCLES;
 
-  for (let count = cpu.registers[2]! >>> 0; count > 0; count--) {
+  // The BIOS counts r2 down as a signed number, so a count below 1 computes nothing.
+  for (let count = cpu.registers[2]! | 0; count > 0; count--) {
     const ox = memory.read32(src) | 0;
     const oy = memory.read32((src + 4) >>> 0) | 0;
     const cx = toS16(memory.read16((src + 8) >>> 0));
@@ -774,7 +776,8 @@ function swiObjAffineSet(cpu: BiosCpu): number {
   const stride = cpu.registers[3]! >>> 0;
   let cycles = OBJ_AFFINE_SET_CYCLES;
 
-  for (let count = cpu.registers[2]! >>> 0; count > 0; count--) {
+  // The BIOS counts r2 down as a signed number, so a count below 1 computes nothing.
+  for (let count = cpu.registers[2]! | 0; count > 0; count--) {
     const sx = toS16(memory.read16(src));
     const sy = toS16(memory.read16((src + 2) >>> 0));
     const angle = memory.read16((src + 4) >>> 0);
@@ -824,11 +827,14 @@ function swiObjAffineSet(cpu: BiosCpu): number {
  * r3 ends as the count of its bits. A unit the offset carries past its width spills into the next
  * unit's bits. A source unit wider than 8 bits reads as 0 (mGBA bios.c _unBitPack; checked against
  * the real BIOS).
+ *
+ * With a source width of 0 the BIOS's unit loop never reaches the next byte: it stores words of
+ * zero units (or of offsets) past the destination forever. That loop runs from the BIOS image.
  */
 const BIT_UNPACK_CYCLES = 59;
 const BIT_UNPACK_REFUSED_CYCLES = 43;
 
-function swiBitUnPack(cpu: BiosCpu): number {
+function swiBitUnPack(cpu: BiosCpu): number | null {
   const memory = cpu.memory;
   let src = cpu.registers[0]! >>> 0;
   let dst = cpu.registers[1]! >>> 0;
@@ -839,6 +845,9 @@ function swiBitUnPack(cpu: BiosCpu): number {
     return BIT_UNPACK_REFUSED_CYCLES + loadCycles(memory, infoPtr, 2) + sourceCheckCycles(srcLength);
   }
   const srcBitWidth = memory.read8((infoPtr + 2) >>> 0);
+  if (srcBitWidth === 0) {
+    return null;
+  }
   const dstBitWidth = memory.read8((infoPtr + 3) >>> 0);
   const dataOffset = memory.read32((infoPtr + 4) >>> 0);
 
@@ -1160,11 +1169,17 @@ function rlDecompress(cpu: BiosCpu, vram: boolean): number {
  * and stores the word after (size & 7) + 4 leaves: 8 for 4-bit data, 4 for 8-bit data, and 4 for
  * a size of 0, whose words stay 0. r0 ends past the last bitstream word read, r1 past the data,
  * and r3 holds the last word.
+ *
+ * The walk moves forward through memory, at least a byte per bit, until a node's flag marks a
+ * leaf, so a walk of more nodes than the largest tree table holds (512 bytes) has left its table.
+ * On hardware it reads on through the memory after it until a byte there marks a leaf, which may
+ * never happen; this HLE hands such a call to the BIOS image's endless loop instead.
  */
 const HUFF_CYCLES = 61;
 const HUFF_REFUSED_CYCLES = 44;
+const HUFF_WALK_LIMIT = 512;
 
-function swiHuffUnComp(cpu: BiosCpu): number {
+function swiHuffUnComp(cpu: BiosCpu): number | null {
   const memory = cpu.memory;
   const src = cpu.registers[0]! >>> 0;
   let dst = cpu.registers[1]! >>> 0;
@@ -1189,6 +1204,7 @@ function swiHuffUnComp(cpu: BiosCpu): number {
   let node = root;
   let word = 0;
   let leaves = 0;
+  let walk = 0;
   // BIOS 0x1064 (ARM): 4 instructions and the load per bitstream word, which LDR rotates when the
   // tree leaves it unaligned; after its 32 bits, 2 instructions and the branch back.
   while (remaining > 0) {
@@ -1209,6 +1225,11 @@ function swiHuffUnComp(cpu: BiosCpu): number {
       if (((flags << right) & 0x80) === 0) {
         cycles += TAKEN;
         node = child;
+        if (++walk === HUFF_WALK_LIMIT) {
+          cpu.registers[0] = stream;
+          cpu.registers[1] = dst;
+          return null;
+        }
       } else {
         // The leaf: 11 instructions, two of them register shifts, its load and a stack load; the
         // word's store after its last leaf.
@@ -1216,6 +1237,7 @@ function swiHuffUnComp(cpu: BiosCpu): number {
         const leaf = memory.read8(child);
         word = ((word >>> bits) | (bits === 0 ? 0 : leaf << (32 - bits))) >>> 0;
         node = root;
+        walk = 0;
         if (++leaves === leavesPerWord) {
           memory.write32(dst, word);
           cycles += storeCycles(memory, dst, 4);

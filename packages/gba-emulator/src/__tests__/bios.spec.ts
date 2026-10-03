@@ -643,6 +643,11 @@ describe('BIOS unpacking edge cases, as the real BIOS runs them', () => {
     expect(bg.cpu.registers[3]).toBe(0x7fff);
   });
 
+  it('BgAffineSet and ObjAffineSet count r2 down as a signed number: below 1 computes nothing', () => {
+    expect(call(0x0e, [SRC, DST, -1]).cpu.registers[0]).toBe(SRC);
+    expect(call(0x0f, [SRC, DST, -1, 2]).cpu.registers[0]).toBe(SRC);
+  });
+
   it('Diff16bitUnFilter leaves the source check’s 0xBA4 in r3 when it runs one unit', () => {
     const { cpu } = call(0x18, [SRC, DST, 0, 0x55], (m) => {
       m.write32(SRC, 0x00000282);

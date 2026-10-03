@@ -5,7 +5,9 @@
  * (bios.ts). The ones that steer the CPU itself run as ARM code from this image, entered through
  * the SWI exception the way the real BIOS's are: Halt, Stop and CustomHalt write HALTCNT from the
  * BIOS, IntrWait sleeps and takes interrupts inside its own loop, and SoftReset sets the stacks and
- * modes and jumps to the game. The IRQ vector leads to the handler that calls the game's own.
+ * modes and jumps to the game. The image also holds the loops the real BIOS never leaves on some
+ * inputs, which bios.ts hands those calls to. The IRQ vector leads to the handler that calls the
+ * game's own.
  *
  * Each word is listed with the instruction it encodes. The layout follows mGBA's replacement BIOS
  * (src/gba/hle-bios.s); the code reproduces the real BIOS's behaviour, checked against it: IntrWait
@@ -27,6 +29,8 @@ const INTR_WAIT = 0x114;
 const SOFT_RESET = 0x160;
 const NOP_CALL = 0x204;
 const SWI_TABLE = 0x208;
+const BIT_UNPACK_ENDLESS = 0x2a8;
+const HUFF_UNCOMP_ENDLESS = 0x2e4;
 
 /** The SWIs this image runs, by number. Every other number runs in bios.ts at the SWI instruction. */
 const ROUTINES: ReadonlyMap<number, number> = new Map([
@@ -36,6 +40,16 @@ const ROUTINES: ReadonlyMap<number, number> = new Map([
   [0x04, INTR_WAIT],
   [0x05, VBLANK_INTR_WAIT],
   [0x27, CUSTOM_HALT],
+]);
+
+/**
+ * The loops the real BIOS never leaves on some inputs, by SWI number. bios.ts runs these SWIs and
+ * hands such a call to the BIOS code, so the machine runs on as it does on hardware: interrupts are
+ * taken, frames end, and a debugger can stop it.
+ */
+const ENDLESS_ROUTINES: ReadonlyMap<number, number> = new Map([
+  [0x10, BIT_UNPACK_ENDLESS],
+  [0x13, HUFF_UNCOMP_ENDLESS],
 ]);
 
 /** The dispatcher's table covers SWI 0x00 up to the last number the image runs. */
@@ -68,6 +82,7 @@ const CALLER_STACK_FRAMES: ReadonlyArray<
   [INTR_WAIT + 0x2c, INTR_WAIT + 0x30, 8, DISPATCH_SLOTS], // its return
   [INTR_WAIT + 0x30, SOFT_RESET, 16, INTR_WAIT_SLOTS], // take_flags, called from intr_wait
   [NOP_CALL, NOP_CALL + 4, 8, DISPATCH_SLOTS],
+  [BIT_UNPACK_ENDLESS, HUFF_UNCOMP_ENDLESS + 4, 8, DISPATCH_SLOTS],
 ];
 
 /**
@@ -252,7 +267,36 @@ const SECTIONS: ReadonlyArray<readonly [address: number, words: readonly number[
       0xe12fff1e, // 204: bx lr
     ],
   ],
-  [SWI_TABLE, Array.from({ length: SWI_TABLE_ENTRIES }, (_, n) => ROUTINES.get(n) ?? NOP_CALL)],
+  [
+    SWI_TABLE,
+    Array.from({ length: SWI_TABLE_ENTRIES }, (_, n) => ROUTINES.get(n) ?? ENDLESS_ROUTINES.get(n) ?? NOP_CALL),
+  ],
+  [
+    // bit_unpack_endless (0x10 with a source width of 0): the real BIOS's unit loop never reaches the
+    // next source byte. Each unit is 0, or the offset when bit 31 adds it to zero units too; a word
+    // of them is stored past the destination each time the units reach 32 bits, forever.
+    BIT_UNPACK_ENDLESS,
+    [
+      0xe592c004, // 2a8: ldr r12, [r2, #4]             data offset
+      0xe5d22003, // 2ac: ldrb r2, [r2, #3]             destination width
+      0xe2800001, // 2b0: add r0, r0, #1                the source byte it read
+      0xe1b0c08c, // 2b4: movs r12, r12, lsl #1         C = bit 31
+      0xe1a0c0ac, // 2b8: mov r12, r12, lsr #1          the offset
+      0x33a0c000, // 2bc: movcc r12, #0                 zero units stay 0
+      0xe3a03000, // 2c0: mov r3, #0                    bits filled
+      0xe3a0e000, // 2c4: mov lr, #0                    the word
+      0xe18ee31c, // 2c8: orr lr, lr, r12, lsl r3
+      0xe0833002, // 2cc: add r3, r3, r2
+      0xe3530020, // 2d0: cmp r3, #32
+      0xa481e004, // 2d4: strge lr, [r1], #4
+      0xa3a0e000, // 2d8: movge lr, #0
+      0xa3a03000, // 2dc: movge r3, #0
+      0xeafffff8, // 2e0: b 0x2c8
+      // huff_uncomp_endless (0x13 whose tree walk finds no leaf): the walk reads on through memory
+      // and stores nothing.
+      0xeafffffe, // 2e4: b .
+    ],
+  ],
 ];
 
 /** The 16 KB BIOS region as this image fills it; the rest reads zero. */

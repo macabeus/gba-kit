@@ -131,6 +131,47 @@ describe('IntrWait and VBlankIntrWait run as BIOS code', () => {
   });
 });
 
+describe('a call the real BIOS never returns from runs on in the BIOS', () => {
+  const CALL = 0x03000100;
+  const INFO = 0x02020000;
+  const DST = 0x02010000;
+
+  /** A machine that runs `swi n` from IWRAM with r0-r2 set, VBlank IRQs on. */
+  function stuckIn(n: number, regs: number[], setup: (gba: Gba) => void): Gba {
+    const gba = boot(LOOP);
+    setup(gba);
+    gba.bus.write32(CALL, (0xef000000 | (n << 16)) >>> 0);
+    regs.forEach((value, r) => (gba.armCpu.registers[r] = value >>> 0));
+    gba.armCpu.registers[15] = CALL;
+    return gba;
+  }
+
+  it('BitUnPack with a source width of 0 stores past its destination forever; interrupts and frames go on', () => {
+    // The real BIOS's unit loop never reaches the next source byte: each 8-bit unit is the offset 5,
+    // which bit 31 adds to zero units too, and every fourth unit stores a word.
+    const gba = stuckIn(0x10, [0x02000000, DST, INFO], (m) => {
+      m.bus.write16(INFO, 4); // 4 source bytes
+      m.bus.write16(INFO + 2, 0x0800); // source width 0, destination width 8
+      m.bus.write32(INFO + 4, 0x80000005);
+    });
+    gba.runFrame();
+    gba.runFrame();
+    expect(inBios(gba)).toBe(true);
+    expect(gba.frameCount).toBe(2);
+    expect(gba.bus.read32(ISR_CALLS)).toBe(2);
+    expect(gba.bus.read32(DST + 0x1000)).toBe(0x05050505);
+  });
+
+  it('HuffUnComp whose walk leaves its tree reads on and never returns', () => {
+    // A tree of one node with no leaf flags, over zeroed memory: every node after it is the same.
+    const gba = stuckIn(0x13, [0x02000000, DST], (m) => m.bus.write32(0x02000000, 0x00010028));
+    gba.runFrame();
+    expect(inBios(gba)).toBe(true);
+    expect(gba.bus.read32(ISR_CALLS)).toBe(1);
+    expect(gba.bus.read32(DST)).toBe(0);
+  });
+});
+
 describe('Halt and HALTCNT', () => {
   it('Halt returns at once while IE AND IF is already set, whatever IME says', () => {
     // GBATEK "HALTCNT": the CPU is paused as long as (IE AND IF) = 0.
