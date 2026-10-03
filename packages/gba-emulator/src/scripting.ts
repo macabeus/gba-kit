@@ -532,11 +532,8 @@ export class ScriptingEngine {
           throw new Error(`Unknown memory region: "${(options as MemorySnapshotRegion).region}"`);
       }
     } else {
-      data = new Uint8Array(options.length);
+      data = this.#gba.bus.peek(options.address, options.length).data;
       address = options.address;
-      for (let i = 0; i < options.length; i++) {
-        data[i] = this.#gba.bus.read8(options.address + i);
-      }
     }
 
     await this.#host.writeMemorySnapshot(options.name, {
@@ -560,11 +557,7 @@ export class ScriptingEngine {
   }
 
   getMemory(address: number, length: number): Uint8Array {
-    const data = new Uint8Array(length);
-    for (let i = 0; i < length; i++) {
-      data[i] = this.#gba.bus.read8(address + i);
-    }
-    return data;
+    return this.#gba.bus.peek(address, length).data;
   }
 
   /**
@@ -818,22 +811,19 @@ export class ScriptingEngine {
   read16(address: number): number {
     this.#requireReadable(address, 2, 'read16');
     this.#requireAligned(address, 2, 'read16');
-    return this.#gba.bus.read16(address);
+    return this.#readSized(address, 2);
   }
 
   /**
    * Read a word. **Throws** on a misaligned address, and on one nothing backs — see
    * {@link read16}.
    *
-   * The result is unsigned, like every other read on this surface. The bus assembles a
-   * word with `|`, which is an int32 operator, so a word with bit 31 set comes back
-   * negative there — harmless to the CPU, which stores it into a register, and not
-   * harmless to a reader comparing or formatting it.
+   * The result is unsigned, like every other read on this surface.
    */
   read32(address: number): number {
     this.#requireReadable(address, 4, 'read32');
     this.#requireAligned(address, 4, 'read32');
-    return this.#gba.bus.read32(address) >>> 0;
+    return this.#readSized(address, 4);
   }
 
   /**
@@ -973,7 +963,7 @@ export class ScriptingEngine {
    */
   #memoryProbe(address: number | string): { read: () => number; label: string } {
     if (typeof address === 'number') {
-      return { read: () => this.#gba.bus.read8(address), label: `0x${address.toString(16)}` };
+      return { read: () => this.#readSized(address, 1), label: `0x${address.toString(16)}` };
     }
     const loc = this.#resolveLocation(address, 'wait/assert');
     return {
@@ -986,12 +976,17 @@ export class ScriptingEngine {
    * Read an unsigned little-endian integer of `size` (1–4) bytes by assembling
    * individual bytes, so it is correct at any alignment (the bus's read16/read32
    * force alignment) and the result is unsigned.
+   *
+   * Every read on this surface is a debugger's read (`bus.peek`): side-effect free, so
+   * no read watchpoint fires and no EEPROM transaction is clocked, and as stored where
+   * the CPU's view differs — the BIOS whole wherever the CPU runs, a write-only I/O
+   * register as last written.
    */
   #readSized(address: number, size: number): number {
-    const bus = this.#gba.bus;
+    const { data } = this.#gba.bus.peek(address, size);
     let value = 0;
     for (let i = 0; i < size; i++) {
-      value |= bus.read8(address + i) << (8 * i);
+      value |= data[i]! << (8 * i);
     }
     return value >>> 0;
   }
@@ -1123,18 +1118,6 @@ export class ScriptingEngine {
     );
   }
 
-  /**
-   * The opcode stored at `address`, read the way a debugger reads memory: side-effect free, so no
-   * read watchpoint fires and no EEPROM transaction is clocked, and as stored where the CPU's view
-   * differs, as the BIOS does while the CPU runs outside it.
-   */
-  #peekOpcode(address: number, size: 2 | 4): number {
-    const { data } = this.#gba.bus.peek(address, size);
-    return size === 2
-      ? data[0]! | (data[1]! << 8)
-      : (data[0]! | (data[1]! << 8) | (data[2]! << 16) | (data[3]! << 24)) >>> 0;
-  }
-
   disassemble(
     address: number,
     count?: number,
@@ -1148,11 +1131,11 @@ export class ScriptingEngine {
 
     for (let i = 0; i < n; i++) {
       if (isThumb) {
-        const opcode = this.#peekOpcode(addr, 2);
+        const opcode = this.#readSized(addr, 2);
         results.push({ address: addr, instruction: disassembleThumb(opcode, addr), bytes: 2 });
         addr += 2;
       } else {
-        const opcode = this.#peekOpcode(addr, 4);
+        const opcode = this.#readSized(addr, 4);
         results.push({ address: addr, instruction: disassembleArm(opcode, addr), bytes: 4 });
         addr += 4;
       }
@@ -1173,7 +1156,7 @@ export class ScriptingEngine {
 
     for (let i = 0; i < maxInstructions; i++) {
       if (isThumb) {
-        const opcode = this.#peekOpcode(addr, 2);
+        const opcode = this.#readSized(addr, 2);
         const text = disassembleThumb(opcode, addr);
         results.push({ address: addr, instruction: text, bytes: 2 });
         addr += 2;
@@ -1182,7 +1165,7 @@ export class ScriptingEngine {
           break;
         }
       } else {
-        const opcode = this.#peekOpcode(addr, 4);
+        const opcode = this.#readSized(addr, 4);
         const text = disassembleArm(opcode, addr);
         results.push({ address: addr, instruction: text, bytes: 4 });
         addr += 4;
@@ -1204,7 +1187,7 @@ export class ScriptingEngine {
     const limit = maxLen ?? 256;
     const chars: number[] = [];
     for (let i = 0; i < limit; i++) {
-      const byte = this.#gba.bus.read8(address + i);
+      const byte = this.#readSized(address + i, 1);
       if (byte === 0) {
         break;
       }
@@ -1542,15 +1525,7 @@ export class ScriptingEngine {
     const results: number[] = [];
 
     for (const addr of addresses) {
-      let val: number;
-      if (size === 8) {
-        val = this.#gba.bus.read8(addr);
-      } else if (size === 16) {
-        val = this.#gba.bus.read16(addr);
-      } else {
-        val = this.#gba.bus.read32(addr);
-      }
-      if (val === options.value) {
+      if (this.#readSized(addr, size >> 3) === options.value) {
         results.push(addr);
       }
     }

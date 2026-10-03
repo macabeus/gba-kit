@@ -209,6 +209,8 @@ console.log(regs.cpsr); // Current program status register
 
 Returns a `Uint8Array` of bytes from the given address.
 
+Every memory read in this API (`getMemory`, `read16`, `read32`, `readBytes`, `readString`, `readVariable`, `filterMemory`, `wait`/`assert` conditions and memory dumps) reads the way a debugger does: it changes nothing in the machine and fires no watchpoint. It shows memory as stored, so the BIOS reads whole wherever the CPU is, a write-only I/O register reads back the value last written to it, and a byte nothing backs (including the EEPROM's serial port) reads as 0.
+
 ```javascript
 const data = getMemory(0x03000000, 16);
 console.log(data[0]); // First byte
@@ -578,17 +580,17 @@ console.log('Current HP:', getMemory(0x03001020, 1)[0]);
 
 ## GBA Memory Map
 
-| Address Range             | Region  | Size        | Description                 |
-| ------------------------- | ------- | ----------- | --------------------------- |
-| `0x00000000`–`0x00003FFF` | BIOS    | 16 KB       | System ROM (read-protected) |
-| `0x02000000`–`0x0203FFFF` | EWRAM   | 256 KB      | External work RAM           |
-| `0x03000000`–`0x03007FFF` | IWRAM   | 32 KB       | Internal work RAM (fast)    |
-| `0x04000000`–`0x040003FE` | I/O     | ~1 KB       | Hardware registers (MMIO)   |
-| `0x05000000`–`0x050003FF` | Palette | 1 KB        | Color palette RAM           |
-| `0x06000000`–`0x06017FFF` | VRAM    | 96 KB       | Video RAM                   |
-| `0x07000000`–`0x070003FF` | OAM     | 1 KB        | Sprite attribute memory     |
-| `0x08000000`–`0x09FFFFFF` | ROM     | up to 32 MB | Game Pak ROM                |
-| `0x0E000000`–`0x0E00FFFF` | SRAM    | 64 KB       | Game Pak save RAM           |
+| Address Range             | Region  | Size        | Description                            |
+| ------------------------- | ------- | ----------- | -------------------------------------- |
+| `0x00000000`–`0x00003FFF` | BIOS    | 16 KB       | System ROM (read-protected)            |
+| `0x02000000`–`0x0203FFFF` | EWRAM   | 256 KB      | External work RAM                      |
+| `0x03000000`–`0x03007FFF` | IWRAM   | 32 KB       | Internal work RAM (fast)               |
+| `0x04000000`–`0x040003FE` | I/O     | ~1 KB       | Hardware registers (MMIO)              |
+| `0x05000000`–`0x050003FF` | Palette | 1 KB        | Color palette RAM                      |
+| `0x06000000`–`0x06017FFF` | VRAM    | 96 KB       | Video RAM                              |
+| `0x07000000`–`0x070003FF` | OAM     | 1 KB        | Sprite attribute memory                |
+| `0x08000000`–`0x09FFFFFF` | ROM     | up to 32 MB | Game Pak ROM                           |
+| `0x0E000000`–`0x0E00FFFF` | Save    | 64 KB       | SRAM (32 KB, mirrored) or a flash bank |
 
 ## Examples
 

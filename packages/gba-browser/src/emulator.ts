@@ -349,12 +349,12 @@ export class EmulatorBridge {
 
   // ─── Memory Access ────────────────────────────────────────────────
 
+  /**
+   * `size` bytes at `address`, read the way a debugger reads memory (`bus.peek`): side-effect
+   * free, the BIOS whole, a write-only I/O register as last written, and 0 where nothing is mapped.
+   */
   readMemory(address: number, size: number): Uint8Array {
-    const data = new Uint8Array(size);
-    for (let i = 0; i < size; i++) {
-      data[i] = this.#gba.bus.read8(address + i);
-    }
-    return data;
+    return this.#gba.bus.peek(address, size).data;
   }
 
   // ─── Save States ────────────────────────────────────────────────

@@ -213,6 +213,20 @@ describe('BIOS read protection', () => {
     const engine = new ScriptingEngine(gba, stubHost);
     expect(engine.disassemble(0x94, 1, 'arm')[0]!.instruction).toBe(disassembleArm(0xe25ef004, 0x94));
   });
+
+  it('a script reads memory as stored: the BIOS wherever the CPU runs, a write-only register as written', () => {
+    const gba = boot([0xeafffffe]);
+    gba.bus.writeBios32(0x10, 0x12345678);
+    gba.bus.write16(0x04000010, 0x0123); // BG0HOFS, which the CPU reads as open bus
+    const engine = new ScriptingEngine(gba, stubHost);
+    let hits = 0;
+    gba.bus.addReadWatchpoint(0x00000000, 0x4000, () => hits++);
+    expect(engine.read32(0x10)).toBe(0x12345678);
+    expect(Array.from(engine.getMemory(0x10, 4))).toEqual([0x78, 0x56, 0x34, 0x12]);
+    expect(engine.readBytes(0x11, 2)).toBe(0x3456);
+    expect(engine.read16(0x04000010)).toBe(0x0123);
+    expect(hits).toBe(0); // a script's read is not the program's
+  });
 });
 
 describe('the cartridge past its end', () => {
