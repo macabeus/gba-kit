@@ -360,6 +360,44 @@ describe('DMA and interrupt timing', () => {
     expect(irq.halted).toBe(false);
   });
 
+  it('setting IME lets a waiting request through 7 cycles later, like enabling it in IE', () => {
+    // mGBA io.c: an IME write runs GBATestIRQ, the same delayed test as an IE write.
+    const scheduler = new Scheduler();
+    const irq = new InterruptController(scheduler);
+    irq.writeIe(IrqFlag.VBlank);
+    irq.requestInterrupt(IrqFlag.VBlank);
+    scheduler.tick(100);
+    irq.writeIme(1);
+    scheduler.tick(6);
+    expect(irq.irqPending()).toBe(false);
+    scheduler.tick(1);
+    expect(irq.irqPending()).toBe(true);
+  });
+
+  it('IME set and cleared again by back-to-back stores lets no interrupt through', () => {
+    const gba = machine(
+      [
+        0xe3a00301, // mov r0, #0x04000000
+        0xe2800c02, // add r0, r0, #0x200
+        0xe3a01001, // mov r1, #1
+        0xe3a02000, // mov r2, #0
+        0xe1c010b8, // strh r1, [r0, #8]   IME = 1
+        0xe1c020b8, // strh r2, [r0, #8]   IME = 0
+        0xeafffffe, // b .
+      ],
+      IWRAM,
+    );
+    gba.bus.write32(0x03007ffc, IWRAM + 0x100);
+    gba.bus.write32(IWRAM + 0x100, 0xe12fff1e); // bx lr
+    gba.interrupts.writeIe(IrqFlag.VBlank);
+    gba.interrupts.requestInterrupt(IrqFlag.VBlank);
+    gba.scheduler.tick(100);
+    const entries: string[] = [];
+    gba.onHardwareEvent = (event) => entries.push(event.kind);
+    runTo(gba, IWRAM + 6 * 4);
+    expect(entries).not.toContain('irq-enter');
+  });
+
   it('the PPU draws a line at HBlank: a V-count IRQ handler’s palette write shows on its own line', () => {
     const HANDLER = [
       0xe3a00405, // mov r0, #0x05000000

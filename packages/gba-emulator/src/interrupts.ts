@@ -68,8 +68,9 @@ export class InterruptController {
   }
 
   /**
-   * IE AND IF just became non-zero at the cycle `at`: the CPU sees it IRQ_DELAY cycles later. An
-   * interrupt the CPU already sees keeps its signal, so a second request adds no delay.
+   * An enabled request appeared to the CPU at the cycle `at`: IE AND IF became non-zero, or IME was
+   * set. The CPU sees it IRQ_DELAY cycles later. A signal already on its way keeps its cycle, and a
+   * second request adds no delay to a signal the CPU already sees.
    */
   #signal(at: number): void {
     if ((this.ie & this.if_) !== 0 && !this.#scheduler.isScheduled(EventId.Irq)) {
@@ -152,9 +153,17 @@ export class InterruptController {
     return this.ime & 1;
   }
 
-  /** Write IME register. */
+  /**
+   * Write IME register. Setting it signals the CPU the way a new request does, so a request that
+   * was waiting behind IME reaches the CPU IRQ_DELAY cycles later, like one that IE lets through
+   * (mGBA io.c: an IME write calls GBATestIRQ).
+   */
   writeIme(value: number): void {
+    const enabling = this.ime === 0 && (value & 1) !== 0;
     this.ime = value & 1;
+    if (enabling) {
+      this.#signal(this.#scheduler.currentCycle);
+    }
   }
 
   /** Serialize to a plain snapshot. */
