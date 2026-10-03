@@ -238,6 +238,29 @@ describe('PPU: OBJ layer', () => {
   });
 });
 
+describe('PPU: text backgrounds', () => {
+  it('tile data past the 64 KB BG area draws transparent, whatever the OBJ tiles there hold', () => {
+    // mGBA software-mode0.c: `charBase >= 0x10000` draws nothing; the BG unit never reads OBJ VRAM.
+    const t = setup();
+    solidBg0(t, RED);
+    t.io(0x08, (3 << 2) | (31 << 8)); // char base 3 (0xC000)
+    for (let i = 0; i < 0x800; i += 2) {
+      t.vram16(0xf800 + i, 512); // 4bpp tile 512: 0xC000 + 512 * 32 = 0x10000
+    }
+    solidObjTile(t, 0, 1);
+    t.io(0x00, 1 << 8);
+    t.frame();
+    t.frame();
+    expect(t.px(0, 0)).toBe(rgb(0, 0, 0)); // the backdrop
+    t.io(0x08, (3 << 2) | (1 << 7) | (31 << 8)); // 8bpp: tile 256 reaches 0x10000 too
+    for (let i = 0; i < 0x800; i += 2) {
+      t.vram16(0xf800 + i, 256);
+    }
+    t.frame();
+    expect(t.px(0, 0)).toBe(rgb(0, 0, 0));
+  });
+});
+
 describe('PPU: bitmap modes go through BG2 and the compositor', () => {
   it('mode 4: index 0 is transparent and DISPCNT bit 4 selects the frame', () => {
     const t = setup();

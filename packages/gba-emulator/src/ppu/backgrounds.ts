@@ -20,6 +20,9 @@ import { SCREEN_WIDTH } from '../types.js';
 /** Marks an opaque pixel in a BG line buffer, above the 16-bit colour. */
 export const OPAQUE = 0x10000;
 
+/** The BG area of VRAM in the tile modes; the OBJ tiles sit above it (GBATEK "LCD VRAM Overview"). */
+const BG_VRAM_SIZE = 0x10000;
+
 function read16(arr: Uint8Array, offset: number): number {
   return arr[offset]! | (arr[offset + 1]! << 8);
 }
@@ -100,15 +103,23 @@ export function renderTextBgScanline(
     const pixX = mapEntry & (1 << 10) ? 7 - (x & 7) : x & 7;
     const pixY = mapEntry & (1 << 11) ? 7 - fineY : fineY;
 
-    let paletteIndex: number;
+    // The BG unit fetches from the 64 KB BG area only: tile data past it draws transparent (mGBA
+    // software-mode0.c `charBase >= 0x10000`; NBA ppu.hh FetchVRAM_BG reads no OBJ VRAM either).
+    let paletteIndex = 0;
     if (ctrl.colorMode === 1) {
       // 8bpp — 64 bytes per tile
-      paletteIndex = vram[ctrl.tileBase + tileIndex * 64 + pixY * 8 + pixX] ?? 0;
+      const address = ctrl.tileBase + tileIndex * 64 + pixY * 8 + pixX;
+      if (address < BG_VRAM_SIZE) {
+        paletteIndex = vram[address]!;
+      }
     } else {
       // 4bpp — 32 bytes per tile
-      const byte = vram[ctrl.tileBase + tileIndex * 32 + pixY * 4 + (pixX >> 1)] ?? 0;
-      const colorIndex = pixX & 1 ? byte >> 4 : byte & 0xf;
-      paletteIndex = colorIndex === 0 ? 0 : ((mapEntry >> 12) << 4) | colorIndex;
+      const address = ctrl.tileBase + tileIndex * 32 + pixY * 4 + (pixX >> 1);
+      if (address < BG_VRAM_SIZE) {
+        const byte = vram[address]!;
+        const colorIndex = pixX & 1 ? byte >> 4 : byte & 0xf;
+        paletteIndex = colorIndex === 0 ? 0 : ((mapEntry >> 12) << 4) | colorIndex;
+      }
     }
 
     lineBuffer[px] = paletteIndex === 0 ? 0 : OPAQUE | read16(palette, paletteIndex * 2);
