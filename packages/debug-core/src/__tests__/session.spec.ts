@@ -695,6 +695,9 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     // VBlankIntrWait halts inside the BIOS, and the call stack reaches through it to the swi.
     expect(h.session.pc).toBeLessThan(0x4000);
     expect(h.session.callStack().map((f) => f.name)).toContain('main');
+    // The swi's own frame: the BIOS returns to the instruction after it.
+    const afterSwi = h.session.callStack().find((f) => f.method === 'service')!.address;
+    expect(h.session.disassemble(afterSwi - (variant.startsWith('thumb') ? 2 : 4), 1)[0]!.text).toMatch(/^swi #0x5/);
     const halted = h.session.position;
     h.session.stepInstruction();
     expect(h.session.pc).toBe(0x18); // the IRQ vector
@@ -710,7 +713,7 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     // Out of the exception, through the rest of the BIOS's IntrWait, to the program after the swi.
     h.session.stepOut();
     expect(h.session.machine.gba.armCpu.getMode()).toBe(SYS_MODE);
-    expect(h.session.pc).toBeGreaterThanOrEqual(0x08000000);
+    expect(h.session.pc).toBe(afterSwi);
     if (variant !== 'thumb-O2') {
       h.session.stepOver(); // out of wait_vblank (inlined at -O2: the return already is the next line)
     }
