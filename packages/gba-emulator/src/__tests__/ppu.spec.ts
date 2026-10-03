@@ -531,6 +531,27 @@ describe('PPU: colour effects', () => {
   });
 });
 
+describe('PPU: Green Swap', () => {
+  it('exchanges the green of each even and odd pixel of the merged line', () => {
+    // GBATEK "Undocumented - Green Swap": each pixel pair is output as BgRbGr.
+    const t = setup();
+    solidBg0(t, RED);
+    for (let i = 0; i < 32; i += 4) {
+      t.vram32(0x20 + i, 0x21212121); // tile 1: colours 1 and 2 alternate
+    }
+    t.pal(1, RED | (10 << 5));
+    t.pal(2, BLUE | (3 << 5));
+    t.io(0x00, 1 << 8);
+    t.io(0x02, 1);
+    t.frame();
+    t.frame();
+    expect([t.px(0, 0), t.px(1, 0)]).toEqual([rgb(31, 3, 0), rgb(0, 10, 31)]);
+    t.io(0x02, 0);
+    t.frame();
+    expect([t.px(0, 0), t.px(1, 0)]).toEqual([rgb(31, 10, 0), rgb(0, 3, 31)]);
+  });
+});
+
 describe('PPU: DISPCNT layer latch', () => {
   it('a BG enabled during a line shows three lines later; disabling is immediate', () => {
     const t = setup();

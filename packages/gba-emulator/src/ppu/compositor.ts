@@ -17,6 +17,9 @@ import { SCREEN_WIDTH } from '../types.js';
 import { color15to32, read16 } from './backgrounds.js';
 import { OBJ_COLOR_MASK, OBJ_MOSAIC, OBJ_PRIORITY_SHIFT, OBJ_SEMI_TRANSPARENT, OBJ_WINDOW } from './sprites.js';
 
+/** The green channel of a framebuffer colour (0xAABBGGRR). */
+const GREEN_32 = 0x0000ff00;
+
 // ─── Blend Mode ──────────────────────────────────────────────────────
 
 const enum BlendMode {
@@ -247,5 +250,16 @@ export function compositeScanline(
     }
 
     framebuffer[offset + x] = color15to32(color & 0x7fff);
+  }
+
+  // Green Swap (0x04000002 bit 0) exchanges the green of each even and odd pixel after merging
+  // (GBATEK "Undocumented - Green Swap"; NBA merge.cc, mGBA video-software.c).
+  if (mmio[0x02]! & 1) {
+    for (let x = offset; x < offset + SCREEN_WIDTH; x += 2) {
+      const left = framebuffer[x]!;
+      const right = framebuffer[x + 1]!;
+      framebuffer[x] = ((left & ~GREEN_32) | (right & GREEN_32)) >>> 0;
+      framebuffer[x + 1] = ((right & ~GREEN_32) | (left & GREEN_32)) >>> 0;
+    }
   }
 }
