@@ -131,8 +131,10 @@ export class EmulatorBridge {
     this.#updateDebugHooks();
     this.#resumeAddress = this.#gba.armCpu.registers[15]!;
 
+    // The loop starts at the next animation frame, so every time the clock sees is an
+    // animation-frame timestamp.
     this.#frameClock.reset();
-    this.#emulationLoop(performance.now());
+    this.#animFrameId = requestAnimationFrame(this.#emulationLoop);
   }
 
   /** Pause emulation */

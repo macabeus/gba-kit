@@ -90,10 +90,9 @@ describe('EmulatorBridge on a fast display', () => {
     bridge.loadRom(rom.buffer.slice(rom.byteOffset, rom.byteOffset + rom.byteLength) as ArrayBuffer);
 
     bridge.run();
-    const start = performance.now();
     const firstFrame = bridge.gba.frameCount;
-    for (let i = 1; i <= 120; i++) {
-      pending.shift()!(start + (i * 1000) / 120);
+    for (let i = 0; i < 120; i++) {
+      pending.shift()!(1000 + (i * 1000) / 120);
     }
     bridge.pause();
 
