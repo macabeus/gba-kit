@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { Gba } from '../gba.js';
-import { EventId, GbaButton } from '../types.js';
+import { EventId, GbaButton, IrqFlag } from '../types.js';
 
 /**
  * ARM: start timer 0 (prescaler F/1, no IRQ) and spin. The timer overflows about
@@ -359,6 +359,43 @@ describe('snapshot round trip', () => {
     const old = start();
     old.deserialize(legacy);
     expect(old.scheduler.isScheduled(EventId.Irq)).toBe(false);
+    expect(old.runFrame()).toBe('done');
+  });
+
+  it('IME on its way to the IRQ line survives a restore; an old snapshot without its slot has IME at the line already', () => {
+    const start = (): Gba => {
+      const gba = boot(TIMER_SPIN);
+      // The handler acknowledges VBlank in IF and returns.
+      const handler = [0xe3a00301, 0xe2800c02, 0xe3a01001, 0xe1c010b2, 0xe12fff1e];
+      handler.forEach((word, i) => gba.bus.write32(0x03000000 + i * 4, word));
+      gba.bus.write32(0x03007ffc, 0x03000000);
+      return gba;
+    };
+    const gba = start();
+    gba.runFrame();
+    gba.interrupts.writeIe(IrqFlag.VBlank);
+    gba.interrupts.requestInterrupt(IrqFlag.VBlank);
+    gba.scheduler.tick(10);
+    gba.interrupts.writeIme(1);
+    const snap = gba.serialize();
+    expect(snap.scheduler.events[EventId.ImeLine]!.active).toBe(true);
+
+    const fresh = start();
+    fresh.deserialize(snap);
+    expect(fresh.serialize()).toEqual(snap);
+    expect(fresh.interrupts.irqPending()).toBe(false);
+    gba.runFrame();
+    fresh.runFrame();
+    expect(fresh.serialize()).toEqual(gba.serialize());
+
+    const legacy = {
+      ...snap,
+      scheduler: { ...snap.scheduler, events: snap.scheduler.events.slice(0, EventId.ImeLine) },
+    };
+    const old = start();
+    old.deserialize(legacy);
+    expect(old.scheduler.isScheduled(EventId.ImeLine)).toBe(false);
+    expect(old.interrupts.irqPending()).toBe(true);
     expect(old.runFrame()).toBe('done');
   });
 

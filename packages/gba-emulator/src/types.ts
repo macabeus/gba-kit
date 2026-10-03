@@ -130,6 +130,8 @@ export const enum EventId {
   Serial,
   /** The PPU latching DISPCNT, DISPCNT_LATCH_CYCLE into a line */
   DispcntLatch,
+  /** Setting IME reaching the CPU's IRQ line while a request is already signalled (InterruptController) */
+  ImeLine,
   /** Sentinel — total count of event types */
   Count,
 }

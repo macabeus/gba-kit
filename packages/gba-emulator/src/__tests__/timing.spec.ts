@@ -374,6 +374,51 @@ describe('DMA and interrupt timing', () => {
     expect(irq.irqPending()).toBe(true);
   });
 
+  it('setting IME delays only the IRQ line: a Halt right after it ends at once', () => {
+    // GBATEK "System Control": Halt lasts while IE AND IF is zero. NanoBoyAdvance irq.cc: IME moves
+    // irq_line, and ShouldUnhaltCPU reads irq_available alone.
+    const scheduler = new Scheduler();
+    const irq = new InterruptController(scheduler);
+    irq.writeIe(IrqFlag.VBlank);
+    irq.requestInterrupt(IrqFlag.VBlank);
+    scheduler.tick(100);
+    irq.writeIme(1);
+    irq.halt();
+    expect(irq.halted).toBe(false);
+    scheduler.tick(6);
+    expect(irq.irqPending()).toBe(false);
+    scheduler.tick(1);
+    expect(irq.irqPending()).toBe(true);
+  });
+
+  it('IME cleared and set again restarts its delay; a request on its way keeps its own cycle', () => {
+    // NanoBoyAdvance irq.cc: each IME write moves irq_line through the same delay.
+    const scheduler = new Scheduler();
+    const irq = new InterruptController(scheduler);
+    irq.writeIe(IrqFlag.VBlank);
+    irq.requestInterrupt(IrqFlag.VBlank);
+    scheduler.tick(100);
+    irq.writeIme(1);
+    scheduler.tick(4);
+    irq.writeIme(0);
+    irq.writeIme(1);
+    scheduler.tick(6);
+    expect(irq.irqPending()).toBe(false);
+    scheduler.tick(1);
+    expect(irq.irqPending()).toBe(true);
+
+    // mGBA gba.c GBATestIRQ: an IRQ test with the signal already scheduled leaves it where it is.
+    irq.writeIme(0);
+    irq.acknowledge(IrqFlag.VBlank);
+    irq.requestInterrupt(IrqFlag.VBlank);
+    scheduler.tick(3);
+    irq.writeIme(1);
+    scheduler.tick(3);
+    expect(irq.irqPending()).toBe(false);
+    scheduler.tick(1);
+    expect(irq.irqPending()).toBe(true);
+  });
+
   it('IME set and cleared again by back-to-back stores lets no interrupt through', () => {
     const gba = machine(
       [
