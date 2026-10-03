@@ -82,6 +82,52 @@ describe('GbaSystemBus.poke', () => {
   });
 });
 
+describe('GbaSystemBus.poke over code the CPU has fetched', () => {
+  // GBATEK "ARM CPU Overview": the opcodes at $+width and $+2*width are in the pipeline before $
+  // executes, so a store the program makes there is not what runs. A debugger's write is not the
+  // program's: the code it edits is what runs next.
+  const CODE = 0x03000100;
+
+  function thumbAt(gba: Gba, code: number[]): void {
+    code.forEach((op, i) => gba.bus.write16(CODE + 2 * i, op));
+    gba.armCpu.cpsr = 0x3f; // System mode, Thumb
+    gba.armCpu.registers[15] = CODE;
+  }
+
+  it('runs the edited opcodes at PC and after it', () => {
+    const gba = new Gba();
+    thumbAt(gba, [0x2001 /* movs r0, #1 */, 0x2002 /* movs r0, #2 */, 0x2003 /* movs r0, #3 */, 0xe7fe /* b . */]);
+    gba.armCpu.step();
+    expect(gba.bus.poke(CODE + 2, Uint8Array.of(0x42, 0x20, 0x43, 0x20))).toBe(4); // movs r0, #0x42; movs r0, #0x43
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(0x42);
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(0x43);
+  });
+
+  it('reaches the opcodes through a mirror of the memory they run from', () => {
+    const gba = new Gba();
+    thumbAt(gba, [0x2001 /* movs r0, #1 */, 0x2002 /* movs r0, #2 */, 0xe7fe /* b . */]);
+    gba.armCpu.step();
+    gba.bus.poke(CODE + 2 + 0x8000, Uint8Array.of(0x42, 0x20)); // the IWRAM mirror
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(0x42);
+  });
+
+  it('leaves a store the program made over its own pipeline unseen, when the edit is elsewhere', () => {
+    const gba = new Gba();
+    // str r1, [r2] puts movs r0, #5 over the opcode two ahead, which the pipeline already holds
+    thumbAt(gba, [0x6011 /* str r1, [r2] */, 0x46c0 /* nop */, 0x2001 /* movs r0, #1 */, 0xe7fe /* b . */]);
+    gba.armCpu.registers[1] = 0x46c02005; // movs r0, #5; nop
+    gba.armCpu.registers[2] = CODE + 4;
+    gba.armCpu.step();
+    gba.bus.poke(CODE + 0x40, Uint8Array.of(0xff));
+    gba.armCpu.step();
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(1);
+  });
+});
+
 describe('read watchpoints', () => {
   it('fire on loads, not on the opcodes the CPU fetches past a branch', () => {
     const gba = new Gba();

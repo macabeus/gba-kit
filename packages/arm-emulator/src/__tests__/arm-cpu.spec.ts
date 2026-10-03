@@ -1404,6 +1404,23 @@ describe('ArmCpu', () => {
       expect(fromLegacy.registers[0]).toBe(5);
     });
 
+    it('refetches from memory after flushPipeline, at no cost', () => {
+      const program = [0xe58f1000 /* str r1, [pc] */, armMovImm(2, 2), armMovImm(0, 1), armBx(LR)];
+      const kept = setupArmCpu(program, CODE);
+      const flushed = setupArmCpu(program, CODE);
+      for (const { cpu } of [kept, flushed]) {
+        cpu.registers[1] = MOV_R0_5;
+        cpu.step(); // the store: [CODE+8] is now mov r0, #5
+      }
+      flushed.cpu.flushPipeline(); // what a debugger's write over the fetched opcodes does
+      const cycles = [kept.cpu.step(), flushed.cpu.step()];
+      expect(cycles[1]).toBe(cycles[0]);
+      kept.cpu.run(100);
+      flushed.cpu.run(100);
+      expect(kept.cpu.registers[0]).toBe(1);
+      expect(flushed.cpu.registers[0]).toBe(5);
+    });
+
     it('fills the pipeline through the bus fetch path, not through loads', () => {
       class CountingMemory extends GbaMemory {
         loads = 0;

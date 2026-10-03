@@ -113,6 +113,8 @@ export interface BusCpu {
   readonly prefetchedOpcode: number;
   /** [$+4] in ARM state, [$+2] in Thumb state */
   readonly decodedOpcode: number;
+  /** Refetch the pipeline from memory before the next instruction, at no cost */
+  flushPipeline(): void;
 }
 
 const BIOS_SIZE = 0x4000;
@@ -313,7 +315,13 @@ export class GbaSystemBus implements MemoryBus {
   #serial!: SerialPort;
 
   /** Until a CPU is connected, the bus sees one held in reset: at PC 0 with an empty pipeline. */
-  #cpu: BusCpu = { registers: new Uint32Array(16), cpsr: 0xd3, prefetchedOpcode: 0, decodedOpcode: 0 };
+  #cpu: BusCpu = {
+    registers: new Uint32Array(16),
+    cpsr: 0xd3,
+    prefetchedOpcode: 0,
+    decodedOpcode: 0,
+    flushPipeline: () => {},
+  };
 
   /**
    * The I/O register file. Display registers are stored here and the PPU reads them from it; the
@@ -666,8 +674,13 @@ export class GbaSystemBus implements MemoryBus {
    * duplicated; a hex editor means the byte it typed) and without notifying data
    * watchpoints. MMIO goes through the bus so the register's side effects apply.
    * BIOS, ROM and EEPROM are refused. Returns how many leading bytes were written.
+   * A write to the opcodes the CPU has already fetched, the one at PC and the one
+   * after it, has the CPU fetch them again, so the edited code is what runs.
    */
   poke(address: number, bytes: Uint8Array): number {
+    const cpu = this.#cpu;
+    const width = cpu.cpsr & CPSR_THUMB ? 2 : 4;
+    const fetched = this.#canonicalAddress((cpu.registers[15]! & -width) >>> 0);
     let written = 0;
     for (let i = 0; i < bytes.length; i++) {
       const addr = (address + i) >>> 0;
@@ -713,6 +726,9 @@ export class GbaSystemBus implements MemoryBus {
           return written;
       }
       written++;
+      if ((this.#canonicalAddress(addr) - fetched) >>> 0 < 2 * width) {
+        cpu.flushPipeline();
+      }
     }
     return written;
   }

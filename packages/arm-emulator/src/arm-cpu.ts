@@ -682,6 +682,15 @@ export class ArmCpu {
     return this.#decodedOpcode;
   }
 
+  /**
+   * Empty the pipeline, so the next step refills it from memory at no cost, as after a PC set from
+   * outside. For code changed from outside the machine (a debugger's write): a store the program
+   * makes leaves the fetched opcodes in place, as on hardware.
+   */
+  flushPipeline(): void {
+    this.#pipelineAddress = PIPELINE_EMPTY;
+  }
+
   /** Check if IRQs are disabled (CPSR I bit set) */
   irqDisabled(): boolean {
     return (this.cpsr & (1 << CPSR_I)) !== 0;
