@@ -75,7 +75,7 @@ describe('open bus', () => {
     expect(gba.armCpu.registers[1]).toBe(0xbeefbeef);
   });
 
-  it('in Thumb state from IWRAM, [$+4] with its neighbour in the same word', () => {
+  it('in Thumb state from IWRAM, [$+4] paired with [$+2] in the order the alignment of $ gives', () => {
     // GBATEK: IWRAM, 4-byte aligned $: low [$+4], high [$+2]; 2-byte aligned: low [$+2], high [$+4].
     const run = (halfwords: number[]): number => {
       const gba = boot([0xeafffffe]);

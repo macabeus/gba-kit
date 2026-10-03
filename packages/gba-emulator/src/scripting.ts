@@ -900,7 +900,7 @@ export class ScriptingEngine {
     if (start === null) {
       throw new Error(
         `${api}: nothing is mapped at 0x${(address >>> 0).toString(16)}. ` +
-          `A read there returns open bus (typically 0), which is not data.`,
+          `A read there returns open bus: the last opcode fetched or the last DMA unit, which is not data.`,
       );
     }
     const last = bus.describeAddress(address + size - 1);
