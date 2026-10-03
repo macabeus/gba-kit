@@ -3,16 +3,15 @@
  *
  * The emulator ships no BIOS dump. Most BIOS functions run in TypeScript at the SWI instruction
  * (bios.ts). The ones that steer the CPU itself run as ARM code from this image, entered through
- * the SWI exception the way the real BIOS's are: Halt, Stop and CustomHalt write HALTCNT from the
- * BIOS, IntrWait sleeps and takes interrupts inside its own loop, and SoftReset sets the stacks and
- * modes and jumps to the game. The image also holds the loops the real BIOS never leaves on some
- * inputs, which bios.ts hands those calls to. The IRQ vector leads to the handler that calls the
- * game's own.
+ * the SWI exception as on the real BIOS: Halt, Stop and CustomHalt write HALTCNT from the BIOS,
+ * IntrWait halts and takes interrupts inside its own loop, and SoftReset sets the stacks and modes
+ * and jumps to the game. The image also holds the endless loops the real BIOS runs on some inputs,
+ * which bios.ts hands those calls to, and the IRQ handler that calls the game's own.
  *
  * Each word is listed with the instruction it encodes. The layout follows mGBA's replacement BIOS
- * (src/gba/hle-bios.s); the code reproduces the real BIOS's behaviour, checked against it: IntrWait
- * clears only the flags it waited for, and SoftReset leaves SYS mode, CPSR 0x1F, the three boot
- * stacks and r0-r12 zero (GBATEK "BIOS Halt Functions", "BIOS Reset Functions").
+ * (src/gba/hle-bios.s); the behaviour is the real BIOS's, checked against it: IntrWait clears only
+ * the flags it waited for, and SoftReset leaves SYS mode, CPSR 0x1F, the three boot stacks and
+ * r0-r12 zero (GBATEK "BIOS Halt Functions", "BIOS Reset Functions").
  */
 import { BIOS_IRQ_STUB_PUSH, BIOS_LATCH_AFTER_BOOT, BIOS_LATCH_AFTER_IRQ, BIOS_LATCH_AFTER_SWI } from './types.js';
 
@@ -32,7 +31,10 @@ const SWI_TABLE = 0x208;
 const BIT_UNPACK_ENDLESS = 0x2a8;
 const HUFF_UNCOMP_ENDLESS = 0x2e4;
 
-/** The SWIs this image runs, by number. Every other number runs in bios.ts at the SWI instruction. */
+/**
+ * The SWIs this image always runs, by number. Every other number runs in bios.ts at the SWI
+ * instruction, which may hand the call to one of the ENDLESS_ROUTINES.
+ */
 const ROUTINES: ReadonlyMap<number, number> = new Map([
   [0x00, SOFT_RESET],
   [0x02, HALT],
@@ -43,9 +45,9 @@ const ROUTINES: ReadonlyMap<number, number> = new Map([
 ]);
 
 /**
- * The loops the real BIOS never leaves on some inputs, by SWI number. bios.ts runs these SWIs and
- * hands such a call to the BIOS code, so the machine runs on as it does on hardware: interrupts are
- * taken, frames end, and a debugger can stop it.
+ * The endless loops the real BIOS runs on some inputs, by SWI number. bios.ts returns null for such
+ * a call, so the CPU takes the SWI exception into this code and the machine runs on as on hardware:
+ * interrupts are taken, frames end, and a debugger can stop it.
  */
 const ENDLESS_ROUTINES: ReadonlyMap<number, number> = new Map([
   [0x10, BIT_UNPACK_ENDLESS],
@@ -55,7 +57,7 @@ const ENDLESS_ROUTINES: ReadonlyMap<number, number> = new Map([
 /** The dispatcher's table covers SWI 0x00 up to the last number the image runs. */
 const SWI_TABLE_ENTRIES = Math.max(...ROUTINES.keys()) + 1;
 
-/** Whether SWI `swiNumber` runs as ARM code from this image, entered through the SWI exception. */
+/** Whether SWI `swiNumber` always runs as ARM code from this image, entered through the SWI exception. */
 export function runsInBiosCode(swiNumber: number): boolean {
   return ROUTINES.has(swiNumber);
 }
@@ -89,7 +91,7 @@ const CALLER_STACK_FRAMES: ReadonlyArray<
  * The SWI handler as a stack walk reads it (debug-info's ServiceCallPolicy). swi_dispatch pushes
  * r11, r12, lr and then the SPSR on the SVC stack, so the SVC stack pointer points at the SPSR, r11,
  * r12 and the return address; the routines then run in SYS mode on the caller's stack. The
- * addresses it runs in SVC mode, and SoftReset, which never returns, have no frame here.
+ * SVC-mode addresses, and SoftReset, which jumps to the game, have no frame here.
  */
 export const BIOS_SWI_HANDLER = {
   mode: 0x13, // SVC
@@ -134,8 +136,8 @@ const SECTIONS: ReadonlyArray<readonly [address: number, words: readonly number[
       0xe8bd500f, // 90: ldmfd sp!, {r0-r3, r12, lr}
       0xe25ef004, // 94: subs pc, lr, #4
       // Fetched while 0x94 executes, so the BIOS read-protection latch holds it after an IRQ, as it
-      // holds the real BIOS's [0x13C+8]. During the game's handler it holds the SUBS, fetched while
-      // the LDR PC at 0x8C executes: the real BIOS's [0x134+8].
+      // holds the real BIOS's [0x13C+8]. During the game's handler the latch holds the SUBS at 0x94,
+      // fetched while the LDR PC at 0x8C executes: the real BIOS's [0x134+8].
       0x00000000, // 98
       BIOS_LATCH_AFTER_IRQ, // 9c
     ],
@@ -182,9 +184,9 @@ const SECTIONS: ReadonlyArray<readonly [address: number, words: readonly number[
     ],
   ],
   [
-    // vblank_intr_wait (0x05) is IntrWait(1, VBlank). intr_wait (0x04): with r0 set, first drop the
-    // flags already waiting; then halt until the game's handler has set one of the r1 flags at
-    // 0x03007FF8, and clear those. IME is 1 from the first check on.
+    // vblank_intr_wait (0x05) is IntrWait(1, VBlank). intr_wait (0x04): with r0 set, it first drops
+    // the r1 flags already set at 0x03007FF8 and halts. It then takes the r1 flags set there,
+    // clearing them, and halts again while there are none. IME is 1 from the first check on.
     VBLANK_INTR_WAIT,
     [
       0xe3a00001, // 10c: mov r0, #1
@@ -212,12 +214,12 @@ const SECTIONS: ReadonlyArray<readonly [address: number, words: readonly number[
     ],
   ],
   [
-    // soft_reset (0x00): clear 0x03007E00-0x03007FFF, set the IRQ, SVC and SYS stacks with LR and
-    // SPSR zero, and jump to 0x08000000, or to 0x02000000 when the byte at 0x03007FFA is non-zero,
-    // in SYS mode with r0-r12 zero.
+    // soft_reset (0x00): clear 0x03007E00-0x03007FFF, set the IRQ and SVC stacks with LR and SPSR
+    // zero and the SYS stack, and jump to 0x08000000, or to 0x02000000 when the byte at 0x03007FFA
+    // is non-zero, in SYS mode with r0-r12 zero.
     SOFT_RESET,
     [
-      0xe321f0df, // 160: msr cpsr_c, #0xdf             IRQs off while the vector area clears
+      0xe321f0df, // 160: msr cpsr_c, #0xdf             IRQs off while 0x03007E00-0x03007FFF clears
       0xe3a0c301, // 164: mov r12, #0x04000000
       0xe55c2006, // 168: ldrb r2, [r12, #-6]           [0x03007FFA]
       0xe24c1c02, // 16c: sub r1, r12, #0x200
@@ -272,9 +274,9 @@ const SECTIONS: ReadonlyArray<readonly [address: number, words: readonly number[
     Array.from({ length: SWI_TABLE_ENTRIES }, (_, n) => ROUTINES.get(n) ?? ENDLESS_ROUTINES.get(n) ?? NOP_CALL),
   ],
   [
-    // bit_unpack_endless (0x10 with a source width of 0): the real BIOS's unit loop never reaches the
-    // next source byte. Each unit is 0, or the offset when bit 31 adds it to zero units too; a word
-    // of them is stored past the destination each time the units reach 32 bits, forever.
+    // bit_unpack_endless (0x10 with a source width of 0): the real BIOS's unit loop stays on the
+    // first source byte. Each unit is 0, or the offset when bit 31 adds it to zero units too; each
+    // time the units reach 32 bits, a word of them is stored and the destination moves on, forever.
     BIT_UNPACK_ENDLESS,
     [
       0xe592c004, // 2a8: ldr r12, [r2, #4]             data offset
@@ -292,8 +294,8 @@ const SECTIONS: ReadonlyArray<readonly [address: number, words: readonly number[
       0xa3a0e000, // 2d8: movge lr, #0
       0xa3a03000, // 2dc: movge r3, #0
       0xeafffff8, // 2e0: b 0x2c8
-      // huff_uncomp_endless (0x13 whose tree walk finds no leaf): the walk reads on through memory
-      // and stores nothing.
+      // huff_uncomp_endless (0x13 whose tree walk leaves its table): the real BIOS's walk reads on
+      // through memory looking for a leaf; this loop stands in for it, storing nothing.
       0xeafffffe, // 2e4: b .
     ],
   ],

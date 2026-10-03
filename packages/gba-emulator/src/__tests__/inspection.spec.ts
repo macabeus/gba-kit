@@ -84,9 +84,9 @@ describe('GbaSystemBus.poke', () => {
 });
 
 describe('GbaSystemBus.poke over code the CPU has fetched', () => {
-  // GBATEK "ARM CPU Overview": the opcodes at $+width and $+2*width are in the pipeline before $
-  // executes, so a store the program makes there is not what runs. A debugger's write is not the
-  // program's: the code it edits is what runs next.
+  // GBATEK "ARM CPU Overview": the opcodes at $+width and $+2*width are already in the pipeline
+  // while $ executes, so a store the program makes over them runs only after a refill. A debugger's
+  // write reaches the code that runs next.
   const CODE = 0x03000100;
 
   function thumbAt(gba: Gba, code: number[]): void {
@@ -130,8 +130,8 @@ describe('GbaSystemBus.poke over code the CPU has fetched', () => {
 });
 
 describe('ScriptingEngine writes over code the CPU has fetched', () => {
-  // A script writes from outside the machine, like a debugger: the code it edits is what runs next,
-  // although its writes take the hardware's store rules.
+  // A script writes from outside the machine, like a debugger: the code it edits runs next, while
+  // its writes follow the hardware's store rules.
   const CODE = 0x03000100;
   const host: ScriptingHost = {
     writeScreenshot: async () => {},

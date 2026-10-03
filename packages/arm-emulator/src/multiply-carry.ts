@@ -13,8 +13,8 @@
  * simulates the whole Booth array (https://github.com/zaydlang/multiplication-algorithm, impl.h,
  * zlib license). The functions below compute the carry alone, in the closed form calc84maniac
  * wrote and published with the notice below in NanoBoyAdvance commit 61b0c90 (MultiplyCarrySimple,
- * MultiplyCarryLo, MultiplyCarryHi). They are checked against the reference implementation, and
- * mgba-suite's multiply-long test holds the hardware's flags.
+ * MultiplyCarryLo, MultiplyCarryHi). multiply-carry.spec.ts checks them against the reference
+ * implementation, and arm-cpu.spec.ts against mgba-suite's multiply-long hardware results.
  *
  * This file is a TypeScript translation of that closed form, altered from its original form: it
  * computes with 32-bit JavaScript integers. Its license follows.

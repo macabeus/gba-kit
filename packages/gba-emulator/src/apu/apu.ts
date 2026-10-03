@@ -19,7 +19,7 @@
  *   0x82  SOUNDCNT_H   DirectSound volume, timer select, FIFO reset
  *   0x84  SOUNDCNT_X   Master enable, channel status
  *   0x88  SOUNDBIAS    Bias + resolution
- *   0x90-0x9F          Wave RAM (the 16-byte bank channel 3 is not playing)
+ *   0x90-0x9F          Wave RAM (the 16-byte bank opposite the one NR30 bit 6 selects)
  *   0xA0  FIFO_A       DirectSound FIFO A (write-only, 32-bit)
  *   0xA4  FIFO_B       DirectSound FIFO B (write-only, 32-bit)
  *
@@ -177,9 +177,9 @@ export class Apu {
   // ─── MMIO Register Access ──────────────────────────────────────────
 
   /**
-   * Read the halfword at `offset` (relative to 0x04000000, even, 0x60-0x9E), with the
+   * Read the halfword at an even `offset` (relative to 0x04000000, 0x60-0x9E), with the
    * write-only and unused bits read as 0 (GBATEK "GBA Sound Channel 1-4", mGBA src/gba/io.c
-   * GBAIOWrite masks). Reads have no side effects.
+   * GBAIOWrite masks).
    */
   readRegister16(offset: number): number {
     this.#sync();
@@ -612,8 +612,8 @@ export class Apu {
   // ─── Serialization ─────────────────────────────────────────────────
 
   /**
-   * Serialize to a plain snapshot, the APU as it stands at the machine's clock (ring buffer is NOT
-   * saved — it's ephemeral audio).
+   * Serialize to a plain snapshot, the APU as it stands at the machine's clock. The output ring
+   * buffer is ephemeral audio and stays out of it.
    */
   serialize(): ApuSnapshot {
     this.#sync();
@@ -638,7 +638,7 @@ export class Apu {
     };
   }
 
-  /** Restore from a snapshot taken at the machine's clock, which the clock has been restored to. */
+  /** Restore from a snapshot; the machine's clock is already restored to the snapshot's cycle. */
   deserialize(snap: ApuSnapshot): void {
     this.#syncedCycle = this.#clock.currentCycle;
     this.#ch1.deserialize(snap.ch1);

@@ -2,15 +2,15 @@
  * GBA Game Pak prefetch unit — the opcode buffer WAITCNT bit 14 turns on.
  *
  * After every opcode fetch the CPU makes from the cartridge, the unit goes on reading the opcodes
- * that follow, one S access at a time, while the CPU leaves the cartridge bus alone: during its
+ * that follow, one S access at a time, while the cartridge bus is otherwise idle: during the CPU's
  * internal cycles and its accesses to other memory. It holds up to 8 halfwords in Thumb state and
  * 4 words in ARM state.
  *
  * - A fetch of the oldest opcode in the buffer takes 1 cycle.
  * - A fetch of the opcode the unit is reading waits for that read to end.
  * - Any other fetch from the cartridge, and any data access to it or its save chip, stops the unit
- *   and discards what it holds; when the unit was in the last cycle of a halfword read, the access
- *   waits one more cycle.
+ *   and discards what it holds; when that comes in the last cycle of a halfword read while the CPU
+ *   runs from the cartridge, the access waits one more cycle.
  *
  * References: GBATEK "GBA GamePak Prefetch"; NanoBoyAdvance src/nba/src/bus/timing.cc
  * (Bus::Prefetch, Bus::StopPrefetch, Bus::Step).
@@ -30,7 +30,7 @@ export class GamePakPrefetch {
   #head = 0;
   /** Opcodes in the buffer. */
   #count = 0;
-  /** Cycles left of the read in progress, which brings in the opcode after the buffered ones; 0 when the unit is not reading. */
+  /** Cycles left of the read in progress, which brings in the opcode after the buffered ones; 0 while idle. */
   #countdown = 0;
   /** Opcode width: 2 in Thumb state, 4 in ARM state. */
   #width: 2 | 4 = 2;
@@ -38,9 +38,9 @@ export class GamePakPrefetch {
   #duty = 0;
 
   /**
-   * The CPU fetches the opcode at `address` from the cartridge, which costs `price` cycles from the
-   * cartridge itself and `duty` cycles as an S access. Returns the cycles the fetch takes.
-   * `cpuInGamePak` says whether the CPU runs from the cartridge, the case the stop penalty needs.
+   * The CPU fetches the opcode at `address` from the cartridge. `price` is what the fetch costs
+   * straight from the cartridge, `duty` what one S access costs (the unit's read time). Returns the
+   * cycles the fetch takes. `cpuInGamePak` gates the stop penalty (see {@link stop}).
    */
   fetch(address: number, width: 2 | 4, price: number, duty: number, cpuInGamePak: boolean): number {
     if (this.#active) {
@@ -75,9 +75,9 @@ export class GamePakPrefetch {
   }
 
   /**
-   * A data access to the cartridge or its save chip: the unit stops and discards its buffer.
-   * Returns the cycle the access waits when it comes as the unit finishes a halfword read, which
-   * happens only while the CPU runs from the cartridge.
+   * A data access to the cartridge or its save chip, or a fetch the buffer cannot serve: the unit
+   * stops and discards its buffer. Returns 1, the extra cycle the access waits, when it comes in the
+   * last cycle of a halfword read while the CPU runs from the cartridge; otherwise 0.
    */
   stop(cpuInGamePak: boolean): number {
     if (!this.#active) {
@@ -88,7 +88,10 @@ export class GamePakPrefetch {
     return cpuInGamePak && finishing ? 1 : 0;
   }
 
-  /** `cycles` pass in which the CPU leaves the cartridge bus alone: the read in progress goes on. */
+  /**
+   * `cycles` pass with the cartridge bus free: the read in progress goes on and, while prefetch is
+   * enabled, the unit reads on until its buffer is full.
+   */
   step(cycles: number): void {
     if (this.#countdown <= 0) {
       return;
@@ -128,7 +131,7 @@ export class GamePakPrefetch {
     };
   }
 
-  /** Restore from a snapshot; without one (an older snapshot) the unit restores stopped and empty. */
+  /** Restore from a snapshot; a snapshot without prefetch state restores the unit stopped and empty. */
   deserialize(snap: PrefetchSnapshot | undefined): void {
     if (!snap) {
       this.reset();

@@ -1,11 +1,9 @@
 /**
  * ARM7TDMI HLE BIOS — High-Level Emulation of GBA BIOS calls
  *
- * Instead of running real BIOS ROM, we intercept SWI instructions and
- * implement the behavior in TypeScript. This is faster and doesn't
- * require a BIOS dump. The calls that steer the CPU itself (Halt, Stop,
- * IntrWait, VBlankIntrWait, CustomHalt, SoftReset) run instead as ARM code
- * from the BIOS image (bios-image.ts), entered through the SWI exception.
+ * The emulator ships no BIOS dump: most SWIs run here in TypeScript, at the SWI instruction. The
+ * calls that steer the CPU itself (Halt, Stop, IntrWait, VBlankIntrWait, CustomHalt, SoftReset) run
+ * as ARM code from the BIOS image (bios-image.ts), entered through the SWI exception.
  *
  * Each call reports the cycles the real BIOS code takes, so a call costs the time it does on
  * hardware: the dispatch and return every SWI goes through, plus the function's own code. Div,
@@ -50,7 +48,7 @@ interface BiosCpu {
  * @param swiNumber - The SWI function number (0x00-0xFF)
  * @returns the cycles the BIOS spends from the SWI vector to its return branch, or null for a call
  *   the BIOS image runs as ARM code, which the CPU enters through the SWI exception: the calls that
- *   steer the CPU itself, and the inputs the real BIOS never returns from
+ *   steer the CPU itself, and the inputs on which the real BIOS loops forever
  */
 export function handleSwi(cpu: BiosCpu, swiNumber: number): number | null {
   if (runsInBiosCode(swiNumber)) {
@@ -136,8 +134,8 @@ export function handleSwi(cpu: BiosCpu, swiNumber: number): number | null {
 
 /**
  * Whether the BIOS reads from `source`. Every function that reads a source refuses one whose
- * address bits 25-27 are all clear — the BIOS itself, and its mirrors — and returns without
- * writing anything, which keeps the BIOS from being read out through it (mGBA bios.c "Cannot
+ * address bits 25-27 are all clear — the BIOS itself, and its mirrors — and returns at once,
+ * writing no memory, which keeps the BIOS from being read out through it (mGBA bios.c "Cannot
  * CpuSet from BIOS"; checked on the real BIOS for 0x00000100, 0x01FFFFF0 and 0x10000100).
  */
 function readableSource(source: number): boolean {
@@ -145,7 +143,7 @@ function readableSource(source: number): boolean {
 }
 
 /**
- * The BIOS's source check at 0xBA4: a length that is not zero, and a source whose first byte and
+ * The BIOS's source check at 0xBA4: a non-zero length, and a source whose first byte and
  * the byte `length` (bits 0-24) later both pass `readableSource`. CpuSet and CpuFastSet pass the
  * bytes r2 counts, BitUnPack its source length, and the decompressors the size in their header,
  * from past the header.
@@ -154,7 +152,7 @@ function readableRange(source: number, length: number): boolean {
   return length !== 0 && readableSource(source) && readableSource((source + (length & 0x01ffffff)) >>> 0);
 }
 
-/** The bytes CpuSet's and CpuFastSet's check covers: r2's count of words. */
+/** The bytes CpuSet's and CpuFastSet's check covers: r2's count (bits 0-20) times 4, in either CpuSet width. */
 function copyCheckLength(control: number): number {
   return (control << 11) >>> 9;
 }
@@ -164,9 +162,9 @@ function copyCheckLength(control: number): number {
 /**
  * The cycles every call spends in the BIOS's SWI dispatch and return code, which runs from the
  * zero-wait BIOS ROM, besides the `ldrb r12, [lr, #-2]` that reads the SWI number from the
- * caller's code. mGBA counts 45 cycles plus that load's wait states, and the return's refill of
- * the caller's pipeline (2 cycles and its wait states) is the SWI instruction's own branch back
- * (GBASwi16).
+ * caller's code. mGBA counts 45 cycles plus that load's wait states (GBASwi16): these 42, the
+ * load's 1-cycle access, and the 2-cycle refill of the caller's pipeline on return, which the CPU
+ * charges as the SWI instruction's own branch back.
  */
 const SWI_DISPATCH_CYCLES = 42;
 
@@ -203,10 +201,7 @@ function storeCycles(memory: MemoryBus, address: number, width: 1 | 2 | 4): numb
   return memory.accessCycles(address, width, false);
 }
 
-/**
- * The source check returns after its first test when the length is zero (BIOS 0xBA4), and takes
- * these cycles more for any other length.
- */
+/** The source check (BIOS 0xBA4) returns after its first test for a zero length, and takes 2 cycles more for any other. */
 function sourceCheckCycles(length: number): number {
   return length === 0 ? 0 : 2;
 }
@@ -378,7 +373,7 @@ function fastSetBlockCycles(cpu: BiosCpu, address: number): number {
  *
  * The BIOS divides by zero without trapping: a numerator of 0, 1 or -1 gives r0 = 1 or -1 (the
  * numerator's sign), r1 = the numerator and r3 = 1 (mgba-suite "BIOS math" Div n/0; mGBA _Div).
- * A larger numerator never leaves the BIOS's loop on hardware; it returns the same values here.
+ * On hardware a larger numerator loops forever in the BIOS; here it returns the same values.
  */
 function swiDiv(cpu: BiosCpu): number {
   const numerator = cpu.registers[0]! | 0;
@@ -506,8 +501,8 @@ function swiArcTan2(cpu: BiosCpu): number {
   const x = cpu.registers[0]! | 0;
   const y = cpu.registers[1]! | 0;
   cpu.registers[3] = 0x170;
-  // On an axis: x < 0 takes a branch and one more instruction; x = 0 takes the first test's branch
-  // and two more instructions and its own test, whose branch y < 0 takes.
+  // On an axis: y = 0 with x < 0 adds a taken branch and one instruction; x = 0 adds the first
+  // test's taken branch, two instructions and its own test, and y < 0 that test's taken branch.
   if (y === 0) {
     cpu.registers[0] = x >= 0 ? 0 : 0x8000;
     return ARCTAN2_AXIS_CYCLES + (x >= 0 ? 0 : 3);
@@ -828,8 +823,8 @@ function swiObjAffineSet(cpu: BiosCpu): number {
  * unit's bits. A source unit wider than 8 bits reads as 0 (mGBA bios.c _unBitPack; checked against
  * the real BIOS).
  *
- * With a source width of 0 the BIOS's unit loop never reaches the next byte: it stores words of
- * zero units (or of offsets) past the destination forever. That loop runs from the BIOS image.
+ * With a source width of 0 the BIOS's unit loop stays on the first byte and stores words of zero
+ * units (or of offsets) past the destination forever; such a call runs on in the BIOS image.
  */
 const BIT_UNPACK_CYCLES = 59;
 const BIT_UNPACK_REFUSED_CYCLES = 43;
@@ -871,7 +866,8 @@ function swiBitUnPack(cpu: BiosCpu): number | null {
     src = (src + 1) >>> 0;
     for (let bitPos = 0; bitPos < 8; bitPos += srcBitWidth) {
       // BIOS 0xFBC: 13 instructions, three of them register shifts, and the branch back; the offset
-      // costs a stack load and an add, and a full word its store and two moves.
+      // costs a stack load and an add, and a full word its store and two moves, each else a branch
+      // past them.
       cycles += 16 + TAKEN;
       let value = (srcByte >>> bitPos) & srcMask;
       if (value !== 0 || addToZero) {
@@ -1010,8 +1006,9 @@ function lz77Decompress(cpu: BiosCpu, vram: boolean): number {
   const output = new DecompressorOutput(memory, cpu.registers[1]! >>> 0, vram);
 
   // BIOS 0x1114 (WRAM, ARM) and 0x11B4 (VRAM): 4 instructions and the load per flag byte; per flag,
-  // 4 instructions to test it, then the literal or the reference, then 3 instructions and the
-  // branch back while data remains; after the eighth flag, 2 instructions and the branch back.
+  // 4 instructions to test it, then the literal or the reference, then 3 instructions and a taken
+  // branch, the last flag's included; after the eighth flag, while data remains, 2 instructions and
+  // the branch back.
   while (remaining > 0) {
     cycles += 4 + loadCycles(memory, src, 1);
     const flags = memory.read8(src);
@@ -1302,8 +1299,8 @@ function swiDiffUnFilter(cpu: BiosCpu, unitBytes: 1 | 2, vram: boolean): number 
     const first = remaining === size;
     // BIOS 0x133E, 0x136C and 0x13A4 (Thumb): the first unit takes 4 instructions, its load and
     // its store; each next one 8 instructions, its load, its store and the branch back. The VRAM
-    // loop takes 11, one a register shift, and 4 more instructions and the store, or the branch
-    // past them, by whether the byte completes a halfword.
+    // loop's next unit takes 13 cycles and its load; then 4 instructions, the store and a taken
+    // branch when the byte completes a halfword, or else a taken branch past them.
     cycles += loadCycles(memory, src, unitBytes) + (first ? 4 : vram ? 13 : 10);
     if (unitBytes === 1) {
       unit = (unit + memory.read8(src)) & 0xff;

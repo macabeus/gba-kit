@@ -174,8 +174,8 @@ describe('GBA BIOS (HLE)', () => {
 
   it('a call costs the BIOS code it stands for: Div and Sqrt as the hardware measured them', () => {
     // mgba-suite Timing "BIOS Division" (338), "BIOS Division 2" (78) and "BIOS Sqrt" (104) in
-    // IWRAM, less the 8, 8 and 5 one-cycle instructions around the swi: its fetch, the BIOS's
-    // dispatch, the function, and the return's refill.
+    // IWRAM, less the 8, 8 and 5 one-cycle instructions the suite runs around the swi; what remains
+    // is the swi's fetch, the BIOS's dispatch, the function and the return's refill.
     const div = setupArmCpu([armSwi(0x06), armBx(LR)]);
     div.cpu.registers[0] = 0x12345678;
     div.cpu.registers[1] = 0xff;
@@ -190,10 +190,11 @@ describe('GBA BIOS (HLE)', () => {
   });
 
   it('a decompression costs the BIOS loop it stands for, per byte it reads and writes', () => {
-    // LZ77UnCompWram of 4 literal bytes, every access 1 cycle (BIOS 0x10FC): the header's load (2),
-    // the source check (2) and the routine's fixed 35; the flag byte, 4 instructions and its load
-    // (2); per byte, the flag's test and the branch back (4 + 3 + 2) and the literal: 4 instructions,
-    // its load (2), its store (1) and a taken branch (2).
+    // LZ77UnCompWram of 4 literal bytes, every access 1 cycle (BIOS 0x10FC): the swi's fetch (1),
+    // the dispatch, the header's load (2), the source check (2) and the routine's fixed 35; the
+    // flag byte, 4 instructions and its load (2); per byte, the flag's test and the branch back
+    // (4 + 3 + 2) and the literal: 4 instructions, its load (2), its store (1) and a taken branch
+    // (2); and the return's refill (2).
     const { cpu, mem } = setupArmCpu([armSwi(0x11), armBx(LR)]);
     mem.write32(0x02000000, 0x00000410);
     mem.write32(0x02000004, 0x43424100);
@@ -401,7 +402,7 @@ describe('BIOS copies', () => {
   });
 
   it('CpuFastSet loads each block of 8 words before storing it', () => {
-    // An overlapping copy one word up moves each block as it was, not a smear of its first word.
+    // An overlapping copy one word up moves each block intact, as it was before the copy.
     const { cpu, mem } = call(0x0c, [SRC, SRC + 4, 8], pattern);
     expect(mem.read32(SRC + 4)).toBe(0x11223344);
     expect(mem.read32(SRC + 32)).toBe((0x11223344 + 28 * 0x01010101) >>> 0);

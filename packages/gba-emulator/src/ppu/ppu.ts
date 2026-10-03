@@ -3,7 +3,7 @@
  *
  * Implements PpuInterface. The coordinator calls `beginScanline` at the start of every one
  * of the 228 lines, `latchDispcnt` 40 cycles into it, and `renderScanline` once per visible
- * line, at HBlank. The line-start work holds the PPU's internal state:
+ * line, at HBlank. `beginScanline` keeps the PPU's internal line state:
  * - the affine reference points step at the end of each visible line and reload from
  *   BGxX/BGxY at frame start; a write copies the register in at once, so one made before a
  *   line's HBlank is that line's origin, and one made in HBlank the next line's;
@@ -71,7 +71,7 @@ export class Ppu implements PpuInterface {
   /**
    * DISPCNT sampled at the last three latches, oldest first. A layer shows when it is
    * enabled both in the oldest sample and in DISPCNT now, so enabling takes effect two lines
-   * later when written before the line's latch at DISPCNT_LATCH_CYCLE, three when written after
+   * later when written before the line's latch (DISPCNT_LATCH_CYCLE), three when written after
    * it, and disabling at once (NBA ppu.cc LatchDISPCNT, `dispcnt_latch[0] & dispcnt`).
    */
   readonly #dispcntLatch = [0, 0, 0];
@@ -145,9 +145,9 @@ export class Ppu implements PpuInterface {
   }
 
   /**
-   * Restore from a snapshot. A snapshot from before the line-start state existed restores
-   * DISPCNT's latch as three copies of DISPCNT, the windows and mosaic counters cleared, and
-   * no OBJ line prepared (the next visible line builds its own).
+   * Restore from a snapshot. A snapshot without the line-start fields restores DISPCNT's latch
+   * as three copies of DISPCNT, the windows and mosaic counters cleared, and no OBJ line prepared
+   * (`renderScanline` then builds its own).
    */
   deserialize(snap: PpuSnapshot): void {
     this.#framebuffer.set(snap.framebuffer);
@@ -177,12 +177,10 @@ export class Ppu implements PpuInterface {
 
   /**
    * A write to BG2X/BG2Y/BG3X/BG3Y copies the register into that axis's internal reference point
-   * at once. GBATEK, LCD I/O BG Rotation/Scaling: "Writing to a reference point register by
-   * software outside of the Vblank period does immediately copy the new value to the corresponding
-   * internal register, that means: in the current frame, the new value specifies the origin of the
-   * <current> scanline". A write before the line is drawn is that line's origin; one after it (in
-   * HBlank) stays marked, so the next line start restores it over the end-of-line step and it is
-   * the next line's origin (mGBA video-software.c `bg->sx = bg->refx`, stepped after each line).
+   * at once (GBATEK, LCD I/O BG Rotation/Scaling: a write "does immediately copy the new value to
+   * the corresponding internal register"). A write before the line is drawn is that line's
+   * origin; one in HBlank stays marked, so the next line start reloads it over the end-of-line
+   * step and it is the next line's origin (mGBA video-software.c `bg->sx = bg->refx`).
    */
   reloadBgRefPoint(bgIndex: 2 | 3, isX: boolean): void {
     const axis = bgIndex === 2 ? (isX ? REF_BG2X : REF_BG2Y) : isX ? REF_BG3X : REF_BG3Y;
@@ -197,9 +195,9 @@ export class Ppu implements PpuInterface {
   }
 
   /**
-   * DISPCNT's layer enables pass through a three-line latch, shifted 40 cycles into the line on
-   * visible lines (and the line after them) and on the last three VBlank lines, so a change made
-   * earlier in VBlank is complete by line 0 (NanoBoyAdvance ppu.cc LatchDISPCNT).
+   * Shift DISPCNT into the three-line latch (see `#dispcntLatch`). It shifts on lines 0-160 and
+   * 225-227, so a change made before line 225 is fully latched by line 0 (NanoBoyAdvance ppu.cc
+   * LatchDISPCNT).
    */
   latchDispcnt(line: number, bus: GbaSystemBus): void {
     if (line <= VISIBLE_SCANLINES || line >= TOTAL_SCANLINES - 3) {
@@ -220,7 +218,7 @@ export class Ppu implements PpuInterface {
     }
 
     // Each window's vertical flip-flop turns on at its top line and off at its bottom line,
-    // on every line including VBlank, so a bottom edge past 227 never turns it off.
+    // on every line including VBlank, so with a bottom edge past 227 it stays on into the next frame.
     // GBATEK, LCD I/O Window Feature; NBA window.cc InitWindow.
     for (let i = 0; i < 2; i++) {
       const winV = read16(mmio, 0x44 + i * 2);
@@ -236,7 +234,7 @@ export class Ppu implements PpuInterface {
     if (line < VISIBLE_SCANLINES) {
       this.#reloadAffineRefs(mmio, line === 0 ? REF_BG2X | REF_BG2Y | REF_BG3X | REF_BG3Y : this.#refWritten);
     } else {
-      // No image is drawn, but the horizontal flip-flops still sweep the line.
+      // In VBlank the horizontal flip-flops still sweep the line.
       this.#sweepWindowsHorizontal(mmio, null);
     }
 
@@ -262,7 +260,7 @@ export class Ppu implements PpuInterface {
     if (line < 0 || line >= SCREEN_HEIGHT) {
       return;
     }
-    // The line is drawn from the reference points as they stand, writes included.
+    // This line uses the reference points as they stand, so earlier writes need no reload.
     this.#refWritten = 0;
 
     const mmio = bus.mmioRegisters;
@@ -278,7 +276,7 @@ export class Ppu implements PpuInterface {
     }
 
     if (this.#objFrontLine !== line) {
-      // No line start prepared this OBJ line (first line after a reset or an older snapshot).
+      // Build the OBJ line here when no line start prepared it (after a reset or an older snapshot).
       this.#renderObjLine(line, bus, this.#objFront);
       this.#objFrontLine = line;
     }

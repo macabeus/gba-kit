@@ -4,7 +4,7 @@
  * Builds one line of the OBJ layer from OAM and OBJ VRAM. The layer holds two separate
  * outputs per pixel, the way the hardware does: the OBJ colour (an OBJ palette index with
  * its priority, semi-transparency and mosaic flags) and the OBJ-window mask. An OBJ-window
- * sprite only sets the mask, so it never hides a normal sprite.
+ * sprite sets only the mask, so normal sprites under it keep their colour.
  *
  * Supports all OAM sizes, 4bpp/8bpp, flips, 1D/2D mapping, affine sprites (32 parameter
  * groups) with double size, OBJ window, mosaic, the bitmap-mode OBJ VRAM limit and the
@@ -93,8 +93,9 @@ export function renderSpriteScanline(
       continue; // prohibited shape: no size
     }
 
-    // Walking OAM costs 2 cycles per entry; the line's sprites cost theirs on top. Sprites
-    // past the budget are not drawn (mGBA video-software.c GBAVideoSoftwareRendererPreprocessSpriteLayer).
+    // Walking OAM costs 2 cycles per entry; the line's sprites cost theirs on top. Drawing stops
+    // at the first entry reached with the budget spent (mGBA video-software.c
+    // GBAVideoSoftwareRendererPreprocessSpriteLayer).
     if (budget - 2 * i - spent <= 0) {
       break;
     }
@@ -120,12 +121,14 @@ export function renderSpriteScanline(
     if (x >= 256) {
       x -= 512;
     }
-    // A box with no pixel on screen is not fetched and takes no cycles past its OAM walk (NBA
-    // sprite.cc DrawSpriteFetchOAM, `remaining_pixels <= 0`).
+    // A box with no pixel on screen costs only its OAM walk (NBA sprite.cc DrawSpriteFetchOAM,
+    // `remaining_pixels <= 0`).
     if (x >= SCREEN_WIDTH || x + boundW <= 0) {
       continue;
     }
-    // GBATEK: normal OBJs take width cycles, affine ones 10 + 2 * width (here 2 of each go to the OAM walk).
+    // GBATEK: normal OBJs take width cycles, affine ones 10 + 2 * width (here 2 of each go to the OAM
+    // walk). A box starting at x < 0 is charged |x| cycles less if affine, half of |x| (rounded up)
+    // less if normal.
     spent += affine ? 8 + 2 * boundW + (x < 0 ? x : 0) : width - 2 + (x < 0 ? x >> 1 : 0);
 
     const isWindow = mode === ObjMode.Window;

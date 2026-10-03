@@ -33,9 +33,9 @@ export interface MemoryBus {
   read16(address: number): number;
   read32(address: number): number;
   /**
-   * The CPU's opcode fetches into its pipeline. They read what `read16`/`read32` read, but they are
-   * not loads: the pipeline also fetches the words after a branch, which never execute, so a bus
-   * that reports loads to a debugger leaves these out.
+   * The CPU's opcode fetches into its pipeline. They read what `read16`/`read32` read, and a bus
+   * that reports loads to a debugger leaves them out: the pipeline also fetches the opcodes after a
+   * branch, which never execute.
    */
   fetch16(address: number): number;
   fetch32(address: number): number;
@@ -44,9 +44,9 @@ export interface MemoryBus {
   write32(address: number, value: number): void;
 
   /**
-   * Cycles one data access of `width` bytes at `address` takes. `sequential` is an S cycle, the
-   * address after the previous access (an LDM/STM past its first word); otherwise an N cycle. This
-   * is the price alone: nothing on the bus happens.
+   * Cycles one access of `width` bytes at `address` takes. `sequential` marks an S cycle, the
+   * address after the previous access (an LDM/STM past its first word); otherwise it is an N cycle.
+   * It only prices the access and leaves the bus state as it is.
    */
   accessCycles(address: number, width: 1 | 2 | 4, sequential: boolean): number;
 
@@ -60,7 +60,7 @@ export interface MemoryBus {
   /** The CPU makes the data access at `address` now; returns the cycles it takes. */
   dataCycles(address: number, width: 1 | 2 | 4, sequential: boolean): number;
 
-  /** The CPU spends `cycles` internal cycles now, during which it leaves the bus alone. */
+  /** `cycles` cycles pass now with no access on the bus (the CPU's internal cycles), free for a prefetch unit. */
   idle(cycles: number): void;
 }
 

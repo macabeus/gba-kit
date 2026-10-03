@@ -7,7 +7,7 @@
  *
  *   [E005555]=AAh, [E002AAA]=55h, [E005555]=cmd
  *
- *   90h  ID mode: [E000000] reads the manufacturer, [E000001] the device; F0h leaves it
+ *   90h  ID mode: [E000000] reads the manufacturer, [E000001] the device; command F0h leaves it
  *   80h  erase: a second unlock, then 10h at [E005555] erases the chip, 30h at [E00n000] sector n
  *   A0h  program: the next write programs one byte, anywhere in the bank
  *   B0h  bank select (128 KB chips): the next write, at [E000000], picks bank 0 or 1
@@ -15,13 +15,13 @@
  * These are NOR flash parts: programming drives bits from 1 to 0 and an erase brings them
  * back to 1, so an erased byte reads FFh and programming over a written byte leaves the
  * AND of the two, which is why a game erases a sector before it writes one. Erase and
- * program complete at once, so the busy period during which a game polls the chip is over
- * by its first read.
+ * program complete at once: a game polling for completion sees the final data on its
+ * first read.
  *
- * Which chip answers is the cartridge's: the same IDs mGBA reports, the Panasonic
- * MN63F805MNP (device 1Bh, manufacturer 32h) for 64 KB and the Sanyo LE26FV10N1TS
- * (13h, 62h) for 128 KB. The SDK's flash library takes either, along with the Atmel,
- * SST and Macronix parts GBATEK lists.
+ * The chip IDs are the ones mGBA reports: the Panasonic MN63F805MNP (device 1Bh,
+ * manufacturer 32h) for 64 KB and the Sanyo LE26FV10N1TS (13h, 62h) for 128 KB. The
+ * SDK's flash library accepts either, along with the Atmel, SST and Macronix parts
+ * GBATEK lists.
  *
  * References: GBATEK "GBA Cart Backup Flash ROM"; mGBA src/gba/savedata.c
  * (GBASavedataReadFlash, GBASavedataWriteFlash); NanoBoyAdvance src/nba/src/hw/rom/backup/flash.cc.
@@ -85,8 +85,8 @@ export class GbaFlash {
   #bankBase = 0;
 
   /**
-   * Fit the chip the cartridge carries: `banks` 64 KB banks (1 or 2), erased, or none
-   * at all for a cartridge without flash.
+   * Fit the chip the cartridge carries: `banks` 64 KB banks (1 or 2), erased; 0 for a
+   * cartridge without flash.
    */
   insert(banks: number): void {
     this.#data = new Uint8Array(banks * FLASH_BANK_BYTES).fill(ERASED_BYTE);
@@ -99,7 +99,7 @@ export class GbaFlash {
     return this.#data.length;
   }
 
-  /** An erased chip in read mode at bank 0; the chip itself stays. */
+  /** An erased chip in read mode at bank 0, keeping its size and ID. */
   reset(): void {
     this.#data.fill(ERASED_BYTE);
     this.#idle();

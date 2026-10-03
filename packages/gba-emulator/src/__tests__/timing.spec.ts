@@ -1,7 +1,8 @@
 /**
- * The cycle model: wait states from WAITCNT, instruction costs, one clock read mid-run, DMA and
- * interrupt timing, and the PPU drawing a line at HBlank. The expected numbers come from the
- * hardware where a test ROM measured them (mgba-suite src/timing.c, src/timer-irq.c) and from GBATEK.
+ * The cycle model: wait states from WAITCNT, instruction costs, the game pak prefetch unit, one
+ * clock read mid-run, DMA and interrupt timing, and the PPU drawing a line at HBlank. The expected
+ * numbers come from the hardware where a test ROM measured them (mgba-suite src/timing.c,
+ * src/timer-irq.c) and from GBATEK.
  */
 import { describe, expect, it } from 'vitest';
 

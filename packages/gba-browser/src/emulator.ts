@@ -192,10 +192,10 @@ export class EmulatorBridge {
   }
 
   /**
-   * Run the machine through its own loop, which takes interrupts, sleeps through a halt and keeps
-   * DMA and sound in time, until the instruction about to run is at a PC `reached` accepts, a
-   * breakpoint stops it, or `frames` frames have passed. The instruction at the PC it starts from
-   * runs first, and nothing is asked while the CPU sleeps.
+   * Run the machine through its own loop (interrupts, halts, DMA and sound all advance) until the
+   * instruction about to run is at a PC `reached` accepts, a breakpoint stops it, or `frames`
+   * frames have passed. The instruction at the starting PC runs first, and `reached` is asked only
+   * while the CPU is awake.
    */
   #runUntil(reached: (pc: number) => boolean, frames: number): void {
     const cpu = this.#gba.armCpu;
@@ -256,9 +256,8 @@ export class EmulatorBridge {
     let addr = address;
 
     for (let i = 0; i < count; i++) {
-      // Code is read the way a debugger reads memory: side-effect free, so no read watchpoint
-      // fires and no EEPROM transaction is clocked, and as stored where the CPU's view differs,
-      // as the BIOS does while the CPU runs outside it.
+      // A debugger's read (`bus.peek`): no read watchpoint fires, no EEPROM transaction is
+      // clocked, and the BIOS reads as stored even while the CPU runs outside it.
       const { data } = this.#gba.bus.peek(addr, isThumb ? 2 : 4);
       if (isThumb) {
         const instr = data[0]! | (data[1]! << 8);
@@ -351,7 +350,8 @@ export class EmulatorBridge {
 
   /**
    * `size` bytes at `address`, read the way a debugger reads memory (`bus.peek`): side-effect
-   * free, the BIOS whole, a write-only I/O register as last written, and 0 where nothing is mapped.
+   * free, the BIOS whole, a write-only I/O register as last written, and 0 from the first unmapped
+   * byte on.
    */
   readMemory(address: number, size: number): Uint8Array {
     return this.#gba.bus.peek(address, size).data;

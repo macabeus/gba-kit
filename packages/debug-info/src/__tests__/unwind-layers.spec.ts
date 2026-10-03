@@ -570,7 +570,7 @@ describe('the BIOS SWI handler', () => {
     const w = callingWorld()
       .fn(0x08001000, [PUSH_LR, MOVS_R0_0, MOVS_R0_0])
       .stack(0x03007f80, 0x00000090)
-      .stack(0x03007f88, 0xa0, 0xa1, 0xa2, 0xa3, 0xac, 0x1004) // interrupted at 0x1000, no routine of it
+      .stack(0x03007f88, 0xa0, 0xa1, 0xa2, 0xa3, 0xac, 0x1004) // interrupted at 0x1000, outside every routine
       .banked(IRQ, 0x03007f88)
       .interruptedFrom(SYS);
     const walk = unwindStack(0x08001004, registers({ 13: 0x03007f80 }), w, NO_CFI);

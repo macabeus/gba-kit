@@ -6,8 +6,7 @@
  * - the top two visible layers are picked by priority (OBJ before BGs of equal priority,
  *   BGs by index);
  * - colour special effects (alpha blending, brightness increase/decrease, and the forced
- *   alpha blend of semi-transparent OBJs) run on the PPU's own channel precision, so every
- *   result is a colour the hardware can show.
+ *   alpha blend of semi-transparent OBJs) run at the PPU's own channel precision.
  *
  * References: GBATEK "LCD I/O Window Feature", "LCD I/O Color Special Effects";
  * NanoBoyAdvance src/nba/src/hw/ppu/merge.cc (DrawMergeImpl, OBJ mosaic latch);
@@ -86,10 +85,10 @@ export function buildWindowMask(windows: WindowState, obj: Uint32Array, mmio: Ui
 // ─── OBJ Mosaic ──────────────────────────────────────────────────────
 
 /**
- * Apply horizontal OBJ mosaic on the screen grid. A latch holds the OBJ pixel and is
- * reloaded at the start of each mosaic block, or whenever the new pixel is not mosaic,
- * the latched one is not mosaic, or the new one has a better priority
- * (NBA merge.cc `sprite_pixel_latch`). The OBJ-window bit is not latched.
+ * Apply horizontal OBJ mosaic on the screen grid. A latch holds the OBJ pixel and reloads
+ * at the start of each mosaic block, whenever the new or the latched pixel is non-mosaic,
+ * and whenever the new one has a better priority (NBA merge.cc `sprite_pixel_latch`).
+ * The OBJ-window bit passes through unlatched.
  */
 export function applyObjMosaic(obj: Uint32Array, mosaicWidth: number, out: Uint32Array): void {
   let latch = 0;
@@ -114,9 +113,9 @@ export function applyObjMosaic(obj: Uint32Array, mosaicWidth: number, out: Uint3
 // ─── Colour Special Effects ──────────────────────────────────────────
 
 // The effects work on 5-bit red and blue and a 6-bit green whose low bit is the colour's
-// bit 15, rounding to nearest (darkening rounds the amount removed up), and the result
-// drops green's low bit again. NBA merge.cc Blend/Brighten/Darken. Coefficients are in
-// 1/16 steps, capped at 16: GBATEK, LCD I/O Color Special Effects.
+// bit 15; each result rounds to nearest, halves up, and green drops its low bit again
+// (NBA merge.cc Blend/Brighten/Darken). Coefficients are in 1/16 steps, capped at 16:
+// GBATEK, LCD I/O Color Special Effects.
 
 function green6(color: number): number {
   return ((color >> 4) & 0x3e) | ((color >> 15) & 1);

@@ -26,7 +26,8 @@ describe('the prescaler', () => {
     t.writeControl(0, ENABLE | 3); // F/1024, between the ticks at 0 and 1024
     scheduler.tick(24 + 2);
     expect(t.readCounter(0)).toBe(1);
-    // The overflow comes on the same grid, 0x10000 ticks after the one before the write.
+    // The overflow comes on the same grid, 0x10000 ticks after the one at 0; its event fires 2
+    // cycles (READ_OFFSET) after it.
     expect(scheduler.dueCycle(EventId.Timer0Overflow)).toBe(0x10000 * 1024 + 2);
   });
 

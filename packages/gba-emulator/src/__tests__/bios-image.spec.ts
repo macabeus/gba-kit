@@ -90,7 +90,7 @@ describe('IntrWait and VBlankIntrWait run as BIOS code', () => {
   it('leaves nothing behind: interrupts after the wait return straight to the program', () => {
     const gba = boot(MAIN_VBLANK_INTR_WAIT);
     gba.runFrame(); // through the wait
-    // HBlank IRQs too, which the handler never reports to IntrWait.
+    // HBlank IRQs too; the handler reports only VBlank to IntrWait.
     gba.bus.write16(MMIO.DISPSTAT, 0x0018);
     gba.bus.write16(MMIO.IE, IrqFlag.VBlank | IrqFlag.HBlank);
     const before = gba.armCpu.registers[9]!;
@@ -209,7 +209,7 @@ describe('Halt and HALTCNT', () => {
     expect(irq.halted).toBe(true);
     irq.requestInterrupt(IrqFlag.Keypad);
     expect(irq.halted).toBe(false);
-    // The line is up now, so a Halt does not sleep at all.
+    // The line is up now, so Halt returns at once.
     irq.halt();
     expect(irq.halted).toBe(false);
     irq.acknowledge(IrqFlag.VBlank | IrqFlag.Keypad);
@@ -227,7 +227,7 @@ describe('Halt and HALTCNT', () => {
     fresh.loadRom(romOf(ROM));
     fresh.deserialize(snap);
     expect(fresh.interrupts.stopped).toBe(true);
-    // A snapshot from the IntrWait model that ran outside the BIOS code.
+    // A snapshot in the earlier format: `inIrqHandler` and `intrWaitFlags`, and no `stopped`.
     const legacy = { ...snap, inIrqHandler: true, interrupts: { ...snap.interrupts, intrWaitFlags: 1 } };
     delete legacy.interrupts.stopped;
     fresh.deserialize(legacy);

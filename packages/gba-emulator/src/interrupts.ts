@@ -9,14 +9,13 @@
  * GBA_IRQ_DELAY; mgba-suite "Timer IRQ").
  *
  * IME gates only the IRQ line, the exception's input: setting it while the CPU already sees a
- * request lets that request through IRQ_DELAY cycles later (NanoBoyAdvance irq.cc: IME moves
- * irq_line, never irq_available).
+ * request raises the line IRQ_DELAY cycles later (NanoBoyAdvance irq.cc: an IME write updates
+ * irq_line; irq_available follows IE AND IF).
  *
- * Halt (HALTCNT bit 7 clear) pauses the CPU while the signal is down: IE AND IF is zero or still on
- * its way. IME plays no part, and a halt entered while the CPU already sees a request ends at once
- * (GBATEK "System Control": "the CPU is paused as long as (IE AND IF)=0"; NanoBoyAdvance
- * IRQ::ShouldUnhaltCPU). Stop (bit 7 set) ends the same way, for keypad, Game Pak and serial
- * requests only.
+ * Halt (HALTCNT bit 7 clear) pauses the CPU until it sees IE AND IF non-zero, whatever IME holds,
+ * and a Halt entered while the CPU already sees a request ends at once (GBATEK "System Control":
+ * "the CPU is paused as long as (IE AND IF)=0"; NanoBoyAdvance IRQ::ShouldUnhaltCPU). Stop (bit 7
+ * set) ends the same way, on keypad, Game Pak and serial requests only.
  */
 import type { InterruptSnapshot } from './savestate.js';
 import type { Scheduler } from './scheduler.js';
@@ -31,7 +30,7 @@ const ALL_IRQS = 0x3fff;
 /** The requests that end Stop mode: the ones whose hardware runs while the GBA sleeps. */
 const STOP_WAKE_IRQS = IrqFlag.Keypad | IrqFlag.GamePak | IrqFlag.Serial;
 
-/** The ImeLine event changes nothing when it fires: irqPending reads whether it is still on its way. */
+/** The ImeLine event only marks time: irqPending checks whether it is still scheduled. */
 const imeLineReached = (): void => {};
 
 export class InterruptController {
@@ -75,9 +74,8 @@ export class InterruptController {
   }
 
   /**
-   * IE AND IF became non-zero at the cycle `at`: the CPU sees it IRQ_DELAY cycles later. A signal
-   * already on its way keeps its cycle, and a second request adds no delay to a signal the CPU
-   * already sees.
+   * When IE AND IF is non-zero as of the cycle `at`, the CPU sees it IRQ_DELAY cycles later. A
+   * signal already on its way keeps its cycle.
    */
   #signal(at: number): void {
     if ((this.ie & this.if_) !== 0 && !this.#scheduler.isScheduled(EventId.Irq)) {
@@ -104,8 +102,8 @@ export class InterruptController {
 
   /**
    * HALTCNT with bit 7 set: Stop, until the CPU sees an enabled keypad, Game Pak or serial
-   * request. The LCD, sound and timers keep their clocks here, so frames still complete while the
-   * CPU sleeps.
+   * request. The emulator keeps the LCD, sound and timers clocked here, where the hardware pauses
+   * most of them (GBATEK "System Control"), so frames still complete while the CPU sleeps.
    */
   stop(): void {
     this.#sleep(STOP_WAKE_IRQS);
@@ -166,8 +164,7 @@ export class InterruptController {
   /**
    * Write IME register. Setting it while the CPU already sees a request raises the IRQ line
    * IRQ_DELAY cycles later, as enabling the request in IE would (mGBA io.c: an IME write calls
-   * GBATestIRQ). A request still on its way keeps its own cycle, and Halt, which reads IE AND IF,
-   * does not wait for IME.
+   * GBATestIRQ); a request still on its way keeps its own cycle. Clearing it lowers the line at once.
    */
   writeIme(value: number): void {
     const enabling = this.ime === 0 && (value & 1) !== 0;
@@ -196,7 +193,7 @@ export class InterruptController {
     this.ie = snap.ie;
     this.if_ = snap.if_;
     this.halted = snap.halted;
-    // Older snapshots carry no `stopped`: they knew only Halt.
+    // A snapshot without `stopped` restores as Halt.
     this.#wakeIrqs = snap.stopped ? STOP_WAKE_IRQS : ALL_IRQS;
   }
 

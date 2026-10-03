@@ -524,7 +524,7 @@ export class ScriptingEngine {
           address = 0x04000000;
           break;
         case 'sram':
-          // the 64 KB window as a CPU reads it: SRAM, or the flash bank in view
+          // the 64 KB window as a CPU reads it: SRAM mirrored twice, or the flash bank in view
           data = bus.peek(0x0e000000, 0x10000).data;
           address = 0x0e000000;
           break;
@@ -802,8 +802,8 @@ export class ScriptingEngine {
    * Read a halfword. **Throws** on an odd address, and on one the bus decodes to
    * nothing.
    *
-   * The hardware bus answers both: a GBA forces `LDRH` to an even address, so
-   * `read16(0x03000103)` returns the halfword at `0x03000102` — the right answer to a
+   * The hardware bus answers both: halfword memory ignores address bit 0, so an `LDRH`
+   * from `0x03000103` reads the halfword at `0x03000102` (rotated) — the right answer to a
    * question you did not ask, and indistinguishable from the one you wanted. That is
    * the correct emulation and the wrong debugger. To read two bytes at an odd
    * address — ordinary for a struct member — use {@link readBytes}.
@@ -980,10 +980,9 @@ export class ScriptingEngine {
    * individual bytes, so it is correct at any alignment (the bus's read16/read32
    * force alignment) and the result is unsigned.
    *
-   * Every read on this surface is a debugger's read (`bus.peek`): side-effect free, so
-   * no read watchpoint fires and no EEPROM transaction is clocked, and as stored where
-   * the CPU's view differs — the BIOS whole wherever the CPU runs, a write-only I/O
-   * register as last written.
+   * Every read on this surface goes through `bus.peek`, the debugger's view: side-effect
+   * free (no read watchpoint, no EEPROM clocking), the BIOS whole wherever the CPU runs,
+   * and a write-only I/O register as last written.
    */
   #readSized(address: number, size: number): number {
     const { data } = this.#gba.bus.peek(address, size);

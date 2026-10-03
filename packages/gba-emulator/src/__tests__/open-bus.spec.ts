@@ -1,7 +1,7 @@
 /**
- * What memory nothing answers for reads as: open bus (the CPU's last fetched opcode), the BIOS's
- * read-protection latch, the cartridge's address lines past its end, and the half of VRAM's OBJ
- * mirror the bitmap modes leave unmapped (GBATEK "GBA Unpredictable Things", "BIOS Memory";
+ * What memory nothing answers for reads as: open bus (the CPU's last fetch or a DMA's last unit),
+ * the BIOS's read-protection latch, the cartridge's address lines past its end, and the half of
+ * VRAM's OBJ mirror the bitmap modes leave unmapped (GBATEK "GBA Unpredictable Things", "BIOS Memory";
  * mGBA memory.c GBALoadBad, LOAD_BIOS, LOAD_CART, LOAD_VRAM; jsmolka gba-tests bios and unsafe).
  */
 import { disassembleArm } from '@gba-kit/arm-emulator/disassembler';
@@ -225,7 +225,7 @@ describe('BIOS read protection', () => {
     expect(Array.from(engine.getMemory(0x10, 4))).toEqual([0x78, 0x56, 0x34, 0x12]);
     expect(engine.readBytes(0x11, 2)).toBe(0x3456);
     expect(engine.read16(0x04000010)).toBe(0x0123);
-    expect(hits).toBe(0); // a script's read is not the program's
+    expect(hits).toBe(0); // a script reads through peek, which fires no read watchpoint
   });
 });
 

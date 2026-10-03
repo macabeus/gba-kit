@@ -14,10 +14,7 @@ export interface GbaSnapshot {
   currentScanline: number;
   /** Hardware frames completed since reset. Older snapshots omit it and restore as 0. */
   frameCount?: number;
-  /**
-   * Whether the CPU was in the BIOS IRQ handler, for the IntrWait model that ran outside the BIOS
-   * code. Older snapshots carry it; a restore ignores it.
-   */
+  /** Carried by older snapshots, for an IntrWait model that ran outside the BIOS code; a restore ignores it. */
   inIrqHandler?: boolean;
   scheduler: SchedulerSnapshot;
   interrupts: InterruptSnapshot;
@@ -51,10 +48,7 @@ export interface InterruptSnapshot {
   halted: boolean;
   /** Whether the sleep is Stop (HALTCNT bit 7). Older snapshots omit it and restore as Halt. */
   stopped?: boolean;
-  /**
-   * The wait of the IntrWait model that ran outside the BIOS code. Older snapshots carry it; the
-   * BIOS image runs IntrWait itself now, so a restore ignores it.
-   */
+  /** Carried by older snapshots, for the same IntrWait model; the BIOS image runs IntrWait, so a restore ignores it. */
   intrWaitFlags?: number;
 }
 
@@ -177,7 +171,10 @@ export interface SystemBusSnapshot {
   hasSram: boolean;
   waitcnt: number;
   postflg: number;
-  /** The BIOS read-protection latch: the last BIOS word read while the CPU executed in the BIOS. */
+  /**
+   * The BIOS read-protection latch: the last BIOS word read while the CPU executed in the BIOS, or
+   * the one an HLE SWI leaves (BIOS_LATCH_AFTER_SWI).
+   */
   lastBiosRead: number;
   /** Internal Memory Control (0x04000800). Older snapshots omit it and restore as 0x0D000020, the BIOS's value. */
   memoryControl?: number;
@@ -186,16 +183,19 @@ export interface SystemBusSnapshot {
   /** registers[15] when a DMA last handed the bus back to the CPU. Older snapshots omit it and restore as -1, none. */
   dmaPc?: number;
   eeprom: EepromSnapshot;
-  /** Older snapshots omit it: a flash cartridge's bytes were then in `sram`, which restores into bank 0, in read mode. */
+  /**
+   * Older snapshots omit it and keep a flash cartridge's bytes in `sram`, which restores into bank 0,
+   * in read mode.
+   */
   flash?: FlashSnapshot;
 }
 
 // ─── PPU ──────────────────────────────────────────────────────────────
 
 /**
- * The fields after the reference points are optional because older snapshots lack them
- * (they carried `bg2RefLatched`/`bg3RefLatched`, which `deserialize` passes over); see
- * `Ppu.deserialize` for what each restores as.
+ * The fields after the reference points are optional: older snapshots lack them and carry
+ * `bg2RefLatched`/`bg3RefLatched` instead, which `deserialize` passes over. `Ppu.deserialize`
+ * says what each restores as.
  */
 export interface PpuSnapshot {
   framebuffer: Uint32Array;

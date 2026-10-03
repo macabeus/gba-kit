@@ -92,8 +92,8 @@ describe('GbaMemory', () => {
     });
 
     it('aligns halfword reads without rotating them', () => {
-      // MemoryBus contract: the bus returns the aligned halfword and the CPU rotates a misaligned
-      // LDRH, the same as GbaSystemBus.
+      // MemoryBus contract, as in GbaSystemBus: the bus returns the aligned halfword and the CPU
+      // rotates a misaligned LDRH.
       const mem = new GbaMemory();
       mem.write16(0x02000000, 0xaabb);
       expect(mem.read16(0x02000001)).toBe(0xaabb);

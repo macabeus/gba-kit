@@ -33,7 +33,7 @@ function cpuWith(mem: GbaMemory, words: number[], thumb: boolean, at = ROM): Arm
   return cpu;
 }
 
-/** A bus with wait states: each region charges its own N and S price; it prefetches nothing. */
+/** A bus with wait states: each region charges its own N and S price, for fetches and data alike. */
 class PricedMemory extends GbaMemory {
   constructor(readonly prices: Record<number, { n: number; s: number }>) {
     super();

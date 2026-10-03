@@ -116,7 +116,7 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
       usrBankedR8to12: base64ToUint32Array(data.cpu.usrBankedR8to12),
       spsr: base64ToUint32Array(data.cpu.spsr),
       halted: data.cpu.halted,
-      // Absent from states saved before the CPU modelled its prefetch pipeline.
+      // Older states have no pipeline; the CPU refills it from memory at the next step.
       pipeline: data.cpu.pipeline ? base64ToUint32Array(data.cpu.pipeline) : undefined,
     },
     currentScanline: data.currentScanline,
@@ -138,7 +138,7 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
       postflg: data.bus.postflg,
       lastBiosRead: data.bus.lastBiosRead,
       memoryControl: data.bus.memoryControl,
-      // Absent from states saved before the game pak prefetch buffer was modelled.
+      // Older states have no prefetch unit; the bus restores it stopped and empty.
       prefetch: data.bus.prefetch,
       dmaPc: data.bus.dmaPc,
       eeprom: {

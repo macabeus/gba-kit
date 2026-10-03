@@ -46,10 +46,10 @@ export function checkSaveFile(save: CartridgeSave, byteLength: number): void {
 }
 
 /**
- * How many bytes of a cartridge's backup memory belong in its `.sav`: the size the
- * declared type gives SRAM and flash. An EEPROM's size is not in the string, and its
- * array is 8 KB whichever chip it is, so the chip answers for it, and while nothing has
- * told it there is no answer to give.
+ * How many bytes of a cartridge's backup memory belong in its `.sav`: for SRAM and flash,
+ * the size the declared type gives. An EEPROM's string does not give its size and its
+ * array is 8 KB either way, so `eepromSaveBytes` (the bus's) answers; while it is 0, the
+ * size is still unknown and this throws.
  */
 export function saveFileSize(save: CartridgeSave, eepromSaveBytes: number): number {
   if (save.type === null) {

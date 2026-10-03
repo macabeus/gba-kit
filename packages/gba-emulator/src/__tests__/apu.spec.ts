@@ -8,7 +8,7 @@ import { CPU_FREQ } from '../types.js';
 
 const IO = 0x04000000;
 
-/** A machine with master sound on; the sound registers ignore writes until then. */
+/** A machine with master sound on, so the PSG registers take writes. */
 function soundOn(): Gba {
   const gba = new Gba();
   gba.bus.write8(IO + 0x84, 0x80);
@@ -218,7 +218,7 @@ describe('channel 3', () => {
     expect(ch3.output).toBe(0);
     ch3.writeControl(0x80); // play bank 0
     expect(ch3.output).toBe(15);
-    // one bank of constant digits never toggles
+    // one bank of constant digits holds a steady level
     expect(risingEdges(ch3, CPU_FREQ / 4, 8)).toBe(0);
 
     ch3.writeControl(0xa0); // dimension: 32 digits of 0xF then 32 of 0 → 1024 / 64 = 16 Hz

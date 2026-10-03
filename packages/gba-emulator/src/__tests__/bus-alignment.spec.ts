@@ -1,7 +1,8 @@
 /**
- * Who aligns a misaligned access. The CPU and DMA drive the address they mean and the bus aligns
- * it the way the addressed memory does (MemoryBus in arm-emulator). The 8-bit SRAM bus is the one
- * memory that sees address bits 0-1, so it is where a layer that aligns too early shows.
+ * Who aligns a misaligned access. The CPU drives the address it means and the bus aligns it the
+ * way the addressed memory does (MemoryBus in arm-emulator); a DMA channel drops the low bits of
+ * its addresses when it starts (dma.ts). SRAM, on its 8-bit bus, is the one memory that uses
+ * address bits 0-1, so a layer that aligns too early shows there.
  */
 import { describe, expect, it } from 'vitest';
 

@@ -142,7 +142,7 @@ function checkCondition(cond: number, n: boolean, z: boolean, c: boolean, v: boo
   }
 }
 
-// ─── SWI Handler Type ───────────────────────────────────────────────
+// ─── Multiply Timing ────────────────────────────────────────────────
 
 /**
  * The internal cycles (m) of a multiply: the multiplier array stops early once the multiplier's
@@ -170,14 +170,15 @@ function multiplierCycles(multiplier: number, signed: boolean): number {
   return m >>> 24 === 0 ? 3 : 4;
 }
 
+// ─── SWI Handler Type ───────────────────────────────────────────────
+
 /**
- * Callback for Software Interrupt (SWI) instructions.
- * Platform-specific: on GBA, the SWI number selects a BIOS function.
- * A handler that runs the call itself returns the cycles the call spends between taking the SWI
- * and branching back, which the SWI instruction costs on top of its own fetch and that return
- * branch. A handler that returns null leaves the call to the code at the SWI vector: the CPU takes
- * the exception, as it does for every SWI on hardware.
- * Without a handler, SWI instructions do nothing.
+ * Callback for Software Interrupt (SWI) instructions. On GBA, the SWI number selects a BIOS
+ * function. A handler that runs the call itself returns the cycles the call spends between taking
+ * the SWI and branching back; the SWI instruction costs those on top of its own fetch and the
+ * return branch's refill. A handler that returns null leaves the call to the code at the SWI
+ * vector: the CPU takes the exception, as it does for every SWI on hardware. Without a handler, a
+ * SWI is a call that takes 0 cycles.
  */
 export type SwiHandler = (cpu: ArmCpu, swiNumber: number) => number | null;
 
@@ -271,12 +272,13 @@ export class ArmCpu {
   /**
    * The ARM7TDMI fetches two instructions ahead of the one it executes. While the instruction at
    * $ executes, the one at $+width sits decoded and the one at $+2*width is fetched in its first
-   * cycle, before any of its own data accesses — so a store to either address changes nothing
-   * until a branch refills the pipeline (GBATEK "ARM CPU Overview"; mGBA `cpu->prefetch[0..1]`).
+   * cycle, before any of its own data accesses — so after a store to either address the CPU still
+   * runs the opcodes it holds, and the stored ones run once a branch refills the pipeline (GBATEK
+   * "ARM CPU Overview"; mGBA `cpu->prefetch[0..1]`).
    *
-   * `#pipelineAddress` is the address of `#decodedOpcode`, the next instruction to execute; the
-   * pipeline is valid only while it equals the PC in the state `#pipelineThumb` records, which
-   * also catches a PC set from outside (a host, the debugger, an IRQ entry).
+   * `#pipelineAddress` is the address of `#decodedOpcode`, the next instruction to execute. A step
+   * whose PC or state differs from `#pipelineAddress` and `#pipelineThumb` refills the pipeline,
+   * which covers a PC set from outside (a host, the debugger).
    */
   #pipelineAddress = PIPELINE_EMPTY;
   #pipelineThumb = false;
@@ -291,9 +293,9 @@ export class ArmCpu {
   #cycles = 0;
 
   /**
-   * Whether the fetch that ends the instruction in progress is an S access: it is unless the bus
-   * carried a data access or sat through an internal cycle since the last fetch. A refill leaves
-   * it sequential (NanoBoyAdvance `pipe.access`).
+   * Whether the fetch that ends the instruction in progress is an S access. A data access or an
+   * internal cycle since the last fetch makes it N; a refill makes it S again (NanoBoyAdvance
+   * `pipe.access`).
    */
   #nextFetchSequential = true;
 
@@ -646,7 +648,7 @@ export class ArmCpu {
     this.#usrBankedR8to12.set(snap.usrBankedR8to12);
     this.#spsr.set(snap.spsr);
     this.#halted = snap.halted;
-    // A snapshot from before the pipeline was modelled refills it from memory at the next step.
+    // A snapshot without `pipeline` restores a flushed pipeline, which the next step refills.
     const pipeline = snap.pipeline;
     this.#pipelineAddress = pipeline ? pipeline[0]! : PIPELINE_EMPTY;
     this.#decodedOpcode = pipeline ? pipeline[1]! : 0;
@@ -670,8 +672,8 @@ export class ArmCpu {
 
   /**
    * The opcode the pipeline fetched last: [$+8] in ARM state and [$+4] in Thumb state while the
-   * instruction at $ executes. It is the value an open-bus read returns (GBATEK "GBA Unpredictable
-   * Things"; mGBA `cpu->prefetch[1]`).
+   * instruction at $ executes. Open-bus reads are built from it (GBATEK "GBA Unpredictable Things";
+   * mGBA `cpu->prefetch[1]`).
    */
   get prefetchedOpcode(): number {
     return this.#fetchedOpcode;
@@ -684,8 +686,8 @@ export class ArmCpu {
 
   /**
    * Empty the pipeline, so the next step refills it from memory at no cost, as after a PC set from
-   * outside. For code changed from outside the machine (a debugger's write): a store the program
-   * makes leaves the fetched opcodes in place, as on hardware.
+   * outside. For code a debugger overwrites; a store the program makes keeps the fetched opcodes,
+   * as on hardware.
    */
   flushPipeline(): void {
     this.#pipelineAddress = PIPELINE_EMPTY;
@@ -712,10 +714,10 @@ export class ArmCpu {
    * - Calling the user's handler from [0x03007FFC]
    * - Restoring registers and returning from IRQ
    *
-   * Returns the cycles the entry takes: the N+S refill at the vector. With the S fetch the
-   * interrupted instruction ended with, that is GBATEK's 2S+1N for an exception. The handler's
-   * first instruction starts without a fetch of its own, which gives the time from a request to
-   * the handler that mgba-suite's "Timer IRQ" tests measure on hardware.
+   * Returns the cycles the entry takes: the N+S refill at the vector, which with the S fetch that
+   * ended the previous instruction makes GBATEK's 2S+1N for an exception. Nothing charges the fetch
+   * the handler's first instruction starts with; that gives the request-to-handler time
+   * mgba-suite's "Timer IRQ" tests measure on hardware.
    */
   enterIrq(): number {
     this.#cycles = 0;
@@ -741,7 +743,7 @@ export class ArmCpu {
     this.cpsr |= 1 << CPSR_I; // Disable IRQs
     this.cpsr &= ~(1 << CPSR_T); // Enter ARM state
 
-    // Jump to the BIOS IRQ vector; its stub calls the user handler.
+    // Jump to the BIOS IRQ vector, whose code calls the user handler.
     this.#branchTo(0x00000018);
     return this.#cycles;
   }
@@ -782,10 +784,11 @@ export class ArmCpu {
    * Execute one instruction (ARM or Thumb based on T bit) and return the cycles it took: its data
    * accesses, internal cycles and branch refill, then the opcode fetch the next instruction begins
    * with. Returns 0 when nothing ran: the CPU is halted (`halted`), a debug hook refused the
-   * instruction (`refused`), or the instruction halted the CPU at the sentinel return address.
+   * instruction (`refused`), or the instruction halted the CPU at the sentinel return address. A
+   * call into a registered stub returns 1.
    *
-   * A PC set from outside (a host, the debugger, a snapshot) refills the pipeline here at no cost,
-   * the first instruction's fetch included: only a branch the program takes pays for its refill.
+   * A PC set from outside (a host, the debugger) refills the pipeline here at no cost, the first
+   * instruction's fetch included; a branch the program takes pays for its refill.
    */
   step(): number {
     this.#refused = false;
@@ -885,9 +888,9 @@ export class ArmCpu {
 
   /**
    * The opcode fetch that ends an instruction: the one the next instruction's first cycle makes,
-   * [$+8] in ARM state and [$+4] in Thumb state of that instruction. Counting it here puts the
-   * clock, between two instructions, after that fetch, at the cycle the next instruction's first
-   * data access happens, which is when its I/O sees the hardware.
+   * [$+8] in ARM state and [$+4] in Thumb state, $ being that next instruction. Counting it here
+   * puts the clock between two instructions after that fetch, at the cycle of the next
+   * instruction's first data access, which is when its I/O sees the hardware.
    */
   #chargeNextFetch(): void {
     const width = this.#pipelineThumb ? 2 : 4;
@@ -901,7 +904,7 @@ export class ArmCpu {
     this.#nextFetchSequential = false;
   }
 
-  /** Internal cycles, which leave the bus alone; the next fetch is nonsequential. */
+  /** Internal cycles, in which the bus is idle; the next fetch is nonsequential. */
   #chargeInternal(cycles: number): void {
     this.memory.idle(cycles);
     this.#cycles += cycles;
@@ -985,7 +988,7 @@ export class ArmCpu {
     return (address & 1 ? signExtend(value >>> 8, 8) : signExtend(value, 16)) >>> 0;
   }
 
-  /** The value a load writes into `rd`. Loading the PC is a branch; ARMv4 keeps the state (no interworking). */
+  /** Write a loaded value into `rd`. Loading the PC branches in the current state (no interworking on ARMv4). */
   #writeLoaded(rd: number, value: number): void {
     if (rd === PC) {
       this.#branchTo(value);
@@ -1056,8 +1059,8 @@ export class ArmCpu {
       return;
     }
 
-    // ARMv4T leaves 0xE800-0xEFFF (BLX suffix on ARMv5) and 0xDE00-0xDEFF (B with condition AL)
-    // undefined (mGBA src/arm/isa-thumb.c: ILL).
+    // 0xE800-0xEFFF (the BLX suffix on ARMv5) and 0xDE00-0xDEFF (B with condition AL) are undefined
+    // on ARMv4T (mGBA src/arm/isa-thumb.c: ILL).
     if ((instr & 0xf800) === 0xe800 || (instr & 0xff00) === 0xde00) {
       this.enterUnd(instrAddr);
       return;
@@ -1639,8 +1642,8 @@ export class ArmCpu {
         if (bits27_25 === 0b111 && bit(instr, 24) === 1) {
           this.#armSwi(instr);
         } else {
-          // Coprocessor transfers and operations: the GBA has no coprocessor to answer them, so
-          // they take the undefined instruction trap (mGBA ARM_ILL raises the UND exception).
+          // Coprocessor transfers and operations take the undefined instruction trap, since the GBA
+          // has no coprocessor (mGBA ARM_ILL raises the UND exception).
           this.enterUnd(instrAddr);
         }
         break;
@@ -2145,7 +2148,7 @@ export class ArmCpu {
       }
       this.#writeLoaded(rd, value);
     } else {
-      // STRH (sh=01; the signed forms have no store on ARMv4). A stored R15 is instrAddr+12.
+      // STRH is sh=01; ARMv4 has no signed store. A stored R15 is instrAddr+12.
       if (sh === 0b01) {
         const value = rd === PC ? (this.registers[PC]! + 8) >>> 0 : this.registers[rd]!;
         this.#chargeStore(address, 2);
@@ -2284,7 +2287,7 @@ export class ArmCpu {
     this.#writePsr(value, useSPSR, bits(instr, 19, 16));
   }
 
-  /** MSR (immediate): Move immediate to PSR flags */
+  /** MSR (immediate): Move immediate to PSR */
   #armMsrImm(instr: number): void {
     const useSPSR = bit(instr, 22) === 1;
     const imm8 = instr & 0xff;
@@ -2326,10 +2329,10 @@ export class ArmCpu {
   // ─── Software Interrupt ──────────────────────────────────────────
 
   /**
-   * SWI: an HLE handler runs the call in place of the BIOS code at the 0x08 vector and says how
-   * many cycles that code takes. On hardware the BIOS returns with `movs pc, lr`, which refills the
-   * pipeline at the return address, so code the call wrote right after the SWI is what runs next.
-   * A call the handler leaves to the BIOS code takes the exception into it.
+   * SWI: an HLE handler runs the call in place of the BIOS code at the 0x08 vector and returns the
+   * cycles that code takes. The branch back refills the pipeline at the return address, as the
+   * BIOS's `movs pc, lr` does on hardware, so code the call wrote right after the SWI runs next.
+   * A call the handler leaves to the BIOS code (it returns null) takes the exception into it.
    */
   #softwareInterrupt(swiNumber: number): void {
     const cycles = this.#swiHandler ? this.#swiHandler(this, swiNumber) : 0;

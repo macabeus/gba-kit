@@ -40,12 +40,12 @@ const TIMER_EVENT_IDS = [
 const TIMER_IRQ_FLAGS = [IrqFlag.Timer0, IrqFlag.Timer1, IrqFlag.Timer2, IrqFlag.Timer3] as const;
 
 /**
- * The clock stands after an instruction's opcode fetch while it runs. A counter read sees the count as
- * of READ_OFFSET cycles earlier, while a control write acts at the clock's cycle, which gives the
- * counts the hardware reads (mGBA io.c GBAIORead, `GBATimerUpdateRegister(gba, 0, 2)`, and
- * GBATimerWriteTMCNT_HI; mgba-suite Timing calibration, "Timer IRQ"). An overflow is serviced once
- * a read can see it, READ_OFFSET cycles after it happens, or earlier when a control or reload write
- * comes after it.
+ * While an instruction runs, the clock stands just after its opcode fetch (scheduler.ts). A counter
+ * read sees the count READ_OFFSET cycles before that, and a control write acts at the clock's
+ * cycle, which gives the counts the hardware reads (mGBA io.c GBAIORead,
+ * `GBATimerUpdateRegister(gba, 0, 2)`, and GBATimerWriteTMCNT_HI; mgba-suite Timing calibration,
+ * "Timer IRQ"). An overflow's event fires READ_OFFSET cycles after the overflow, when a read can
+ * first see it; a control or reload write that comes after the overflow services it sooner.
  */
 const READ_OFFSET = 2;
 
@@ -104,7 +104,10 @@ export class TimerController {
     this.#channels[index]!.reload = value & 0xffff;
   }
 
-  /** The running timer whose prescaler drives timer `index`: itself, or the one a count-up chain starts at; -1 when none runs. */
+  /**
+   * The running timer whose prescaler drives timer `index`: itself, or the one a count-up chain
+   * starts at; -1 when none runs.
+   */
   #countingTimer(index: number): number {
     for (let i = index; i >= 0; i--) {
       const ch = this.#channels[i]!;
@@ -170,7 +173,7 @@ export class TimerController {
   /**
    * The last tick of the timer's prescaler at or before `now`. The prescaler is a divider that runs
    * off the system clock all the time, so a timer started or switched between two of its ticks
-   * counts its first step at the next one, not a whole period after the write (mGBA timer.c
+   * counts its first step at the next one, less than a period after the write (mGBA timer.c
    * GBATimerWriteTMCNT_HI, `mTimingCurrentTime & ~tickMask`; NanoBoyAdvance timer.cc
    * OnControlWritten, `prescaler_offset = GetTimestampNow() & channel.mask`).
    */
@@ -178,7 +181,7 @@ export class TimerController {
     return now - (now % TIMER_PRESCALERS[ch.prescaler]!);
   }
 
-  /** Service the overflows that happened by `now` and wait for a read to see them, so a write comes after them. */
+  /** Service the overflows that happened by `now` and still wait out READ_OFFSET, so a write at `now` follows them. */
   #serviceOverflowsBefore(index: number, now: number): void {
     const id = TIMER_EVENT_IDS[index]!;
     while (this.#scheduler.dueCycle(id) - READ_OFFSET <= now) {
@@ -201,7 +204,10 @@ export class TimerController {
     }
   }
 
-  /** Schedule the next overflow, counted from the cycle the counter was last brought up to. */
+  /**
+   * Schedule the next overflow, counted from the cycle the counter was last brought up to; its
+   * event fires READ_OFFSET cycles after it.
+   */
   #scheduleOverflow(index: number): void {
     const ch = this.#channels[index]!;
     const ticksUntilOverflow = 0x10000 - ch.counter;
@@ -214,7 +220,7 @@ export class TimerController {
 
   /**
    * Handle a timer overflow that happened at the cycle `due`. The timer reloads and counts on from
-   * that cycle, so its period holds whenever the event is serviced, and its IRQ is raised then.
+   * that cycle, and its IRQ request carries it, so both hold whenever the event is serviced.
    */
   #onOverflow(index: number, due: number): void {
     const ch = this.#channels[index]!;

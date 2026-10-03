@@ -5,9 +5,9 @@
  * The CPU runs until the next scheduled event, then the event fires
  * and may schedule further events.
  *
- * Time is counted in CPU cycles: each instruction moves the scheduler's clock by
- * what it cost on the ARM7TDMI, wait states included, as the CPU reports it, and
- * DMA transfers, BIOS calls and interrupt entry move it by theirs.
+ * Time is counted in CPU cycles on the scheduler's clock (scheduler.ts): each
+ * instruction's ARM7TDMI cost, wait states included, and the cycles of DMA
+ * transfers, BIOS calls and interrupt entry.
  *
  * Execution is owned here, not by the CPU: timers, DMA, the PPU's scanline
  * chain, IRQ delivery and HALT all advance together. A debugger stops the
@@ -194,7 +194,7 @@ export class Gba {
    *   still sits at the reset vector, in the BIOS.
    * - CPU: the IRQ, SVC and SYS stacks of BOOT_STACK_POINTERS, SYS mode, ARM state, IRQs and FIQs
    *   enabled, PC at the cartridge's entry point.
-   * The BIOS read-protection latch starts at BIOS_LATCH_AFTER_BOOT with the bus.
+   * The bus starts the BIOS read-protection latch at BIOS_LATCH_AFTER_BOOT.
    */
   #skipBiosBoot(): void {
     const cpu = this.armCpu;
@@ -319,9 +319,8 @@ export class Gba {
   }
 
   /**
-   * Run the CPU until the next event is due. Each instruction moves the clock by its cycles as it
-   * completes, so an I/O access sees the cycle after its instruction's opcode fetch, and an event
-   * an access schedules earlier than the others ends the run in time.
+   * Run the CPU until the next event is due, moving the clock after each instruction (see
+   * scheduler.ts), so an event that an I/O access schedules ahead of the others ends the run on time.
    */
   #runCpu(shouldStop?: StopPredicate): void {
     const cpu = this.armCpu;

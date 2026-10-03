@@ -7,8 +7,8 @@
  * registers, compares VCOUNT with LYC, and raises the display interrupts.
  *
  * The registers live in bytes 4-7 of the I/O register file (`GbaSystemBus.mmioRegisters`), the
- * store the PPU, the debugger and snapshots read the display registers from; this class is their
- * only writer.
+ * store the PPU, the debugger and snapshots read the display registers from. Outside reset and
+ * snapshot restore, this class alone writes them.
  *
  * References: GBATEK "LCD I/O Display Status"; mGBA src/gba/video.c (GBAVideoWriteDISPSTAT,
  * _startHdraw); NanoBoyAdvance hw/ppu (DisplayStatus, UpdateVerticalCounterFlag).

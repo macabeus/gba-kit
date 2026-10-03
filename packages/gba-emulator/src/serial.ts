@@ -1,19 +1,18 @@
 /**
  * GBA Serial Port — SIOCNT, RCNT, the SIO data registers and the JOY bus registers
  *
- * The link port has nothing plugged into it: no cable, no other GBA, no JOY bus host. In Normal
- * mode with the internal clock the GBA drives the shift clock itself, so such a transfer completes
- * after its 8 or 32 bits whatever is connected, and shifts in what the idle SI line gives: all ones
- * (GBATEK "SIO Normal Mode": SI "1=High/None"). Every other transfer waits for a partner — Normal
- * mode with the external clock, Multi-Player, UART, JOY bus — and stays pending, as on a GBA with
- * an empty link port.
+ * The link port is empty: no cable, no other GBA, no JOY bus host. In Normal mode with the
+ * internal clock the GBA drives the shift clock itself, so a transfer completes after its 8 or 32
+ * bits and shifts in what the idle SI line gives: all ones (GBATEK "SIO Normal Mode": SI
+ * "1=High/None"). Every other transfer — Normal mode with the external clock, Multi-Player, UART,
+ * JOY bus — waits for a partner and stays pending.
  *
  * RCNT bits 14-15 and SIOCNT bits 12-13 select the mode, which decides what each register reads.
  * RCNT bits 0-3 read the levels of the SC, SD, SI and SO lines. The read values are the ones
  * mgba-suite's "SIO register R/W tests" measured on hardware with nothing connected.
  *
  * The registers live in the I/O register file (`GbaSystemBus.mmioRegisters`) at their own offsets,
- * which keeps them in snapshots and the debugger's I/O view; each holds what was written to it (or
+ * which keeps them in snapshots and the debugger's I/O view. Each holds what was written to it (or
  * what a transfer left there), and this class is their only writer.
  *
  * References: GBATEK "GBA Communication Ports" and its mode chapters; mGBA src/gba/sio.c
@@ -37,7 +36,7 @@ const JOY_TRANS_L = 0x154;
 const JOY_TRANS_H = 0x156;
 const JOYSTAT = 0x158;
 
-/** Whether the I/O halfword at `offset` is a serial port register (SIO 0x120-0x12A, RCNT, JOY bus 0x140-0x158). */
+/** Whether the I/O halfword at `offset` is a serial port register (SIO 0x120-0x12A, RCNT, JOYCNT, JOY bus 0x150-0x158). */
 export function isSerialRegister(offset: number): boolean {
   return (
     (offset >= SIODATA32_L && offset <= SIODATA8) ||
@@ -63,9 +62,12 @@ const SIOCNT_2MHZ = 1 << 1;
 const SIOCNT_SO_IDLE = 1 << 3;
 const SIOCNT_START = 1 << 7;
 const SIOCNT_IRQ = 1 << 14;
-/** Bit 15 reads 0 and takes no write (GBATEK: "Not used (Read only, always 0)"). */
+/** Bit 15 is read-only 0 (GBATEK: "Not used (Read only, always 0)"). */
 const SIOCNT_WRITABLE = 0x7fff;
-/** The bits each mode reads back as written: Normal and Multi-Player read their flags in bits 2-6 from the lines. */
+/**
+ * The SIOCNT bits each mode reads back as written. The rest report the port: SI (and SD in
+ * Multi-Player) from the lines, UART's receive-empty flag set, and the other status bits 0.
+ */
 const SIOCNT_NORMAL_READ = 0x7f8b;
 const SIOCNT_MULTI_READ = 0x7f83;
 const SIOCNT_UART_READ = 0x7f8f;
@@ -116,7 +118,7 @@ export class SerialPort {
       case SIOCNT:
         return this.#readSiocnt();
       case SIODATA8:
-        // In UART mode SIODATA8 reads the receive side, which nothing ever fills.
+        // In UART mode SIODATA8 reads the receive FIFO, which stays empty.
         return this.#mode() === SioMode.Uart ? 0 : this.#load(SIODATA8);
       case RCNT:
         return (this.#load(RCNT) & ~RCNT_LINE_BITS) | this.#lines();
@@ -124,7 +126,7 @@ export class SerialPort {
         return this.#load(JOYCNT) & (JOYCNT_FLAGS | JOYCNT_IRQ);
       case JOY_TRANS_L:
       case JOY_TRANS_H:
-        return 0; // the send registers are for the JOY bus host; the CPU reads 0 there
+        return 0; // the JOY bus host reads the send registers; the CPU reads 0
       case JOYSTAT:
         return this.#load(JOYSTAT) & JOYSTAT_READABLE;
       default:
@@ -138,8 +140,8 @@ export class SerialPort {
     switch (offset) {
       case SIODATA32_L:
       case SIODATA32_H:
-        // SIODATA32 exists in Normal 32-bit mode; in the other modes these are SIOMULTI0-1,
-        // which only a transfer fills.
+        // These are SIODATA32 in Normal 32-bit mode and take the write; in the other modes they
+        // are SIOMULTI0-1, which a transfer fills.
         if (this.#mode() === SioMode.Normal32) {
           this.#store(offset, merged);
         }
@@ -150,7 +152,7 @@ export class SerialPort {
       case JOY_RECV_H:
         return; // receive registers: a transfer fills them
       case SIODATA8:
-        // In UART mode the write goes to the send side, which nothing reads back.
+        // In UART mode the write goes to the send FIFO, and reads return the receive FIFO.
         if (this.#mode() !== SioMode.Uart) {
           this.#store(offset, merged);
         }
@@ -162,7 +164,7 @@ export class SerialPort {
         this.#store(RCNT, merged & RCNT_WRITABLE);
         return;
       case JOYCNT: {
-        // Writing 1 acknowledges a flag, so only the written lanes acknowledge anything.
+        // A 1 written to a flag acknowledges it, in the written byte lanes only.
         const acknowledged = value & mask & JOYCNT_FLAGS;
         this.#store(JOYCNT, (this.#load(JOYCNT) & JOYCNT_FLAGS & ~acknowledged) | (merged & JOYCNT_IRQ));
         return;

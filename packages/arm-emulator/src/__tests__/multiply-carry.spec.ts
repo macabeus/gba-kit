@@ -5,7 +5,7 @@ import { multiplyCarry, multiplyLongCarry } from '../multiply-carry.js';
 describe('multiply carry flag', () => {
   // C from zaydlang's reference implementation, which simulates the whole Booth array
   // (github.com/zaydlang/multiplication-algorithm impl.h: mul, mla, umull, smull, umlal, smlal).
-  // Rows cover every early-termination count, with and without an accumulator.
+  // The multipliers cover every cycle count of a signed multiply, with and without an accumulator.
   it.each([
     [0x31a61e54, 0x00009335, 0x2da18d6a, 0xffff4054, [true, false, true, true, false, false]],
     [0x0000d43a, 0x0000e78e, 0x341a76cb, 0xffffff76, [true, true, true, true, true, true]],

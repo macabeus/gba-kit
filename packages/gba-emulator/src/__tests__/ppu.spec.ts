@@ -135,7 +135,7 @@ describe('PPU: OBJ layer', () => {
     for (let i = 0; i < 0x8000; i += 4) {
       t.vram32(0x10000 + i, 0x11111111);
     }
-    // 64x64 affine, double size (a 128x128 box) at y=150, matrix 0 scales by 1/2 to fill it
+    // 64x64 affine, double size (a 128x128 box) at y=150; matrix 0 (PA = PD = 0.5) stretches it to fill the box
     t.oam(0, 150 | (1 << 8) | (1 << 9), 3 << 14, 0);
     t.bus.write16(0x07000006, 0x80);
     t.bus.write16(0x0700001e, 0x80);
@@ -153,7 +153,7 @@ describe('PPU: OBJ layer', () => {
     for (let i = 1; i <= 8; i++) {
       t.pal(256 + i, i);
     }
-    // 8x8 tile: texel (x, y) has colour x + 1 on row 0 and colour y + 1 in column 7
+    // 8x8 tile: texel (x, y) has colour x + 1 in columns 0-6 and colour y + 1 in column 7
     for (let row = 0; row < 8; row++) {
       t.vram32(0x10000 + row * 4, (0x07654321 | ((row + 1) << 28)) >>> 0);
     }
@@ -240,7 +240,7 @@ describe('PPU: OBJ layer', () => {
 
 describe('PPU: text backgrounds', () => {
   it('tile data past the 64 KB BG area draws transparent, whatever the OBJ tiles there hold', () => {
-    // mGBA software-mode0.c: `charBase >= 0x10000` draws nothing; the BG unit never reads OBJ VRAM.
+    // mGBA software-mode0.c: `charBase >= 0x10000` draws nothing; the BG unit reads only the BG area.
     const t = setup();
     solidBg0(t, RED);
     t.io(0x08, (3 << 2) | (31 << 8)); // char base 3 (0xC000)
@@ -300,7 +300,7 @@ describe('PPU: bitmap modes go through BG2 and the compositor', () => {
     for (let x = 0; x < 240; x++) {
       t.vram16(x * 2, x & 0x1f);
     }
-    t.io(0x20, 0x200); // PA = 2: twice as many bitmap pixels per screen pixel
+    t.io(0x20, 0x200); // PA = 2: two bitmap pixels per screen pixel
     t.io(0x00, 3 | (1 << 10));
     t.frame();
     t.frame();
@@ -339,7 +339,7 @@ describe('PPU: bitmap modes go through BG2 and the compositor', () => {
 });
 
 describe('PPU: affine reference points', () => {
-  /** Mode 3 with bitmap row y filled with colour y + 1 (red channel), PD = 1 row per line. */
+  /** Mode 3 with pixel 0 of bitmap row y in colour y + 1 (red channel), PD = 1 row per line. */
   function rows(): Machine {
     const t = setup();
     for (let y = 0; y < 160; y++) {
@@ -415,7 +415,7 @@ describe('PPU: affine reference points', () => {
         t.io(0x00, 3 | (1 << 10));
       }
     });
-    // Lines 10-22 neither draw nor step BG2 (the enable shows three lines after it is set).
+    // BG2 is hidden and holds its point on lines 10-22 (the enable shows three lines after it is set).
     expect(t.px(0, 22)).toBe(rgb(0, 0, 0));
     expect(t.px(0, 23)).toBe(row(10));
     expect(t.px(0, 45)).toBe(0xffffffff);

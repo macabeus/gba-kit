@@ -69,7 +69,7 @@ export interface TargetPolicy {
   exceptionStub: { mode: number; lrOffset: number };
   /**
    * The BIOS code a program enters with an SWI, for a walk that finds the machine inside it.
-   * Absent for a target whose SWIs leave no frame of their own.
+   * Set only for a target whose SWIs run as code with frames of their own.
    */
   serviceCall?: ServiceCallPolicy;
 }
@@ -90,7 +90,7 @@ export interface ServiceCallPolicy {
   /**
    * For a BIOS address: what the handler has pushed on the caller's stack when it runs there —
    * how many bytes, and where among them the caller's registers sit, counted down from the
-   * caller's sp. Undefined for an address of no routine the handler runs on the caller's stack.
+   * caller's sp. Undefined outside the addresses where the handler runs on the caller's stack.
    */
   frameAt(pc: number): ServiceCallFrame | undefined;
 }

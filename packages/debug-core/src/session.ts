@@ -1372,11 +1372,11 @@ export class Session {
   /**
    * The last (frame, instruction) in [`from`, now) where a breakpoint would stop,
    * evaluated as the forward run evaluates it. Now is the first poll of `nowFrame`
-   * after `nowInstr` instructions and at or past `nowCycle`: the polls of one halt,
-   * and the interrupt entry that ends it, share an instruction count. A hit count
-   * is reconstructed: the k-th of a breakpoint's V visits in the window saw
-   * `hits - after - V + k`, `after` being its visits between the window and now
-   * (`visitsAfter`, which this call extends with the window's own).
+   * after `nowInstr` instructions whose cycle is at or past `nowCycle`, since the
+   * polls of one halt and the interrupt entry that ends it share an instruction
+   * count. A hit count is reconstructed: the k-th of a breakpoint's V visits in the
+   * window saw `hits - after - V + k`, `after` being its visits between the window
+   * and now (`visitsAfter`, which this call extends with the window's own).
    */
   #lastHitBetween(
     from: number,

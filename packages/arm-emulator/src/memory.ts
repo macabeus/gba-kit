@@ -187,7 +187,7 @@ export class GbaMemory implements MemoryBus {
     this.#recordWrite(aligned, 4, value);
   }
 
-  // This memory has no wait states and no prefetch unit: every access is one cycle.
+  // Every access takes one cycle: this memory models neither wait states nor a prefetch unit.
 
   accessCycles(_address: number, _width: 1 | 2 | 4, _sequential: boolean): number {
     return 1;

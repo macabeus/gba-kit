@@ -1,8 +1,8 @@
 /**
  * DMA channel rules: the enable edge that latches SAD/DAD/CNT_L, the game pak ROM source that
- * always increments, the channel's data latch for sources it cannot read, the sound FIFO request
- * and DMA3 video capture. Expected values follow GBATEK "DMA Transfers" and the hardware results
- * of mgba-suite src/dma.c.
+ * always increments, the channel's data latch for sources below EWRAM, the sound FIFO request,
+ * DMA3 video capture and priority between channels. Expected values follow GBATEK "DMA Transfers"
+ * and the hardware results of mgba-suite src/dma.c.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -225,8 +225,8 @@ describe('sound FIFO DMA', () => {
   it('a snapshot from before the run, holding the CNT_L count of a FIFO channel, restores a 4-word request', () => {
     const { dma } = controller();
     program(dma, 1, EWRAM, MMIO.FIFO_A, REPEAT | WORD);
-    // The earlier controller set a FIFO channel's count from CNT_L (0 meaning 0x4000) and kept
-    // the run's fields out of its snapshot.
+    // A legacy snapshot holds a FIFO channel's count from CNT_L (0 meaning 0x4000) and lacks the
+    // run's fields.
     const snap = dma.serialize();
     snap.channels[1]!.wordCount = 0x4000;
     delete snap.waiting;

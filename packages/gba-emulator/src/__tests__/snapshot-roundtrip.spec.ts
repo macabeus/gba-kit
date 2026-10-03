@@ -183,7 +183,7 @@ describe('snapshot round trip', () => {
     gba.runFrame();
     gba.runFrame();
     const snap = gba.serialize();
-    // The shape snapshots had before: latch flags, no line-start state
+    // The older snapshot shape: latch flags, no line-start state
     const ppu = { ...snap.ppu };
     delete ppu.refWritten;
     delete ppu.dispcntLatch;
@@ -220,7 +220,7 @@ describe('snapshot round trip', () => {
       }
       io8(0x70, 0xa0); // play both banks
       io8(0x73, 0x80); // force 75%
-      io8(0x75, 0x87); // restart at the top sample rate
+      io8(0x75, 0x87); // restart, rate 0x700
       gba.bus.write16(0x040000a2, 0x4433);
       gba.runFrame();
       return gba;

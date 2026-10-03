@@ -1255,8 +1255,8 @@ describe('ArmCpu', () => {
 
   describe('prefetch pipeline', () => {
     // GBATEK "ARM CPU Overview": while the instruction at $ executes, $+4 is decoded and $+8 is
-    // fetched (Thumb: $+2 and $+4), so a store to either changes nothing until the pipeline
-    // refills. mGBA keeps the same two words in cpu->prefetch[0..1]; jsmolka nes.gba test 1.
+    // fetched (Thumb: $+2 and $+4), so code stored at either runs only once the pipeline refills.
+    // mGBA keeps the same two words in cpu->prefetch[0..1]; jsmolka nes.gba test 1.
     const MOV_R0_5 = 0xe3a00005;
     const CODE = 0x03000000;
 

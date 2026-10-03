@@ -12,7 +12,7 @@ const COUNT_LOOP = [0xe2800001, 0xeafffffd];
  */
 const ADD_CYCLES = 6;
 const LOOP_CYCLES = ADD_CYCLES + 6 + 8 + 6;
-/** The longest instruction the loop has: an event comes due during it at worst. */
+/** The loop's longest instruction, the `b`: an event that comes due during it fires at most this late. */
 const LONGEST_INSTRUCTION = 20;
 /** ARM: `swi 0x05` (VBlankIntrWait) then `b .` */
 const VBLANK_WAIT = [0xef050000, 0xeafffffe];

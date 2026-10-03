@@ -64,7 +64,7 @@ export function parseBgControl(cnt: number): BgControl {
 /**
  * Render one scanline of a text background layer.
  *
- * @param line - the BG line to fetch: the scanline minus the BG mosaic counter
+ * @param line - the BG line to fetch: the scanline, minus the BG mosaic counter for a mosaic BG
  * @param bgIndex - BG layer index (0-3)
  * @param ctrl - parsed BG control register
  * @param bus - system bus for memory access
@@ -104,7 +104,7 @@ export function renderTextBgScanline(
     const pixY = mapEntry & (1 << 11) ? 7 - fineY : fineY;
 
     // The BG unit fetches from the 64 KB BG area only: tile data past it draws transparent (mGBA
-    // software-mode0.c `charBase >= 0x10000`; NBA ppu.hh FetchVRAM_BG reads no OBJ VRAM either).
+    // software-mode0.c `charBase >= 0x10000`; NBA ppu.hh FetchVRAM_BG).
     let paletteIndex = 0;
     if (ctrl.colorMode === 1) {
       // 8bpp — 64 bytes per tile

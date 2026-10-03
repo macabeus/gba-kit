@@ -40,7 +40,7 @@ export class DirectSoundChannel {
 
   /**
    * Write `bytes` (1, 2 or 4) bytes of `value` at byte `offset` of the FIFO register, then
-   * push the 4 bytes of the latch into the FIFO, byte 0 first.
+   * push the latch's 4 bytes into the FIFO, byte 0 first, as far as it has room.
    */
   writeFifo(offset: number, value: number, bytes: 1 | 2 | 4): void {
     const shift = (offset & 3) * 8;

@@ -16,7 +16,7 @@
  *   0x08000000-0x09FFFFFF  Game Pak ROM (up to 32 MB)
  *   0x0E000000-0x0E00FFFF  Game Pak SRAM (32 KB, mirrored) or flash (one 64 KB bank)
  *
- * Reads of unmapped memory return open bus: the last opcode the CPU fetched.
+ * Reads of unmapped memory return open bus, the last value the bus carried (see #openBus).
  *
  * References: GBATEK "GBA Memory Map", "GBA I/O Map", "GBA Unpredictable Things";
  * mGBA src/gba/memory.c and src/gba/io.c; NanoBoyAdvance src/nba/src/bus.
@@ -76,8 +76,8 @@ export interface CartridgeSave {
 }
 
 /**
- * The SDK's save-type strings, GBATEK "GBA Cart Backup IDs"; no one of them is a prefix of
- * another, so the order is free.
+ * The SDK's save-type strings (GBATEK "GBA Cart Backup IDs"). None is a prefix of another, so at
+ * most one matches at an offset and the order is free.
  */
 const SAVE_TYPE_STRINGS: ReadonlyArray<readonly [string, SaveType]> = [
   ['EEPROM_V', 'eeprom'],
@@ -88,7 +88,7 @@ const SAVE_TYPE_STRINGS: ReadonlyArray<readonly [string, SaveType]> = [
   ['FLASH_V', 'flash512'],
 ];
 
-/** The shortest prefix there is, so the scan stops once no room is left for one. */
+/** The shortest prefix: the scan stops where none fits before the end of the ROM. */
 const MIN_SAVE_PREFIX = Math.min(...SAVE_TYPE_STRINGS.map(([prefix]) => prefix.length));
 
 /** The version digits the SDK appends to the prefix (`SRAM_V113`). */
@@ -97,7 +97,7 @@ const SAVE_VERSION_DIGITS = 3;
 /** The EEPROM chip's array: 64 Kbit, which a 4 Kbit cartridge uses the first 512 bytes of. */
 const EEPROM_BYTES = 0x2000;
 
-/** A ROM larger than this (32 MB) leaves the EEPROM only the last 256 bytes of 0x0D, from this offset on. */
+/** A ROM larger than this (16 MB) leaves the EEPROM only the last 256 bytes of 0x0D, from this offset on. */
 const LARGE_ROM_BYTES = 0x1000000;
 const LARGE_ROM_EEPROM_OFFSET = 0x1ffff00;
 const EEPROM_REGION = 0x0d;
@@ -136,9 +136,9 @@ const MEMORY_CONTROL_MASK = 0xff00002f;
 /**
  * Wait states (GBATEK "GBA System Control - Waitstate Control"; mGBA memory.c GBAAdjustWaitstates).
  * WAITCNT sets the game pak's: SRAM and the first access (N) of each ROM mirror take 4, 3, 2 or 8
- * waits, and a sequential access (S) to wait state 0, 1 or 2 takes 2/4/8 waits or 1. The ROM, EWRAM
- * and SRAM buses are 16 bits wide (SRAM 8), so a 32-bit access there is two accesses, the second
- * sequential; palette RAM and VRAM add one wait to a 32-bit access, and IWRAM, I/O and OAM have none.
+ * waits, and a sequential access (S) to wait state 0, 1 or 2 takes 2/4/8 waits or 1. The ROM and
+ * EWRAM buses are 16 bits wide and SRAM's 8, so a 32-bit access there costs two accesses, the second
+ * sequential; palette RAM and VRAM add one wait to a 32-bit access; IWRAM, I/O and OAM take 1 cycle.
  */
 const ROM_N_WAITS = [4, 3, 2, 8] as const;
 const ROM_S_WAITS = [
@@ -167,9 +167,9 @@ const DMA_END = 0xe0;
 const TIMERS_FIRST = 0x100;
 const TIMERS_END = 0x110;
 
-/** An I/O halfword a write sets and a read sees as open bus; a debugger still sees the write. */
+/** A write-only I/O halfword: writes are stored, CPU reads return open bus, and a peek shows the store. */
 const WRITE_ONLY = -1;
-/** An unused I/O halfword: writes go nowhere, reads see open bus. */
+/** An unused I/O halfword: writes are dropped and reads return open bus. */
 const UNUSED = -2;
 
 /**
@@ -361,7 +361,7 @@ export class GbaSystemBus implements MemoryBus {
     this.#dmaOrigin = origin;
   }
 
-  /** The DMA hands the bus back to the CPU, at the instruction registers[15] stands at. */
+  /** The DMA hands the bus back to the CPU; #openBus serves its last unit to the next instruction, at registers[15]. */
   clearDmaSource(): void {
     this.#dmaChannel = -1;
     this.#dmaOrigin = null;
@@ -391,8 +391,8 @@ export class GbaSystemBus implements MemoryBus {
 
   /**
    * Register a read watchpoint over [address, address+length); returns a disposer.
-   * Fires after the load, with the value it returned. Every load through the bus
-   * counts, a DMA's included; the CPU's opcode fetches and a debugger's `peek` do not.
+   * Fires after each load through read8/read16/read32, a DMA's included, with the value it
+   * returned. Opcode fetches (fetch16/fetch32) and `peek` bypass it.
    */
   addReadWatchpoint(address: number, length: number, onRead: (info: WatchpointRead) => void): () => void {
     const len = length >= 1 ? length : 1;
@@ -480,8 +480,8 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   /**
-   * Set the BIOS read-protection latch to the opcode the BIOS fetched last, for BIOS code the
-   * HLE runs without fetching it (an SWI, which the real BIOS leaves through the same code).
+   * Set the BIOS read-protection latch to the opcode the real BIOS would have fetched last, for
+   * BIOS code the HLE runs without fetching it (an SWI: see BIOS_LATCH_AFTER_SWI).
    */
   latchBiosOpcode(opcode: number): void {
     this.#biosLatch = opcode >>> 0;
@@ -510,12 +510,12 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   /**
-   * The save type from the SDK string the build embeds, and the chip that goes with it.
-   * The string is word-aligned. The SDK ends it in three version digits, and a string that
-   * has them wins over any bare prefix, which keeps a chance run of letters elsewhere in
-   * the ROM — inside compressed data, most of all — from outvoting the declaration. A ROM
-   * whose strings all lack the digits, as homebrew and test ROMs write them (`SRAM_V`),
-   * takes the first bare prefix, the way NanoBoyAdvance matches (loader/rom.cc GetBackupType).
+   * The save type from the SDK string the build embeds, and the chip that goes with it. The
+   * string is word-aligned and ends in three version digits; a match with the digits wins over
+   * any bare prefix, so a chance run of letters elsewhere in the ROM (compressed data, most of all)
+   * cannot outvote the declaration. A ROM whose strings all lack the digits, as homebrew and test
+   * ROMs write them (`SRAM_V`), takes the first bare prefix, as NanoBoyAdvance does (loader/rom.cc
+   * GetBackupType).
    */
   #detectSaveType(rom: Uint8Array): void {
     this.#save = this.#findSaveDeclaration(rom);
@@ -546,18 +546,18 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   /**
-   * How many bytes the cartridge's EEPROM holds — 512 for 4 Kbit, 8192 for 64 Kbit —
-   * or 0 while nothing has said which of the two it is.
+   * How many bytes the cartridge's EEPROM holds — 512 for 4 Kbit, 8192 for 64 Kbit — once a
+   * transfer settles it, the length of an installed `.sav` before that, and 0 while neither has.
    */
   get eepromSaveBytes(): number {
     return this.#eeprom.saveBytes;
   }
 
   /**
-   * The cartridge's battery-backed memory, whole, in the byte order a `.sav` file uses:
-   * the EEPROM, the SRAM or the flash chip with bank 0 first. A copy — unlike a read
-   * through the bus, this clocks no serial protocol and answers no flash command. Null
-   * when the ROM declares no save, because then there is no chip to read.
+   * The cartridge's battery-backed memory, whole, in the byte order a `.sav` file uses: the
+   * EEPROM, the SRAM, or the flash chip with bank 0 first. A side-effect-free copy (a bus read
+   * clocks the EEPROM protocol and returns a flash chip's ID in ID mode). Null when the ROM
+   * declares no save.
    */
   readBackup(): Uint8Array | null {
     switch (this.#save.type) {
@@ -574,9 +574,9 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   /**
-   * Install a `.sav` as the cartridge's battery-backed memory, filling what `bytes` does
-   * not reach with the value an erased chip holds. Which files belong in which chip is
-   * settled before here: this refuses only what it cannot hold at all.
+   * Install a `.sav` as the cartridge's battery-backed memory, erased (0xFF) past the end of
+   * `bytes`. The caller decides which file sizes fit the declared chip (debug-core
+   * cartridge-save.ts); this throws only when the ROM declares no save or `bytes` exceeds the chip.
    */
   writeBackup(bytes: Uint8Array): void {
     if (this.#save.type === null) {
@@ -604,15 +604,12 @@ export class GbaSystemBus implements MemoryBus {
   // ─── Memory Map Classification ────────────────────────────────────
 
   /**
-   * Debugger read: `length` bytes starting at `address`, taken from the backing
-   * arrays without any of the bus's side effects (an EEPROM read through the bus
-   * clocks its serial protocol; this never does). `readable` counts the leading
-   * bytes that map to something; the rest of `data` is zero and must not be shown
-   * as memory contents. Mirrors resolve to their canonical bytes. The BIOS reads
-   * whole, whatever its read protection would give the CPU. MMIO is decoded the way
-   * a CPU read sees it, side-effect free, except that a write-only register shows
-   * the value last written to it and an unused one shows 0, where the CPU would
-   * read open bus.
+   * Debugger read: `length` bytes starting at `address`, taken from the backing arrays without
+   * the bus's side effects (no EEPROM clocking, no read watchpoints). `readable` counts the
+   * leading bytes that map to something; the rest of `data` is zero and is not memory contents.
+   * Mirrors resolve to their canonical bytes, and the BIOS reads whole wherever the CPU runs.
+   * MMIO reads as the CPU sees it, except that a write-only register shows the value last
+   * written to it and an unused one shows 0, where the CPU reads open bus.
    */
   peek(address: number, length: number): { data: Uint8Array; readable: number } {
     const data = new Uint8Array(length);
@@ -671,9 +668,9 @@ export class GbaSystemBus implements MemoryBus {
   /**
    * Debugger write: store `bytes` at `address` in the backing arrays, bypassing the
    * hardware's write rules (a byte write to OAM is dropped by the bus, to VRAM it is
-   * duplicated; a hex editor means the byte it typed) and without notifying data
-   * watchpoints. MMIO goes through the bus so the register's side effects apply.
-   * BIOS, ROM and EEPROM are refused. Returns how many leading bytes were written.
+   * duplicated; a hex editor means the byte it typed) and firing no data watchpoint.
+   * MMIO goes through the bus so the register's side effects apply. BIOS, ROM, EEPROM
+   * and a save window with no chip are refused. Returns how many leading bytes were written.
    * The edited code is what runs next: see {@link refetchOverwrittenCode}.
    */
   poke(address: number, bytes: Uint8Array): number {
@@ -728,11 +725,11 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   /**
-   * After a write from outside the machine (a debugger's or a script's) over `length`
-   * bytes at `address`: when one of them lands, through any mirror, on the opcodes the
-   * CPU has fetched, the one at PC and the one after it, the CPU fetches them again, so
-   * the edited code is what runs. A store the program makes keeps the fetched opcodes,
-   * as on hardware, and does not call this.
+   * After a write from outside the machine (a debugger's or a script's) over `length` bytes at
+   * `address`: when one of them lands, through any mirror, on the two opcodes the CPU has
+   * fetched (at PC and after it), the CPU fetches them again, so the edited code runs. Only
+   * external writes call this; a store the program makes keeps the fetched opcodes, as on
+   * hardware.
    */
   refetchOverwrittenCode(address: number, length: number): void {
     const cpu = this.#cpu;
@@ -791,11 +788,10 @@ export class GbaSystemBus implements MemoryBus {
       case 0x0b:
       case 0x0c:
       case 0x0d:
-        // Where the EEPROM answers, a wide read is a serial transaction that returns one
-        // data bit: decoded, so not refused, but its own region. The wait-state mirrors all
-        // address the same cartridge elsewhere, so what decides is the offset into it — past
-        // the end of the loaded ROM nothing answers, and a read there returns the address the
-        // cartridge bus last carried.
+        // Where the EEPROM answers, a wide read is a serial transaction that returns one data
+        // bit: decoded, but its own region. Elsewhere the wait-state mirrors all address the same
+        // ROM, so the offset decides: past the end of the loaded ROM a read returns the address
+        // bits the cartridge bus last carried, which is not data.
         if (this.#isEeprom(addr)) {
           return { region: 'EEPROM' };
         }
@@ -909,8 +905,7 @@ export class GbaSystemBus implements MemoryBus {
   read32(address: number): number {
     const value = this.#read32(address);
     if (this.#readWatchpoints.length > 0) {
-      // `#read32` assembles with `<< 24`, so its result is signed; watchpoints
-      // report the loaded word unsigned, as the write side does.
+      // reported unsigned, as the write side does
       this.#notifyRead(this.#canonicalAddress(address & ~3), value >>> 0, 4);
     }
     return value;
@@ -1046,7 +1041,7 @@ export class GbaSystemBus implements MemoryBus {
         this.#write16To(this.oam, addr & 0x3ff, value);
         break;
       case 0x0d:
-        // EEPROM serial write — only bit 0 matters; serial port, no addressable byte. ROM drops it.
+        // The EEPROM takes bit 0 as its next serial bit; there is no byte to watch. The ROM drops the write.
         if (this.#isEeprom(addr)) {
           this.#eeprom.write(value & 1);
         }
@@ -1099,7 +1094,7 @@ export class GbaSystemBus implements MemoryBus {
         this.#write32To(this.oam, addr & 0x3ff, value);
         break;
       case 0x0d:
-        // EEPROM serial write — serial port, no addressable byte. ROM drops it.
+        // The EEPROM takes bit 0 as its next serial bit; there is no byte to watch. The ROM drops the write.
         if (this.#isEeprom(addr)) {
           this.#eeprom.write(value & 1);
         }
@@ -1124,11 +1119,11 @@ export class GbaSystemBus implements MemoryBus {
   // ─── Cartridge EEPROM (0x0D) ──────────────────────────────────────
 
   /**
-   * Whether the EEPROM answers at `address`, which it does only in the 0x0D region. The chip sits on the ROM's address
-   * bus and takes over the top of it: all of 0x0D with a ROM of 16 MB or less, and 0x0DFFFF00 up
-   * with a 32 MB ROM (GBATEK "GBA Cart Backup EEPROM"). A cartridge that declares SRAM or flash has
-   * no EEPROM, and its ROM answers there (mGBA memory.c GBALoad16, ROM2_EX). One that declares
-   * nothing is taken to have it, as mGBA's save autodetection enables it on the first write to 0x0D.
+   * Whether the EEPROM answers at `address`. The chip sits on the ROM's address bus and takes over
+   * the top of it: all of 0x0D with a ROM of 16 MB or less, and 0x0DFFFF00 up with a larger one
+   * (GBATEK "GBA Cart Backup EEPROM"). On a cartridge that declares SRAM or flash the ROM answers
+   * there instead (mGBA memory.c GBALoad16, ROM2_EX). One that declares nothing is taken to have
+   * an EEPROM, as mGBA's save autodetection enables it on the first write to 0x0D.
    */
   #isEeprom(address: number): boolean {
     const type = this.#save.type;
@@ -1174,8 +1169,7 @@ export class GbaSystemBus implements MemoryBus {
 
   /**
    * The game pak counts S accesses within one 128 KB block of its address space: an access at the
-   * start of a block is an N access whatever came before it, a step from OAM into the cartridge
-   * included (GBATEK "GBA System Control": "The GBA forcefully uses non-sequential timing at the
+   * start of a block is an N access whatever came before it (GBATEK "GBA System Control": "The GBA forcefully uses non-sequential timing at the
    * beginning of each 128K-block of gamepak ROM"; NanoBoyAdvance bus.cc, `(address & 0x1FFFF) == 0`).
    */
   accessCycles(address: number, width: 1 | 2 | 4, sequential: boolean): number {
@@ -1190,9 +1184,8 @@ export class GbaSystemBus implements MemoryBus {
   }
 
   /**
-   * An opcode fetch costs what a data access does, and outside the cartridge's ROM it uses the bus
-   * the same way. From the ROM, the prefetch unit may have read it already and serves it from its
-   * buffer.
+   * An opcode fetch outside the cartridge's ROM costs what a data access does. From the ROM it goes
+   * through the prefetch unit, which serves it from its buffer when it has read it already.
    */
   fetchCycles(address: number, width: 2 | 4, sequential: boolean): number {
     const region = address >>> 24;
@@ -1206,7 +1199,7 @@ export class GbaSystemBus implements MemoryBus {
 
   /**
    * A data access by the CPU or DMA. One to the cartridge or its save chip stops the prefetch
-   * unit; one anywhere else leaves the cartridge bus to it.
+   * unit; one anywhere else lets the unit keep reading for the access's cycles.
    */
   dataCycles(address: number, width: 1 | 2 | 4, sequential: boolean): number {
     const region = address >>> 24;
@@ -1231,8 +1224,8 @@ export class GbaSystemBus implements MemoryBus {
 
   /**
    * Rebuild the access prices from WAITCNT and memory control. EWRAM takes 15 minus memory control
-   * bits 24-27 waits (GBATEK "Memory Control"; the BIOS's 0x0D gives 2); the value 15 locks the
-   * console up, and the bus keeps the fastest timing, 1 wait, there.
+   * bits 24-27 waits (GBATEK "Memory Control"; the BIOS's 0x0D gives 2). The value 15 locks up the
+   * console; the bus charges 1 wait for it, the fastest setting.
    */
   #updateWaitStates(): void {
     const n16 = this.#cyclesN16;
@@ -1279,9 +1272,9 @@ export class GbaSystemBus implements MemoryBus {
    * (GBATEK "GBA Unpredictable Things"; mGBA GBALoadBad; NanoBoyAdvance Bus::ReadOpenBus). While
    * a DMA runs, and in the instruction right after it, that is the DMA's last unit. Otherwise it
    * is the CPU's last instruction fetch: in ARM state [$+8]. In Thumb state the fetch is the
-   * halfword [$+4], and the other half of the word comes from the bus the code runs from: a 16-bit
-   * bus repeats [$+4], the 32-bit BIOS and OAM buses and IWRAM keep the neighbouring halfword of
-   * the same word.
+   * halfword [$+4], and the other half of the word depends on the bus the code runs from: a 16-bit
+   * bus repeats [$+4], the 32-bit BIOS and OAM buses carry the other halfword of [$+4]'s word, and
+   * IWRAM pairs [$+4] with [$+2], the halfword it carried before (GBATEK OldLO/OldHI).
    */
   #openBus(): number {
     const cpu = this.#cpu;
@@ -1326,7 +1319,7 @@ export class GbaSystemBus implements MemoryBus {
   /**
    * The BIOS word at `address` (word-aligned). The BIOS answers only while the CPU executes in
    * it, and each such read sets the protection latch; a read from code anywhere else returns the
-   * latch (GBATEK "BIOS Memory"; NanoBoyAdvance Bus::ReadBIOS). Past 16 KB nothing answers.
+   * latch (GBATEK "BIOS Memory"; NanoBoyAdvance Bus::ReadBIOS). Past 16 KB a read returns open bus.
    */
   #readBios32(address: number): number {
     if (address >= BIOS_SIZE) {
@@ -1345,9 +1338,9 @@ export class GbaSystemBus implements MemoryBus {
 
   // ─── ROM Access ───────────────────────────────────────────────────
 
-  // Past the end of the cartridge, nothing drives the shared address/data lines, and a halfword
-  // read returns the low 16 bits of the halfword address that was latched on them:
-  // (address / 2) & 0xFFFF (GBATEK "GBA Unpredictable Things"; mGBA LOAD_CART).
+  // Past the end of the cartridge, the shared address/data lines still hold the halfword address
+  // latched on them, so a halfword read returns (address / 2) & 0xFFFF (GBATEK "GBA Unpredictable
+  // Things"; mGBA LOAD_CART).
 
   #readRom8(address: number): number {
     const offset = address & 0x01ffffff;
@@ -1411,10 +1404,9 @@ export class GbaSystemBus implements MemoryBus {
 
   /**
    * The VRAM byte `address` selects, or -1 where nothing answers. VRAM is 96 KB in a 128 KB
-   * window: 0x18000-0x1FFFF mirrors the 32 KB OBJ area at 0x10000-0x17FFF. In the bitmap modes
-   * the frame buffers reach 0x14000, and the first half of that mirror, 0x18000-0x1BFFF, would land
-   * on bitmap memory below the OBJ boundary; there reads return 0 and writes are dropped
-   * (mGBA LOAD_VRAM/STORE_VRAM; NanoBoyAdvance ReadVRAM_OBJ).
+   * window: 0x18000-0x1FFFF mirrors the 32 KB OBJ area at 0x10000-0x17FFF. In the bitmap modes,
+   * where OBJ VRAM starts at 0x14000, the first half of that mirror (0x18000-0x1BFFF) reads 0 and
+   * drops writes (mGBA LOAD_VRAM/STORE_VRAM; NanoBoyAdvance ReadVRAM_OBJ).
    */
   #vramOffset(address: number): number {
     const offset = address & 0x1ffff;
@@ -1507,7 +1499,10 @@ export class GbaSystemBus implements MemoryBus {
     return this.#openBus16(offset);
   }
 
-  /** DMA registers: SAD and DAD are write-only, CNT_L reads 0, CNT_H is readable (GBATEK "DMA Transfers"). */
+  /**
+   * DMA registers: SAD and DAD are write-only, CNT_L reads 0, CNT_H is readable (GBATEK "DMA
+   * Transfers"). A peek shows the SAD, DAD and CNT_L latches.
+   */
   #dmaRead16(offset: number, peek: boolean): number {
     const index = ((offset - DMA_FIRST) / 12) | 0;
     const register = (offset - DMA_FIRST) % 12;
@@ -1754,9 +1749,8 @@ export class GbaSystemBus implements MemoryBus {
     this.oam.set(snap.oam);
     this.sram.set(snap.sram.subarray(0, SRAM_BYTES));
     this.mmioRegisters.set(snap.mmioRegisters);
-    // `snap.hasSram` is passed over: what is behind the 0x0E window is the cartridge's to
-    // say, like #rom, and a state of a cartridge without one must not take this one's away.
-    // A snapshot from before the flash chip kept a flash cartridge's bytes in `sram`.
+    // `snap.hasSram` is ignored: the cartridge, like #rom, decides what is behind the 0x0E window.
+    // A snapshot without `flash` holds a flash cartridge's bytes in `sram`.
     this.#flash.deserialize(snap.flash ?? { data: snap.sram, unlock: 0, command: 0, bank: 0 });
     this.#waitcnt = snap.waitcnt;
     this.#postflg = snap.postflg;

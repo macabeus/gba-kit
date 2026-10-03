@@ -240,11 +240,10 @@ export function stepOutTo(ctx: StepContext, returnAddress: number, callerSp: num
 
 /**
  * Step out of an exception handler: run until the CPU is back in the mode the
- * exception interrupted (the SPSR's), at the first instruction of program code
- * after the handler's return. The BIOS stub in between has no symbol, so a return
- * address would not do; and an interrupt that struck inside a BIOS call (the wait
- * of IntrWait) is left where that call returns to the program, since the BIOS has
- * no source to stop in.
+ * exception interrupted (the SPSR's) and at program code, at or above
+ * LOWEST_PROGRAM_ADDRESS. The mode is the test because the BIOS stub in between has
+ * no symbol to give a return address; the address floor carries an interrupt taken
+ * inside a BIOS call (IntrWait's wait) on to where that call returns to the program.
  */
 export function stepOutOfException(ctx: StepContext): StepOutcome {
   const cpu = ctx.machine.gba.armCpu;

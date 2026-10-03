@@ -5,10 +5,10 @@
  * Supports immediate, VBlank, HBlank, and special (sound FIFO, video capture) start modes.
  *
  * A channel copies SAD, DAD and CNT_L into its internal counters when its enable bit goes from 0
- * to 1, and only then (GBATEK "DMA Transfers": "Upon DMA Enable (Bit 15) changing from 0 to 1:
- * Reloads SAD, DAD, CNT_L"). Each unit passes through the channel's data latch: a source below
- * EWRAM (the BIOS and the unused region after it) answers nothing, and the channel writes what
- * its latch holds from its last read (mGBA dma.c GBADMAService; mgba-suite "DMA tests").
+ * to 1 (GBATEK "DMA Transfers": "Upon DMA Enable (Bit 15) changing from 0 to 1: Reloads SAD, DAD,
+ * CNT_L"). Each unit passes through the channel's data latch; for a source below EWRAM (the BIOS
+ * and the unused region after it) the channel skips the read and writes what the latch holds from
+ * its last read (mGBA dma.c GBADMAService; mgba-suite "DMA tests").
  *
  * The channels share one bus master. A channel asks for the bus 3 cycles after its trigger, a
  * sound FIFO channel as soon as its FIFO asks for data (mGBA audio.c GBAAudioSampleFIFO), and
@@ -40,9 +40,9 @@ interface DmaChannel {
   srcLatch: number;
   /** Latched destination address (written by CPU) */
   dstLatch: number;
-  /** Word count (12-bit for DMA0-2, 16-bit for DMA3) */
+  /** Units the current transfer has left to move (internal, updated during transfer) */
   wordCount: number;
-  /** Latched word count */
+  /** Latched word count (DMAx_CNT_L: 14-bit for DMA0-2, 16-bit for DMA3) */
   wordCountLatch: number;
   /** Destination address control */
   dstControl: DmaAddrControl;
@@ -54,7 +54,7 @@ interface DmaChannel {
   wordSize: boolean;
   /** Start timing */
   startTiming: DmaStartTiming;
-  /** Game Pak DRQ (DMA3CNT_H bit 11): stored and readable; DMA0-2 have no such bit */
+  /** Game Pak DRQ (DMA3CNT_H bit 11), stored and read back; on DMA0-2 bit 11 reads 0 */
   gamePakDrq: boolean;
   /** IRQ on completion */
   irqEnable: boolean;
@@ -242,8 +242,9 @@ export class DmaController {
     if (!wasEnabled && ch.enabled) {
       // Capture the instruction that started this DMA (for watchpoint attribution).
       ch.startOrigin = this.#memory?.getOrigin?.() ?? ZERO_ORIGIN;
-      // The channel's address counters hold transfer-width units: a misaligned SAD/DAD loses its
-      // low bits here (mGBA GBADMAWriteCNT_HI: `nextSource &= -width`). Sound FIFO DMA moves words.
+      // The internal address counters are aligned to the transfer width, so a misaligned SAD/DAD
+      // loses its low bits here (mGBA GBADMAWriteCNT_HI: `nextSource &= -width`). Sound FIFO DMA
+      // moves words.
       const alignMask = ch.wordSize || this.#isSoundFifo(index) ? ~3 : ~1;
       ch.srcAddr = (ch.srcLatch & alignMask) >>> 0;
       ch.dstAddr = (ch.dstLatch & alignMask) >>> 0;
@@ -304,8 +305,8 @@ export class DmaController {
   }
 
   /**
-   * The LCD began `line` at the cycle `at`. DMA3 in Special timing is video capture: it runs like
-   * an HBlank DMA from line 2 to line 161, and the hardware clears its enable bit when VCOUNT
+   * The LCD began `line` at the cycle `at`. DMA3 in Special timing is video capture: it starts a
+   * transfer as each line from 2 to 161 begins, and the hardware clears its enable bit when VCOUNT
    * reaches 162 (GBATEK "Video Capture Mode"; NanoBoyAdvance ppu.cc UpdateVideoTransferDMA).
    */
   triggerVideoCapture(line: number, at: number): void {
@@ -331,7 +332,10 @@ export class DmaController {
     this.#scheduler.scheduleAt(DMA_EVENT_IDS[index]!, triggeredAt + DMA_START_DELAY, () => this.#onStart(index));
   }
 
-  /** Observer for every transfer as it starts (an event log's DMA rows). */
+  /**
+   * Observer for each transfer as its start delay ends (an event log's DMA rows). Sound FIFO
+   * transfers ask for the bus directly from `requestSoundFifo` and bypass it.
+   */
   onTransfer: ((channel: number, info: DmaTransferInfo) => void) | null = null;
 
   /** A triggered channel's start delay has passed: it asks for the bus. */
@@ -358,8 +362,8 @@ export class DmaController {
 
   /**
    * Hold the bus and move units, each for the highest-priority waiting channel, until none is
-   * left. When an event comes due the run pauses after the unit it falls in and resumes as an
-   * event of its own, once the events due before it have fired.
+   * left. When an event comes due the run pauses after the current unit and resumes as its own
+   * `DmaResume` event, after the events already due.
    */
   #run(): void {
     const memory = this.#memory;
@@ -476,7 +480,8 @@ export class DmaController {
       this.#interrupts.requestInterrupt(DMA_IRQ_FLAGS[index]!);
     }
 
-    // Without the repeat bit a channel serves one trigger (GBATEK "DMA Repeat bit").
+    // A repeating VBlank, HBlank or Special channel stays enabled for its next trigger; any other
+    // channel clears its enable bit once its transfer is done (GBATEK "DMA Repeat bit").
     if (ch.repeat && ch.startTiming !== DmaStartTiming.Immediately) {
       ch.wordCount = this.#unitsPerTransfer(index);
       if (ch.dstControl === DmaAddrControl.IncrementReload && !this.#isSoundFifo(index)) {
@@ -569,8 +574,8 @@ export class DmaController {
       ch.enabled = s.enabled;
       ch.latch = s.latch ?? 0;
     }
-    // A snapshot from before the run kept a sound FIFO channel's CNT_L count, which no transfer
-    // used. It was taken between transfers, so the channel's next request moves a fresh 4 words.
+    // A snapshot without `running` holds a sound FIFO channel's count as CNT_L. It was taken
+    // between transfers, so the count becomes the 4 words the channel's next request moves.
     if (snap.running === undefined) {
       for (let i = 1; i <= 2; i++) {
         if (this.#isSoundFifo(i)) {

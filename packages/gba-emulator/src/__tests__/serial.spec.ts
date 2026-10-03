@@ -93,7 +93,7 @@ describe('register reads with nothing connected', () => {
   it('JOYCNT acknowledges flags with 1s, JOY_RECV takes no write, JOY_TRANS reads 0, unused bits read 0', () => {
     const gba = inMode(0x0000);
     expect(writeRead(gba, JOYCNT, 0xffff)).toBe(0x0040);
-    gba.bus.write8(JOYCNT + 1, 0xff); // the other lane acknowledges nothing and keeps the IRQ bit
+    gba.bus.write8(JOYCNT + 1, 0xff); // a high-byte write leaves the flags and the IRQ bit as they were
     expect(gba.bus.read16(JOYCNT)).toBe(0x0040);
     expect(writeRead(gba, JOY_RECV_L, 0xffff)).toBe(0);
     expect(writeRead(gba, JOY_TRANS_L, 0xffff)).toBe(0);
@@ -168,7 +168,7 @@ describe('Normal-mode transfers', () => {
     expect(fresh.interrupts.if_ & IrqFlag.Serial).toBe(IrqFlag.Serial);
     expect(fresh.serialize()).toEqual(gba.serialize());
 
-    // A snapshot from before the serial event existed restores with no transfer running.
+    // A legacy snapshot without the serial event restores with no transfer running.
     const legacy = {
       ...snap,
       scheduler: { ...snap.scheduler, events: snap.scheduler.events.slice(0, EventId.Serial) },

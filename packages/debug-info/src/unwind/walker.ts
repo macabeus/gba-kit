@@ -522,9 +522,9 @@ function crossException(
 }
 
 /**
- * The interrupted instruction's address, or null when what was read cannot be one: program code,
- * or the BIOS's SWI handler, which interrupts strike while it waits (IntrWait) and which the walk
- * crosses next.
+ * The interrupted instruction's address when the walk can go on from it, else null: program code,
+ * or an address of the BIOS's SWI handler (an interrupt taken during IntrWait's wait), which the
+ * walk crosses next.
  */
 function resumeAddress(lr: number | undefined, bias: number, facts: MachineFacts): number | null {
   if (lr === undefined) {
@@ -544,10 +544,11 @@ function resumeAddress(lr: number | undefined, bias: number, facts: MachineFacts
  *
  * The handler's entry block, on the stack of the mode the exception entered, holds the
  * address after the SWI and the caller's status; its routines run on the caller's own
- * stack, and at every address of theirs the policy says how much they have pushed there
- * and where the caller's registers sit in it. The caller's sp is the frame's sp plus that,
- * which is also this frame's CFA. The registers the handler neither saved nor uses are
- * the caller's own; r0, r1 and r3 carry the call's results, and r4–r10 pass through.
+ * stack, and `frameAt` says how much they have pushed there at each address and where the
+ * caller's registers sit in it. The caller's sp, which is also this frame's CFA, is the
+ * frame's sp plus that amount. r0, r1 and r3 hold the call's results and scratch values;
+ * every other register is the caller's: read from where the handler saved it, or else as
+ * this frame holds it.
  */
 function crossServiceCall(top: UnwoundFrame, frame: ServiceCallFrame, facts: MachineFacts): Advance {
   const call = facts.serviceCall!;

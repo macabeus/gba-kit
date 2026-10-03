@@ -15,8 +15,8 @@ export interface CpuSnapshot {
   halted: boolean;
   /**
    * The prefetch pipeline: [address of the decoded opcode (0xFFFFFFFF when flushed), decoded
-   * opcode, fetched opcode, 1 in Thumb state]. Snapshots taken before the pipeline was modelled
-   * lack it and restore with a flushed pipeline, which refills from memory at the next step.
+   * opcode, fetched opcode, 1 in Thumb state]. A snapshot without it restores a flushed pipeline,
+   * which the next step refills from memory.
    */
   pipeline?: Uint32Array;
 }

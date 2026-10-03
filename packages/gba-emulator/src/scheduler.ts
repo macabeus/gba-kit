@@ -1,11 +1,12 @@
 /**
  * GBA Event Scheduler
  *
- * The scheduler owns the machine's clock. `currentCycle` is "now": the run loop adds each
- * instruction's cycles to it as the instruction completes, and a DMA or a BIOS call adds the cycles
- * it holds the bus. An instruction's cycles end with the opcode fetch the next one begins with
- * (ArmCpu), so a timer read, a timer start or an event scheduled from an I/O write sees the cycle
- * after its instruction's fetch, where its first data access happens, wherever it falls in the run.
+ * The scheduler owns the machine's clock, `currentCycle`. The run loop adds each instruction's
+ * cycles as it completes (an HLE BIOS call's included), the IRQ entry's, and the time a halted CPU
+ * sleeps; a DMA adds the cycles it holds the bus. An instruction's cycles end with the opcode fetch
+ * the next one begins with (ArmCpu.step), so an I/O access (a timer read, a timer start, an event
+ * an I/O write schedules) sees the cycle just after its instruction's fetch, where its first data
+ * access happens.
  *
  * Hardware events wait in one slot per `EventId` and fire once the clock reaches them, earliest
  * first. The CPU runs until the next event is due, so an event fires at the end of the instruction
@@ -126,9 +127,9 @@ export class Scheduler {
   }
 
   /**
-   * Fire the earliest event if it is due (ties in EventId order); returns whether one fired. A run
-   * loop that fires them one at a time can stop between two, at the end of a frame, when a long
-   * instruction or DMA has let several frames' events come due at once.
+   * Fire the earliest event if it is due (ties in EventId order); returns whether one fired. Firing
+   * them one at a time lets the run loop stop between two, at a frame's end, when a long instruction
+   * or DMA has let several frames' events come due at once.
    */
   runNextDueEvent(): boolean {
     if (this.#nextEventCycle > this.currentCycle) {
@@ -183,8 +184,8 @@ export class Scheduler {
   }
 
   /**
-   * Restore from a snapshot. Callbacks must be re-registered by the caller. A snapshot from before
-   * an event existed lacks its slot, which restores as not scheduled.
+   * Restore from a snapshot. Callbacks must be re-registered by the caller. A slot missing from an
+   * older snapshot restores as not scheduled.
    */
   deserialize(snap: SchedulerSnapshot): void {
     this.currentCycle = snap.currentCycle;

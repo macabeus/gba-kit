@@ -35,7 +35,7 @@ export const HBLANK_CYCLES = 272;
  * The cycle of a line at which HBlank begins for the rest of the machine: the DISPSTAT flag sets,
  * the HBlank IRQ and HBlank DMA start, and the line's picture is complete (GBATEK "LCD I/O Display
  * Status": "Although the drawing time is only 960 cycles (240*4), the H-Blank flag is "0" for a
- * total of 1006 cycles."; mGBA video.h VIDEO_HDRAW_LENGTH).
+ * total of 1006 cycles."; mGBA video.h sets VIDEO_HDRAW_LENGTH to 1008 instead).
  */
 export const HBLANK_START_CYCLE = 1006;
 
@@ -110,7 +110,10 @@ export const SCREEN_HEIGHT = 160;
 
 // ─── Event IDs ────────────────────────────────────────────────────────
 
-/** Unique IDs for scheduled hardware events */
+/**
+ * Unique IDs for scheduled hardware events. Snapshots store each event at its ID's index, so
+ * VBlank and VBlankEnd, which nothing schedules any more, keep their slots.
+ */
 export const enum EventId {
   HBlank,
   HBlankEnd,

@@ -6,10 +6,9 @@
  * Channel 3: Programmable wave (4-bit samples from two banks of Wave RAM)
  * Channel 4: Noise (LFSR) with envelope
  *
- * Every register is written a byte at a time (the Game Boy's NRxy registers), so a byte
- * store has exactly that byte's effect: only the NRx4 byte restarts a channel. The channel
- * timers count GBA CPU cycles (16.78 MHz, four times the Game Boy clock). The frame
- * sequencer (512 Hz) clocks length, envelope, and sweep.
+ * Each register byte (the Game Boy's NRxy) is written on its own, with only its own effect.
+ * The channel timers count GBA CPU cycles (16.78 MHz, four times the Game Boy clock). The
+ * frame sequencer (512 Hz) clocks length, envelope, and sweep.
  *
  * References: GBATEK "GBA Sound Channel 1-4"; mGBA src/gb/audio.c (GBAudioRun, with
  * timingFactor 4 on the GBA), NanoBoyAdvance src/nba/src/hw/apu/channel/.
@@ -60,7 +59,7 @@ function noiseStepCycles(divisorCode: number, clockShift: number): number {
 
 // ─── Frame Sequencer ─────────────────────────────────────────────────
 
-/** Frame sequencer rate: 512 Hz (CPU_FREQ / 32768 cycles per step) */
+/** Frame sequencer rate: 512 Hz (32768 CPU cycles per step) */
 const FRAME_SEQUENCER_PERIOD = CPU_FREQ / 512;
 
 // ─── Channel 1: Square with Sweep ────────────────────────────────────
@@ -231,7 +230,7 @@ export class PsgChannel1 {
     }
   }
 
-  /** Clock length counter (256 Hz — every frame sequencer step) */
+  /** Clock length counter (256 Hz — frame sequencer steps 0, 2, 4, 6) */
   clockLength(): void {
     if (this.lengthEnabled && this.lengthCounter > 0) {
       this.lengthCounter--;
@@ -241,7 +240,7 @@ export class PsgChannel1 {
     }
   }
 
-  /** Clock envelope (64 Hz — frame sequencer steps 7) */
+  /** Clock envelope (64 Hz — frame sequencer step 7) */
   clockEnvelope(): void {
     if (this.envelopePeriod === 0) {
       return;
@@ -661,7 +660,7 @@ export class PsgChannel3 {
 
   deserialize(s: PsgChannel3Snapshot): void {
     if (s.waveRam.length === WAVE_BANK_SIZE) {
-      // A snapshot from the single-bank model: one buffer served playback and the CPU alike.
+      // A 16-byte wave RAM snapshot holds one bank that served playback and the CPU alike.
       this.waveRam.set(s.waveRam, 0);
       this.waveRam.set(s.waveRam, WAVE_BANK_SIZE);
     } else {
