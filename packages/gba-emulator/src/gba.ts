@@ -350,14 +350,13 @@ export class Gba {
       }
 
       const cycles = cpu.step();
-      if (cycles === 0) {
-        // Either the CPU halted itself, or a debug hook refused the instruction. In
-        // both cases nothing executed, so nothing is charged.
-        if (cpu.halted) {
-          this.#running = false;
-        } else {
-          this.#stopped = true;
-        }
+      // A refused instruction or a CPU that halted itself ran nothing, so nothing is charged.
+      if (cpu.refused) {
+        this.#stopped = true;
+        break;
+      }
+      if (cpu.halted) {
+        this.#running = false;
         break;
       }
       scheduler.advance(cycles);

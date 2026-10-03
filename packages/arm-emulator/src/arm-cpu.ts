@@ -239,6 +239,9 @@ export class ArmCpu {
   /** Whether the CPU has halted (function returned to sentinel) */
   #halted = false;
 
+  /** Whether the last `step()` ran nothing because a debug hook refused the instruction. */
+  #refused = false;
+
   /** Map of stub addresses to symbol names */
   #stubs = new Map<number, string>();
 
@@ -542,6 +545,11 @@ export class ArmCpu {
     return this.#halted;
   }
 
+  /** Whether the last `step()` ran nothing because a debug hook refused the instruction at PC. */
+  get refused(): boolean {
+    return this.#refused;
+  }
+
   /** Attach or detach debug hooks */
   setDebugHooks(hooks: DebugHooks | undefined): void {
     this.#hooks = hooks;
@@ -753,13 +761,14 @@ export class ArmCpu {
 
   /**
    * Execute one instruction (ARM or Thumb based on T bit) and return the cycles it took.
-   * Returns 0 when nothing ran: the CPU is halted, a debug hook refused the instruction, or the
-   * instruction halted the CPU at the sentinel return address.
+   * Returns 0 when nothing ran: the CPU is halted (`halted`), a debug hook refused the instruction
+   * (`refused`), or the instruction halted the CPU at the sentinel return address.
    *
    * A PC set from outside (a host, the debugger, a snapshot) refills the pipeline here at no cost:
    * only a branch the program takes pays for its refill.
    */
   step(): number {
+    this.#refused = false;
     if (this.#halted) {
       return 0;
     }
@@ -981,6 +990,7 @@ export class ArmCpu {
     if (this.#hooks?.onInstructionPre) {
       const action = this.#hooks.onInstructionPre(instrAddr, instr);
       if (action === 'break') {
+        this.#refused = true;
         return 0;
       }
     }
@@ -1534,6 +1544,7 @@ export class ArmCpu {
     if (this.#hooks?.onInstructionPre) {
       const action = this.#hooks.onInstructionPre(instrAddr, instr);
       if (action === 'break') {
+        this.#refused = true;
         return 0;
       }
     }
@@ -1935,12 +1946,12 @@ export class ArmCpu {
     const rm = instr & 0xf;
     const address = this.registers[rn]!;
 
-    // A load (N, then I) and a store (N) to the same address: GBATEK SWP 1S+2N+1I.
+    // A load and a store to the same address, each N, then the I cycle that writes Rd: GBATEK SWP
+    // 1S+2N+1I, with the nonsequential fetch after it like any load.
     const width = byteMode ? 1 : 4;
-    const fetchAddress = this.#fetchAddress();
-    this.#cycles +=
-      this.memory.stallCycles(this.memory.accessCycles(address, width, false) + 1, fetchAddress, address) +
-      this.memory.stallCycles(this.memory.accessCycles(address, width, false), fetchAddress, address);
+    const access = this.memory.accessCycles(address, width, false);
+    this.#cycles += this.memory.stallCycles(2 * access + 1, this.#fetchAddress(), address);
+    this.#chargeNonsequentialFetch();
 
     if (byteMode) {
       const temp = this.memory.read8(address);

@@ -111,6 +111,24 @@ describe('wait states', () => {
   });
 });
 
+describe('the run loop and instruction costs', () => {
+  it('an instruction the CPU runs never ends the frame as a debugger stop', () => {
+    // swp from ROM with the cartridge's usual WAITCNT 0x4317 and prefetch on, on an IWRAM operand.
+    const gba = machine([
+      0xe59f0010, // ldr r0, =WAITCNT
+      0xe59f1010, // ldr r1, =0x4317
+      0xe5801000, // str r1, [r0]
+      0xe10d3092, // swp r3, r2, [sp]
+      0xeafffffd, // b <swp>
+      0x00000000,
+      WAITCNT,
+      0x4317,
+    ]);
+    expect(gba.runFrame()).toBe('done');
+    expect(gba.frameCount).toBe(1);
+  });
+});
+
 describe('one clock for the whole machine', () => {
   // str r1, [r0] starts TM0 at prescaler 1; four nops; ldrh r3, [r0] reads it.
   const TIMER = [

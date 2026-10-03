@@ -113,6 +113,13 @@ describe('ArmCpu cycle counts on a bus with wait states', () => {
     expect(cpu.step()).toBe(3 + 1 + 1 + (5 - 3));
   });
 
+  it('a swap is an N load, an N store and an I cycle, and the fetch after it is nonsequential', () => {
+    // swp r0, r2, [r1] from ROM on IWRAM: GBATEK SWP 1S+2N+1I; the next fetch costs N - S more.
+    const cpu = cpuWith(new PricedMemory(slowRom), [0xe1010092], false);
+    cpu.registers[1] = IWRAM;
+    expect(cpu.step()).toBe(3 + 1 + 1 + 1 + (5 - 3));
+  });
+
   it('a block transfer is one N access and then S accesses', () => {
     // ldmia r1, {r2-r5} from IWRAM reading EWRAM: 1 + (3 + 2 + 2 + 2) + 1.
     const cpu = cpuWith(new PricedMemory(slowRom), [0xe891003c], false, IWRAM);
@@ -138,8 +145,10 @@ describe('ArmCpu cycle counts on a bus with wait states', () => {
     const cpu = cpuWith(new PricedMemory(slowRom), [0xe2800001], false);
     cpu.setDebugHooks({ onInstructionPre: () => 'break' });
     expect(cpu.step()).toBe(0);
+    expect(cpu.refused).toBe(true);
     cpu.setDebugHooks(undefined);
     expect(cpu.step()).toBe(3);
+    expect(cpu.refused).toBe(false);
   });
 
   it('entering an interrupt costs the refill at the vector', () => {
