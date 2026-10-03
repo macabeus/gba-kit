@@ -1,55 +1,27 @@
 import clsx from 'clsx';
 import { useCallback, useState } from 'react';
 
-const CORS_PROXY = 'https://api.codetabs.com/v1/proxy?quest=';
-const RELEASES_API = 'https://api.github.com/repos/GBALATRO/balatro-gba/releases';
-const ASSET_NAME = 'balatro-gba.gba';
+import { BalatroDownloadError, type BalatroRelease, fetchBalatroRom } from './balatro-rom';
 
 interface StartBalatroGBAProps {
   onRomLoad: (data: ArrayBuffer) => void;
 }
 
-async function fetchLatestRom(): Promise<ArrayBuffer> {
-  // Fetch releases to find the download URL (GitHub API supports CORS)
-  const res = await fetch(RELEASES_API);
-  if (!res.ok) {
-    throw new Error(`GitHub API error: ${res.status}`);
-  }
-
-  const releases = await res.json();
-  let downloadUrl: string | null = null;
-  for (const release of releases) {
-    const asset = release.assets?.find((a: { name: string }) => a.name === ASSET_NAME);
-    if (asset) {
-      downloadUrl = asset.browser_download_url;
-      break;
-    }
-  }
-  if (!downloadUrl) {
-    throw new Error('No .gba ROM found in releases');
-  }
-
-  // Download the ROM through a CORS proxy (GitHub release downloads lack CORS headers)
-  const romRes = await fetch(`${CORS_PROXY}${downloadUrl}`);
-  if (!romRes.ok) {
-    throw new Error(`Download failed: ${romRes.status}`);
-  }
-
-  return romRes.arrayBuffer();
-}
-
 export function StartBalatroGBA({ onRomLoad }: StartBalatroGBAProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fallback, setFallback] = useState<BalatroRelease | null>(null);
 
   const handleClick = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setFallback(null);
     try {
-      const data = await fetchLatestRom();
+      const { data } = await fetchBalatroRom();
       onRomLoad(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Download failed');
+      setFallback(err instanceof BalatroDownloadError ? err.release : null);
     } finally {
       setLoading(false);
     }
@@ -93,6 +65,15 @@ export function StartBalatroGBA({ onRomLoad }: StartBalatroGBAProps) {
       </button>
 
       {error && <p className="text-blue-400 text-xs">{error}</p>}
+      {fallback && (
+        <p className="text-slate-400 text-xs text-center max-w-sm">
+          Download{' '}
+          <a href={fallback.url} className="text-sky-400 hover:text-sky-300 underline underline-offset-2">
+            {fallback.fileName}
+          </a>{' '}
+          ({fallback.tag}) from GitHub, then drop it onto the loader above.
+        </p>
+      )}
 
       <p className="text-slate-600 text-[10px]">
         Open-source homebrew by{' '}
