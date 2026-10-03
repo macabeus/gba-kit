@@ -344,16 +344,20 @@ export class GbaSystemBus implements MemoryBus {
   /** DMA channel (0-3) currently transferring, or -1 for CPU accesses; attributes hits. */
   #dmaChannel = -1;
   #dmaOrigin: WriteOrigin | null = null;
+  /** The CPU's registers[15] when a DMA last handed the bus back, -1 before any. */
+  #dmaPc = -1;
 
-  /** Attribute subsequent committed writes to a DMA channel (called by the DMA controller). */
+  /** DMA channel `channel` drives the bus: its accesses are attributed to it (called by the DMA controller). */
   setDmaSource(channel: number, origin: WriteOrigin): void {
     this.#dmaChannel = channel;
     this.#dmaOrigin = origin;
   }
 
+  /** The DMA hands the bus back to the CPU, at the instruction registers[15] stands at. */
   clearDmaSource(): void {
     this.#dmaChannel = -1;
     this.#dmaOrigin = null;
+    this.#dmaPc = this.#cpu.registers[15]!;
   }
 
   /**
@@ -1233,16 +1237,23 @@ export class GbaSystemBus implements MemoryBus {
   // ─── Open Bus ─────────────────────────────────────────────────────
 
   /**
-   * What a read of unmapped memory returns: the bus still carries the CPU's last instruction
-   * fetch (GBATEK "GBA Unpredictable Things"; mGBA GBALoadBad; NanoBoyAdvance Bus::ReadOpenBus).
-   * In ARM state that is [$+8]. In Thumb state the fetch is the halfword [$+4], and the other half
-   * of the word comes from the bus the code runs from: a 16-bit bus repeats [$+4], the 32-bit BIOS
-   * and OAM buses and IWRAM keep the neighbouring halfword of the same word.
+   * What a read of unmapped memory returns: the bus still carries the last value driven on it
+   * (GBATEK "GBA Unpredictable Things"; mGBA GBALoadBad; NanoBoyAdvance Bus::ReadOpenBus). While
+   * a DMA runs, and in the instruction right after it, that is the DMA's last unit. Otherwise it
+   * is the CPU's last instruction fetch: in ARM state [$+8]. In Thumb state the fetch is the
+   * halfword [$+4], and the other half of the word comes from the bus the code runs from: a 16-bit
+   * bus repeats [$+4], the 32-bit BIOS and OAM buses and IWRAM keep the neighbouring halfword of
+   * the same word.
    */
   #openBus(): number {
     const cpu = this.#cpu;
+    const thumb = (cpu.cpsr & CPSR_THUMB) !== 0;
+    // registers[15] is $+width while the instruction at $ executes, and $ between instructions
+    if (this.#dmaChannel >= 0 || cpu.registers[15]! - (thumb ? 2 : 4) === this.#dmaPc) {
+      return this.#dma.busValue;
+    }
     const fetched = cpu.prefetchedOpcode;
-    if ((cpu.cpsr & CPSR_THUMB) === 0) {
+    if (!thumb) {
       return fetched >>> 0;
     }
     // registers[15] is $+2 while the instruction at $ executes
@@ -1690,6 +1701,7 @@ export class GbaSystemBus implements MemoryBus {
       lastBiosRead: this.#biosLatch,
       memoryControl: this.#memoryControl,
       prefetch: this.#prefetch.serialize(),
+      dmaPc: this.#dmaPc,
       eeprom: this.#eeprom.serialize(),
       flash: this.#flash.serialize(),
     };
@@ -1713,6 +1725,7 @@ export class GbaSystemBus implements MemoryBus {
     this.#biosLatch = snap.lastBiosRead >>> 0;
     this.#memoryControl = snap.memoryControl ?? MEMORY_CONTROL_RESET;
     this.#prefetch.deserialize(snap.prefetch);
+    this.#dmaPc = snap.dmaPc ?? -1;
     this.#updateWaitStates();
     this.#eeprom.deserialize(snap.eeprom);
   }
@@ -1733,6 +1746,7 @@ export class GbaSystemBus implements MemoryBus {
     this.#biosLatch = BIOS_LATCH_AFTER_BOOT;
     this.#memoryControl = MEMORY_CONTROL_RESET;
     this.#prefetch.reset();
+    this.#dmaPc = -1;
     this.#updateWaitStates();
   }
 }

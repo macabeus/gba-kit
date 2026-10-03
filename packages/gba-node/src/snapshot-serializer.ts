@@ -64,6 +64,7 @@ export function serializeSnapshot(snap: GbaSnapshot): any {
       lastBiosRead: snap.bus.lastBiosRead,
       memoryControl: snap.bus.memoryControl,
       prefetch: snap.bus.prefetch,
+      dmaPc: snap.bus.dmaPc,
       eeprom: {
         data: typedArrayToBase64(snap.bus.eeprom.data),
         addrBits: snap.bus.eeprom.addrBits,
@@ -139,6 +140,7 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
       memoryControl: data.bus.memoryControl,
       // Absent from states saved before the game pak prefetch buffer was modelled.
       prefetch: data.bus.prefetch,
+      dmaPc: data.bus.dmaPc,
       eeprom: {
         data: base64ToUint8Array(data.bus.eeprom.data),
         addrBits: data.bus.eeprom.addrBits,

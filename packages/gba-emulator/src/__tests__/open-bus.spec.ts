@@ -92,6 +92,58 @@ describe('open bus', () => {
   });
 });
 
+describe('open bus after a DMA', () => {
+  /** DMA3 copies the word 0xDEAD0000 within EWRAM, then the CPU reads unmapped memory twice. */
+  function afterDma(withDma: boolean): Gba {
+    const gba = boot([
+      0xe5910000, // ldr r0, [r1]
+      0xe5912000, // ldr r2, [r1]
+      0xeafffffe, // b .
+      0xe1a00000, // nop, [$+8] of the second ldr
+    ]);
+    gba.armCpu.registers[1] = 0x10000000;
+    if (withDma) {
+      gba.bus.write32(0x02000000, 0xdead0000);
+      gba.bus.write32(0x040000d4, 0x02000000);
+      gba.bus.write32(0x040000d8, 0x02000100);
+      gba.bus.write16(0x040000dc, 1);
+      gba.bus.write16(0x040000de, 0x8000 | (1 << 10)); // enable, immediate, 32-bit
+      gba.scheduler.tick(3);
+    }
+    gba.armCpu.step();
+    gba.armCpu.step();
+    return gba;
+  }
+
+  it('the instruction right after a DMA reads the unit the DMA moved last; the next reads the CPU fetch again', () => {
+    // mGBA dma.c GBADMAService puts every unit on the bus, and memory.c GBALoadBad returns it while
+    // the DMA runs and in the instruction after it (mgba-suite Misc edge "DMA Prefetch": 0xDEAD0000).
+    const gba = afterDma(true);
+    expect(gba.armCpu.registers[0]! >>> 0).toBe(0xdead0000);
+    expect(gba.armCpu.registers[2]! >>> 0).toBe(0xe1a00000);
+  });
+
+  it('without a DMA, the same read returns the CPU fetch', () => {
+    const gba = afterDma(false);
+    expect(gba.armCpu.registers[0]! >>> 0).toBe(0xeafffffe);
+  });
+
+  it('a DMA reading memory nothing answers for moves the unit it moved before', () => {
+    const gba = new Gba();
+    gba.bus.write32(0x02000000, 0x12345678);
+    gba.bus.write32(0x040000d4, 0x02000000); // EWRAM, then the unmapped 0x10000000
+    gba.bus.write32(0x040000d8, 0x02000100);
+    gba.bus.write16(0x040000dc, 1);
+    gba.bus.write16(0x040000de, 0x8000 | (1 << 10));
+    gba.scheduler.tick(3);
+    gba.bus.write32(0x040000d4, 0x10000000);
+    gba.bus.write32(0x040000d8, 0x02000104);
+    gba.bus.write16(0x040000de, 0x8000 | (1 << 10));
+    gba.scheduler.tick(3);
+    expect(gba.bus.read32(0x02000104) >>> 0).toBe(0x12345678);
+  });
+});
+
 describe('BIOS read protection', () => {
   it('after boot, code outside the BIOS reads [0xDC+8] of the real BIOS', () => {
     const gba = boot([

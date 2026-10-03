@@ -137,6 +137,8 @@ export class DmaController {
   #gamePakAccessed = false;
   /** Whether the run is moving units now; a channel that asks then waits for the next unit. */
   #moving = false;
+  /** The unit the run last moved, as the bus carried it: a halfword on both halves. */
+  #busValue = 0;
 
   constructor(scheduler: Scheduler, interrupts: InterruptController) {
     this.#scheduler = scheduler;
@@ -253,6 +255,16 @@ export class DmaController {
       this.#scheduler.cancel(DMA_EVENT_IDS[index]!);
       this.#waiting &= ~(1 << index);
     }
+  }
+
+  /**
+   * What the data bus carries after a channel moved a unit, until the CPU drives it again: an
+   * open-bus read while a DMA runs, and in the instruction right after it, returns this (mGBA
+   * dma.c GBADMAService sets `gba->bus` after every unit; memory.c GBALoadBad; mgba-suite Misc
+   * edge "DMA Prefetch").
+   */
+  get busValue(): number {
+    return this.#busValue;
   }
 
   /** What a transfer moves: CNT_L units, 0 meaning the most there are, and always 4 words for a sound FIFO. */
@@ -443,8 +455,10 @@ export class DmaController {
     scheduler.advance(memory.dataCycles(dst, step, dstSequential));
     if (step === 4) {
       memory.write32(dst, ch.latch);
+      this.#busValue = ch.latch;
     } else {
       memory.write16(dst, (ch.latch >>> ((dst & 2) * 8)) & 0xffff);
+      this.#busValue = ((ch.latch & 0xffff) | (ch.latch << 16)) >>> 0;
     }
 
     ch.srcAddr = this.#nextSource(ch.srcAddr, ch.srcControl, step);
@@ -529,6 +543,7 @@ export class DmaController {
       running: this.#running,
       current: this.#current,
       gamePakAccessed: this.#gamePakAccessed,
+      busValue: this.#busValue,
     };
   }
 
@@ -557,6 +572,7 @@ export class DmaController {
     this.#running = snap.running ?? false;
     this.#current = snap.current ?? -1;
     this.#gamePakAccessed = snap.gamePakAccessed ?? false;
+    this.#busValue = snap.busValue ?? 0;
     this.#moving = false;
   }
 
@@ -587,5 +603,6 @@ export class DmaController {
     this.#current = -1;
     this.#gamePakAccessed = false;
     this.#moving = false;
+    this.#busValue = 0;
   }
 }

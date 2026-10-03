@@ -105,6 +105,8 @@ export interface DmaSnapshot {
   current?: number;
   /** Whether that channel has made its game pak N access. Older snapshots omit it and restore as false. */
   gamePakAccessed?: boolean;
+  /** The unit the last run moved, as the bus carried it. Older snapshots omit it and restore as 0. */
+  busValue?: number;
 }
 
 // ─── Input ────────────────────────────────────────────────────────────
@@ -177,6 +179,8 @@ export interface SystemBusSnapshot {
   memoryControl?: number;
   /** The game pak prefetch unit. Older snapshots omit it and restore it stopped and empty. */
   prefetch?: PrefetchSnapshot;
+  /** registers[15] when a DMA last handed the bus back to the CPU. Older snapshots omit it and restore as -1, none. */
+  dmaPc?: number;
   eeprom: EepromSnapshot;
   /** Older snapshots omit it: a flash cartridge's bytes were then in `sram`, which restores into bank 0, in read mode. */
   flash?: FlashSnapshot;
