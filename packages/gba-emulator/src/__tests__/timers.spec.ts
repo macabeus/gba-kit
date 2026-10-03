@@ -18,6 +18,28 @@ function timers(): { scheduler: Scheduler; timers: TimerController } {
   return { scheduler, timers: new TimerController(scheduler, new InterruptController(scheduler)) };
 }
 
+describe('the prescaler', () => {
+  it('runs all the time, so a timer started between two of its ticks steps at the next one', () => {
+    // mgba-suite Timer count-up; mGBA timer.c and NanoBoyAdvance timer.cc align to the same grid.
+    const { scheduler, timers: t } = timers();
+    scheduler.tick(1000);
+    t.writeControl(0, ENABLE | 3); // F/1024, between the ticks at 0 and 1024
+    scheduler.tick(24 + 2);
+    expect(t.readCounter(0)).toBe(1);
+    // The overflow comes on the same grid, 0x10000 ticks after the one before the write.
+    expect(scheduler.dueCycle(EventId.Timer0Overflow)).toBe(0x10000 * 1024 + 2);
+  });
+
+  it('a running timer switched to another prescaler counts on the new one’s grid', () => {
+    const { scheduler, timers: t } = timers();
+    t.writeControl(0, ENABLE);
+    scheduler.tick(100);
+    t.writeControl(0, ENABLE | 1); // F/64 from cycle 100: its ticks fall at 128, 192, ...
+    scheduler.tick(28 + 2);
+    expect(t.readCounter(0)).toBe(100 + 1);
+  });
+});
+
 describe('a running timer', () => {
   it('switched from prescaler 1024 to 1 keeps its count and goes on at the new rate', () => {
     const { scheduler, timers: t } = timers();

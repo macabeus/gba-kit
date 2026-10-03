@@ -125,9 +125,10 @@ export class TimerController {
   }
 
   /**
-   * Write timer control (TM0CNT_H etc.). Starting a timer loads the reload value and counts from
-   * the cycle of the write. A running timer whose prescaler or cascade bit changes keeps the count
-   * it has reached and goes on at the new rate (mGBA timer.c GBATimerWriteTMCNT_HI).
+   * Write timer control (TM0CNT_H etc.). Starting a timer loads the reload value. A running timer
+   * whose prescaler or cascade bit changes keeps the count it has reached and goes on at the new
+   * rate (mGBA timer.c GBATimerWriteTMCNT_HI). Either way the timer counts on its prescaler's grid
+   * (see #prescalerTick).
    */
   writeControl(index: number, value: number): void {
     const ch = this.#channels[index]!;
@@ -148,7 +149,7 @@ export class TimerController {
     if (!wasEnabled && ch.enabled) {
       // Timer just enabled: reload counter
       ch.counter = ch.reload;
-      ch.lastUpdateCycle = now;
+      ch.lastUpdateCycle = this.#prescalerTick(ch, now);
 
       if (!ch.cascade) {
         this.#scheduleOverflow(index);
@@ -157,13 +158,24 @@ export class TimerController {
       // Timer disabled: cancel scheduled overflow
       this.#scheduler.cancel(TIMER_EVENT_IDS[index]!);
     } else if (ch.enabled && (ch.prescaler !== oldPrescaler || ch.cascade !== oldCascade)) {
-      ch.lastUpdateCycle = now;
+      ch.lastUpdateCycle = this.#prescalerTick(ch, now);
       if (ch.cascade) {
         this.#scheduler.cancel(TIMER_EVENT_IDS[index]!);
       } else {
         this.#scheduleOverflow(index);
       }
     }
+  }
+
+  /**
+   * The last tick of the timer's prescaler at or before `now`. The prescaler is a divider that runs
+   * off the system clock all the time, so a timer started or switched between two of its ticks
+   * counts its first step at the next one, not a whole period after the write (mGBA timer.c
+   * GBATimerWriteTMCNT_HI, `mTimingCurrentTime & ~tickMask`; NanoBoyAdvance timer.cc
+   * OnControlWritten, `prescaler_offset = GetTimestampNow() & channel.mask`).
+   */
+  #prescalerTick(ch: TimerChannel, now: number): number {
+    return now - (now % TIMER_PRESCALERS[ch.prescaler]!);
   }
 
   /** Service the overflows that happened by `now` and wait for a read to see them, so a write comes after them. */
