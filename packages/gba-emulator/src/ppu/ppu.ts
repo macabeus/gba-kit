@@ -3,10 +3,10 @@
  *
  * Implements PpuInterface. The coordinator calls `beginScanline` at the start of every one
  * of the 228 lines, `latchDispcnt` 40 cycles into it, and `renderScanline` once per visible
- * line. This work holds the PPU's internal state, so it stays right wherever in the line the
- * image is drawn:
+ * line, at HBlank. The line-start work holds the PPU's internal state:
  * - the affine reference points step at the end of each visible line and reload from
- *   BGxX/BGxY at frame start and after a write;
+ *   BGxX/BGxY at frame start; a write copies the register in at once, so one made before a
+ *   line's HBlank is that line's origin, and one made in HBlank the next line's;
  * - the BG mosaic counter steps with them;
  * - DISPCNT's layer enables pass through a three-line latch;
  * - the WIN0/WIN1 vertical flip-flops switch at their top and bottom lines, VBlank included;
@@ -71,7 +71,8 @@ export class Ppu implements PpuInterface {
   /**
    * DISPCNT sampled at the last three latches, oldest first. A layer shows when it is
    * enabled both in the oldest sample and in DISPCNT now, so enabling takes effect two lines
-   * later and disabling at once (NBA ppu.cc LatchDISPCNT, `dispcnt_latch[0] & dispcnt`).
+   * later when written before the line's latch at DISPCNT_LATCH_CYCLE, three when written after
+   * it, and disabling at once (NBA ppu.cc LatchDISPCNT, `dispcnt_latch[0] & dispcnt`).
    */
   readonly #dispcntLatch = [0, 0, 0];
 

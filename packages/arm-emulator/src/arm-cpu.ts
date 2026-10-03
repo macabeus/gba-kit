@@ -2347,8 +2347,7 @@ export class ArmCpu {
 
   /** ARM Software Interrupt */
   #armSwi(instr: number): void {
-    // The SWI number encoding is platform-specific. On GBA it's bits 23-16.
-    // We pass the full 24-bit comment field; the handler extracts what it needs.
+    // GBA convention: the SWI number is bits 23-16 of the ARM encoding (bits 7-0 in Thumb).
     const swiNumber = (instr >>> 16) & 0xff;
     this.#softwareInterrupt(swiNumber);
   }
