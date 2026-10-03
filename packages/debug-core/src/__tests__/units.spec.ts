@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { applySnapshotDelta, decodeDelta, deltaSnapshot, encodeDelta } from '../delta.js';
 import { packSnapshot, unpackSnapshot } from '../delta.js';
+import { DIFF_LIMITS, rangeBytes } from '../diff-limits.js';
 import {
   type ExprEnv,
   type ExprHints,
@@ -16,9 +17,11 @@ import {
 } from '../expression.js';
 import { ManualHost } from '../host.js';
 import { ioRegisterAt } from '../io.js';
-import { LabelStore } from '../labels.js';
-import { stackBoundFor } from '../machine.js';
-import { LOG, TILES, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
+import { LabelStore, labelName } from '../labels.js';
+import { RAM_REGIONS, stackBoundFor } from '../machine.js';
+import { CandidateMask, MemoryDiff, RANK_LEVELS, rankLevel } from '../memory-diff.js';
+import { MuteStore } from '../memory-noise.js';
+import { LOG, TILES, diffRowBody, entryCount, rewindFrameCount, tileCount } from '../protocol.js';
 import { decodeTake, encodeTake, recordingToScript, toSegments } from '../recorder.js';
 import { Ring } from '../rings.js';
 import { base64ToBytes, bytesToBase64, encodeSaveState } from '../snapshot-codec.js';
@@ -650,6 +653,21 @@ describe('labels', () => {
     expect(copy.size).toBe(2);
     expect(copy.dirty).toBe(false);
   });
+
+  it('a typed member path becomes a name the exporter writes and the importer reads back', () => {
+    // the memory diff's answer is a path, and a `.sym` line's name is a C identifier:
+    // a path written straight in leaves the project on export and never comes back
+    expect(labelName('gEntityInfo[3].xPosBg2')).toBe('gEntityInfo_3.xPosBg2');
+    expect(labelName('g_samples[1]')).toBe('g_samples_1');
+    expect(labelName('[0]')).toBe('_0');
+
+    const store = new LabelStore();
+    store.set({ address: 0x03000abc, label: labelName('g_samples[1]') });
+    store.set({ address: 0x03000ac0, label: labelName('gEntityInfo[3].xPosBg2') });
+    const back = new LabelStore();
+    expect(back.importSymbols(store.exportSymbols())).toBe(2);
+    expect(back.all().map((l) => l.label)).toEqual(['g_samples_1', 'gEntityInfo_3.xPosBg2']);
+  });
 });
 
 describe('source mapper', () => {
@@ -740,5 +758,373 @@ describe('I/O registers', () => {
     expect(ioRegisterAt(0x0400002a)?.name).toBe('BG2X'); // inside a word register
     expect(ioRegisterAt(0x0400004e)).toBeNull(); // past MOSAIC, which is two bytes at 0x400004c
     expect(ioRegisterAt(0x03000000)).toBeNull();
+  });
+});
+
+describe('memory diff', () => {
+  const IWRAM = RAM_REGIONS.iwram;
+  const EWRAM = RAM_REGIONS.ewram;
+  const screen = { width: 1, height: 1, rgba: new Uint8Array(4) };
+  /** nothing here reads the machine or the program: only `value` mode needs the first, and rows the second */
+  const context = {
+    machine: () => {
+      throw new Error('no machine in this test');
+    },
+    info: () => null,
+  };
+
+  /** A capture whose RAM is zero everywhere but the addresses named. */
+  function capture(diff: MemoryDiff, tag: string, at: Record<number, number>): void {
+    const ram = { iwram: new Uint8Array(IWRAM.size), ewram: new Uint8Array(EWRAM.size) };
+    for (const [address, value] of Object.entries(at)) {
+      const a = Number(address);
+      const region = a >= IWRAM.base ? 'iwram' : 'ewram';
+      ram[region][a - RAM_REGIONS[region].base] = value;
+    }
+    diff.capture(ram, screen, 0, tag);
+  }
+
+  it('a candidate mask holds every addressable byte of both regions, in address order', () => {
+    const mask = CandidateMask.full();
+    expect(mask.count(1)).toBe(IWRAM.size + EWRAM.size);
+    expect(mask.count(2)).toBe((IWRAM.size + EWRAM.size) / 2);
+    expect(mask.count(4)).toBe((IWRAM.size + EWRAM.size) / 4);
+    expect(mask.addresses(1, 0, 2)).toEqual([IWRAM.base, IWRAM.base + 1]);
+    // a page runs through IWRAM and on into EWRAM, which is the order every result is read in
+    expect(mask.addresses(4, IWRAM.size / 4 - 1, 2)).toEqual([IWRAM.base + IWRAM.size - 4, EWRAM.base]);
+  });
+
+  it('an address is in play at a width only when every one of its bytes is', () => {
+    const mask = CandidateMask.empty();
+    mask.setSpan('iwram', 0, 1);
+    expect(mask.spans('iwram', 0, 1)).toBe(true);
+    expect(mask.spans('iwram', 0, 2)).toBe(false);
+    expect(mask.count(2)).toBe(0);
+    mask.setSpan('iwram', 1, 1);
+    expect(mask.spans('iwram', 0, 2)).toBe(true);
+    expect(mask.count(2)).toBe(1);
+  });
+
+  /** the strip as the panel draws it: each capture linked to the next, plus the arcs given. */
+  const strip = (diff: MemoryDiff, relation: Relation, ...arcs: Array<[number, number]>) => ({
+    edges: [
+      ...diff
+        .captures()
+        .slice(0, -1)
+        .map((c, i) => ({ from: c.id, to: diff.captures()[i + 1]!.id, relation })),
+      ...arcs.map(([from, to]) => ({ from, to, relation: 'same' as const })),
+    ],
+    values: [],
+  });
+
+  it('the odds are three words, and a row needs more than one criterion to lead', () => {
+    // the most any one criterion is worth is 4, so a row that is merely in quiet memory
+    // cannot claim the top word on that alone
+    expect(rankLevel(0)).toBe('unlikely');
+    expect(rankLevel(3)).toBe('unlikely');
+    expect(rankLevel(4)).toBe('possible');
+    expect(rankLevel(6)).toBe('possible');
+    expect(rankLevel(7)).toBe('likely');
+    expect(rankLevel(10)).toBe('likely');
+    expect(Object.keys(RANK_LEVELS)).toEqual(['likely', 'possible', 'unlikely']);
+  });
+
+  it('an arc back to an earlier capture is what separates a value from what merely churns', () => {
+    const diff = new MemoryDiff(context);
+    const cursor = IWRAM.base + 0x40;
+    const counter = IWRAM.base + 0x44;
+    const constant = IWRAM.base + 0x48;
+    capture(diff, 'A', { [cursor]: 1, [counter]: 1, [constant]: 7 });
+    capture(diff, 'B', { [cursor]: 2, [counter]: 2, [constant]: 7 });
+    capture(diff, 'A again', { [cursor]: 1, [counter]: 3, [constant]: 7 });
+    const [a, b, c] = diff.captures().map((capture) => capture.id) as [number, number, number];
+    const chain = [
+      { from: a, to: b, relation: 'changed' as const },
+      { from: b, to: c, relation: 'changed' as const },
+    ];
+
+    // the chain alone keeps the counter: "changed, then changed again" is what churn does
+    diff.apply({ edges: chain, values: [] }, 1);
+    expect(new Set(diff.rows(0, 16).map((r) => r.address))).toEqual(new Set([cursor, counter]));
+
+    diff.apply({ edges: [...chain, { from: a, to: c, relation: 'same' }], values: [] }, 1);
+    const kept = diff.rows(0, 16).map((r) => r.address);
+    expect(kept).toContain(cursor);
+    expect(kept).not.toContain(counter);
+    expect(kept).not.toContain(constant);
+  });
+
+  it('a query is answered whole, so loosening a link brings addresses back', () => {
+    const diff = new MemoryDiff(context);
+    const up = IWRAM.base + 0x10;
+    const down = IWRAM.base + 0x14;
+    capture(diff, 'before', { [up]: 4, [down]: 9 });
+    capture(diff, 'after', { [up]: 6, [down]: 1 });
+    const [first, second] = diff.captures().map((capture) => capture.id) as [number, number];
+    const between = (relation: 'increased' | 'decreased' | 'same' | 'changed' | 'any') => ({
+      edges: [{ from: first, to: second, relation }],
+      values: [],
+    });
+
+    expect(diff.apply(between('increased'), 1).total).toBe(1);
+    expect(diff.rows(0, 4)[0]!.address).toBe(up);
+    expect(diff.apply(between('decreased'), 1).total).toBe(1);
+    expect(diff.rows(0, 4)[0]!.address).toBe(down);
+
+    // no narrowing to undo: the widest query answers with everything, straight after the narrowest
+    const same = diff.apply(between('same'), 1);
+    expect(same.total).toBe(IWRAM.size + EWRAM.size - 2);
+    expect(same.asked).toBe(true);
+    // 291,678 addresses are more than anyone reads: no groups, and the page is in address order
+    expect(same.capped).toBe(true);
+    expect(diff.groups()).toEqual([]);
+    expect(diff.rows(0, 3).map((r) => r.address)).toEqual([IWRAM.base, IWRAM.base + 1, IWRAM.base + 2]);
+    expect(diff.apply(between('any'), 1).total).toBe(IWRAM.size + EWRAM.size);
+    expect(diff.reset().asked).toBe(false);
+  });
+
+  it('a value is held against the capture that saw it, and several of them at once', () => {
+    const diff = new MemoryDiff(context);
+    const both = IWRAM.base + 0x20;
+    const one = IWRAM.base + 0x24;
+    capture(diff, 'A', { [both]: 3, [one]: 3 });
+    capture(diff, 'B', { [both]: 5, [one]: 9 });
+    const [first, second] = diff.captures().map((capture) => capture.id) as [number, number];
+
+    expect(diff.apply({ edges: [], values: [{ capture: first, value: 3 }] }, 1).total).toBe(2);
+    const paired = diff.apply(
+      {
+        edges: [],
+        values: [
+          { capture: first, value: 3 },
+          { capture: second, value: 5 },
+        ],
+      },
+      1,
+    );
+    expect(paired.total).toBe(1);
+    expect(diff.rows(0, 4)[0]!.address).toBe(both);
+  });
+
+  it('refuses a query nothing could satisfy, rather than answering it with no rows', () => {
+    const diff = new MemoryDiff(context);
+    capture(diff, 'A', { [IWRAM.base + 8]: 1 });
+    capture(diff, 'B', { [IWRAM.base + 8]: 2 });
+    capture(diff, 'C', { [IWRAM.base + 8]: 3 });
+    const [a, b, c] = diff.captures().map((capture) => capture.id) as [number, number, number];
+
+    expect(() =>
+      diff.apply(
+        {
+          edges: [
+            { from: a, to: c, relation: 'same' },
+            { from: a, to: c, relation: 'changed' },
+          ],
+          values: [],
+        },
+        1,
+      ),
+    ).toThrow(/① and ③ are the same state, so nothing can have changed/);
+
+    expect(() =>
+      diff.apply(
+        {
+          edges: [
+            { from: a, to: b, relation: 'increased' },
+            { from: b, to: c, relation: 'increased' },
+            { from: a, to: c, relation: 'same' },
+          ],
+          values: [],
+        },
+        1,
+      ),
+    ).toThrow(/rises and falls back to itself/);
+
+    expect(() => diff.apply({ edges: [{ from: a, to: 99, relation: 'same' }], values: [] }, 1)).toThrow(
+      /no capture 99/,
+    );
+  });
+
+  it('the captures can be put in the order the links are read along', () => {
+    const diff = new MemoryDiff(context);
+    capture(diff, 'A', { [IWRAM.base + 8]: 1 });
+    capture(diff, 'B', { [IWRAM.base + 8]: 2 });
+    capture(diff, 'C', { [IWRAM.base + 8]: 3 });
+    const [a, b, c] = diff.captures().map((capture) => capture.id) as [number, number, number];
+
+    expect(diff.reorder([c, a, b]).map((capture) => capture.tag)).toEqual(['C', 'A', 'B']);
+    expect(() => diff.reorder([c, a])).toThrow(/every capture/);
+    expect(() => diff.reorder([a, b, 99])).toThrow(/no capture 99/);
+    expect(() => diff.reorder([a, b, b])).toThrow(/no capture/);
+  });
+
+  it('a mute subtracts candidates and the tally names what took each one', () => {
+    const diff = new MemoryDiff(context);
+    const cursor = IWRAM.base + 0x40;
+    const noisy = IWRAM.base + 0x50;
+    capture(diff, 'A', { [cursor]: 1, [noisy]: 1 });
+    capture(diff, 'B', { [cursor]: 2, [noisy]: 2 });
+    capture(diff, 'A', { [cursor]: 1, [noisy]: 1 });
+
+    expect(diff.apply(strip(diff, 'changed', [diff.captures()[0]!.id, diff.captures()[2]!.id]), 1).total).toBe(2);
+
+    // a mute hides candidates where they are reported rather than where they are found,
+    // so it takes effect on the result already on screen — with no filter to run again
+    diff.mutes.replaceDiscovered([
+      { source: 'idle', ranges: [{ lo: noisy, hi: noisy + 1 }], note: 'moves on its own' },
+    ]);
+    const muted = diff.result();
+    expect(muted.total).toBe(1);
+    expect(muted.hidden).toEqual({ idle: 1 });
+    expect(diff.rows(0, 4)[0]!.address).toBe(cursor);
+
+    // and switching it off puts its addresses back, in the same place
+    diff.mutes.setEnabled(diff.mutes.all()[0]!.id, false);
+    expect(diff.result().total).toBe(2);
+    expect(diff.result().hidden).toEqual({});
+    expect(diff.rows(0, 4).map((r) => r.address)).toEqual([cursor, noisy]);
+  });
+
+  it('a query with nothing in it keeps every address, and says it was asked', () => {
+    const diff = new MemoryDiff(context);
+    capture(diff, '', { [IWRAM.base + 0x40]: 1 });
+    capture(diff, '', { [IWRAM.base + 0x40]: 2 });
+
+    // every link set to `any` asks nothing, which is a question with a true answer rather
+    // than a refusal: the strip is a description, and an empty one describes everything
+    const asked = diff.apply(strip(diff, 'any'), 1);
+    expect(asked.total).toBe(IWRAM.size + EWRAM.size);
+    expect(asked.asked).toBe(true);
+  });
+
+  it('the groups are read in the order ranking put their rows in', () => {
+    const diff = new MemoryDiff(context);
+    // the one the user is after sits alone in EWRAM, and two rows it ties with share a
+    // group in IWRAM — the shape the Klonoa save-file screen produces, where the cursor
+    // is the lone candidate and two bytes of an entity array tie with it
+    const cursor = EWRAM.base + 0x818;
+    const decoys = [IWRAM.base + 0x800, IWRAM.base + 0x1800];
+    const at = (v: number): Record<number, number> => ({ [cursor]: v, [decoys[0]!]: v, [decoys[1]!]: v });
+    capture(diff, 'A', at(1));
+    capture(diff, 'B', at(2));
+    capture(diff, 'A', at(1));
+
+    expect(diff.apply(strip(diff, 'changed', [diff.captures()[0]!.id, diff.captures()[2]!.id]), 1).total).toBe(3);
+    const rows = diff.rows(0, 8);
+    const groups = diff.groups();
+    // all three are lone changed bytes that came back to what they held, so nothing
+    // separates them by rank
+    expect(new Set(rows.map((r) => r.rank)).size).toBe(1);
+    expect(groups.map((g) => g.rows)).toEqual([1, 2]);
+    // the panel reads the groups top to bottom, so the group holding the best row leads:
+    // a group of two rows tied with it is a wider guess, not a better one
+    expect(groups[0]!.key).toBe(rows[0]!.group);
+    expect(rows[0]!.address).toBe(cursor);
+  });
+
+  it('a candidate is ranked against the captures its own filter compared', () => {
+    const diff = new MemoryDiff(context);
+    const scalar = IWRAM.base + 0x40;
+    const buffer = IWRAM.base + 0x100;
+    capture(diff, 'A', {});
+    capture(diff, 'A', {});
+    capture(diff, 'B', {});
+    capture(diff, 'C', { [scalar]: 7, [buffer]: 9, [buffer + 1]: 9, [buffer + 2]: 9, [buffer + 3]: 9 });
+    const [, , third, fourth] = diff.captures();
+
+    diff.apply({ edges: [{ from: third!.id, to: fourth!.id, relation: 'changed' }], values: [] }, 1);
+    const rows = new Map(diff.rows(0, 8).map((r) => [r.address, r]));
+    // the first two captures are identical, so ranking against them would call every
+    // candidate a lone byte in still memory and score the buffer like the scalar
+    expect(rows.get(scalar)!.reasons).toContain('a run of 1 changed byte');
+    expect(rows.get(buffer)!.reasons).toContain('a run of 4 changed bytes');
+    expect(rows.get(scalar)!.rank).toBeGreaterThan(rows.get(buffer)!.rank);
+  });
+
+  it('a row body carries every caveat the placement raised, alternatives included', () => {
+    // a union's members cover the same bytes, so the first reading is one reading and
+    // the others have to travel with it — a caveat computed and then dropped is no caveat
+    const body = diffRowBody({
+      address: IWRAM.base + 4,
+      group: 'symbol:g_state',
+      values: [1, 2],
+      rank: 3,
+      reasons: ['a run of 1 changed byte'],
+      placement: {
+        address: IWRAM.base + 4,
+        tier: 'sized',
+        symbol: { name: 'g_state', base: IWRAM.base, offset: 4 },
+        path: 'g_state.split.low',
+        type: { kind: 'base', name: 'u16', size: 2 },
+        alternatives: ['all'],
+        straddles: true,
+      },
+    });
+    expect(body).toMatchObject({
+      group: 'symbol:g_state',
+      path: 'g_state.split.low',
+      type: 'u16',
+      alternatives: ['all'],
+      straddles: true,
+    });
+  });
+
+  it('ranking claims nothing about a spread the query never asked for', () => {
+    const diff = new MemoryDiff(context);
+    const moved = IWRAM.base + 0x40;
+    capture(diff, '', { [moved]: 1 });
+    capture(diff, '', { [moved]: 2 });
+    capture(diff, '', { [moved]: 1 });
+    const [first, second, third] = diff.captures().map((c) => c.id) as [number, number, number];
+    const chain = [
+      { from: first, to: second, relation: 'changed' as const },
+      { from: second, to: third, relation: 'changed' as const },
+    ];
+
+    // three captures the strip calls three states: a value taking two of them is not
+    // answering the question, so the criterion is not awarded
+    diff.apply({ edges: chain, values: [] }, 1);
+    expect(diff.rows(0, 4)[0]!.reasons.join(' ')).not.toContain('one per state');
+
+    // with the arc back to ① the strip describes two states, which is what `1 2 1` takes
+    diff.apply({ edges: [...chain, { from: first, to: third, relation: 'same' }], values: [] }, 1);
+    expect(diff.rows(0, 4)[0]!.reasons).toContain('2 distinct values, one per state');
+  });
+
+  it('a session holds as many captures as the strip can name, and says so past that', () => {
+    const diff = new MemoryDiff(context);
+    for (let i = 0; i < DIFF_LIMITS.captures; i++) {
+      capture(diff, `#${i}`, {});
+    }
+    expect(diff.captures()).toHaveLength(DIFF_LIMITS.captures);
+    expect(() => capture(diff, 'one too many', {})).toThrow(/forget one to take another/);
+    diff.forget(diff.captures()[0]!.id);
+    expect(() => capture(diff, 'room again', {})).not.toThrow();
+  });
+
+  it('forgetting a capture that is not there is refused rather than reported as done', () => {
+    const diff = new MemoryDiff(context);
+    capture(diff, 'A', {});
+    const [only] = diff.captures();
+    expect(diff.forget(only!.id).tag).toBe('A');
+    expect(() => diff.forget(only!.id)).toThrow(/no capture/);
+  });
+
+  it('a discovery replaces what the last one found; what the user muted is theirs', () => {
+    const store = new MuteStore();
+    store.add([{ lo: 0x03000000, hi: 0x03000010 }], 'user', 'muted by hand');
+    store.replaceDiscovered([{ source: 'idle', ranges: [{ lo: 0x03000100, hi: 0x03000180 }], note: 'churn' }]);
+    store.replaceDiscovered([{ source: 'idle', ranges: [{ lo: 0x03000100, hi: 0x03000180 }], note: 'churn' }]);
+    expect(store.all().map((m) => m.source)).toEqual(['user', 'idle']);
+    expect(store.all().map((m) => rangeBytes(m.ranges))).toEqual([16, 0x80]);
+  });
+
+  it('a query naming a capture that is not there says which one', () => {
+    const diff = new MemoryDiff(context);
+    expect(() => diff.apply({ edges: [{ from: 9, to: 1, relation: 'changed' }], values: [] }, 1)).toThrow(
+      /no capture 9/,
+    );
+    capture(diff, 'A', {});
+    expect(() => diff.apply({ edges: [], values: [{ capture: 7, value: 1 }] }, 1)).toThrow(/no capture 7/);
   });
 });

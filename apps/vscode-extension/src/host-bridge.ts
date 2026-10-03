@@ -23,6 +23,8 @@ export interface BridgeSession {
 export interface BridgeSink {
   post(message: HostToTransport): void;
   openText?(content: string, language: string, title: string): void;
+  /** the webview asked for an expression to be watched; the host puts it in the editor's watch pane */
+  watch?(expression: string): void;
   /** the webview asked for a file to read; the host opens the editor's open dialog */
   pickFile?: TransportBackend['pickFile'];
   /** the webview asked for bytes to be written to a file; the host opens the editor's save dialog */
@@ -81,6 +83,7 @@ export class HostBridge {
         }
       },
       openText: sink.openText?.bind(sink),
+      watch: sink.watch?.bind(sink),
       pickFile: sink.pickFile?.bind(sink),
       saveFile: sink.saveFile?.bind(sink),
       showPanel: sink.showPanel?.bind(sink),

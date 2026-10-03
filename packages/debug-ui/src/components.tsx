@@ -37,6 +37,7 @@ export function Panel({
 export type IconName =
   | 'add'
   | 'chevron-down'
+  | 'chevron-left'
   | 'chevron-right'
   | 'debug-continue'
   | 'debug-pause'
@@ -236,16 +237,18 @@ export function Select<T extends string | number>({
   options,
   onChange,
   title,
+  className,
 }: {
   value: T;
   options: Array<{ value: T; label: string }>;
   onChange: (value: T) => void;
   title?: string;
+  className?: string;
 }) {
   const numeric = typeof value === 'number';
   return (
     <select
-      className="gk-select"
+      className={`gk-select${className ? ` ${className}` : ''}`}
       value={String(value)}
       title={title}
       onChange={(e) => onChange((numeric ? Number(e.target.value) : e.target.value) as T)}

@@ -18,7 +18,7 @@ export {
   type Unsubscribe,
 } from './transport.js';
 export { createSessionTransport, type SessionTransportOptions } from './session-transport.js';
-export { useAction, useAtStop, useDebugState, useFetched, usePixels, useSaveStates } from './hooks.js';
+export { useAction, useAtStop, useDebugState, useFetched, useMemoryDiff, usePixels, useSaveStates } from './hooks.js';
 export {
   Button,
   EditableName,
@@ -60,7 +60,8 @@ export { SpritesPanel, SpritesView } from './panels/SpritesPanel.js';
 export { IoRegistersPanel, IoRegistersView } from './panels/IoRegistersPanel.js';
 export { TracePanel, TraceView } from './panels/TracePanel.js';
 export { EventsPanel, EventsView, describeEvent } from './panels/EventsPanel.js';
-export { MemorySearchPanel } from './panels/MemorySearchPanel.js';
+export { MemoryDiffPanel } from './panels/MemoryDiffPanel.js';
+export { DiffGroups, type DiffRowActions } from './panels/DiffRows.js';
 export { LabelsPanel, LabelsView } from './panels/LabelsPanel.js';
 export { SaveStateDrawer } from './panels/SaveStateDrawer.js';
 export { SaveStatesView, type SaveStatesViewProps } from './panels/save-states.js';

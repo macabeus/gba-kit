@@ -1,4 +1,11 @@
-import { MAX_SAVE_FILE_SIZE, type SavedStateInfo, type StateBody } from '@gba-kit/debug-core/protocol';
+import {
+  type CaptureInfo,
+  type GbaKitRequests,
+  MAX_SAVE_FILE_SIZE,
+  type MuteBody,
+  type SavedStateInfo,
+  type StateBody,
+} from '@gba-kit/debug-core/protocol';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import { base64ToBytes, bytesToBase64 } from './render.js';
@@ -206,5 +213,168 @@ export function useSaveStates(transport: Transport): {
     load: (s) => run(() => transport.request('gba-kit/loadState', { path: s.path })),
     rename: (s, to) => run(() => transport.request('gba-kit/renameState', { path: s.path, to }), refresh),
     remove: (s) => run(() => transport.request('gba-kit/deleteState', { path: s.path }), refresh),
+  };
+}
+
+type DiffFilterBody = GbaKitRequests['gba-kit/diffFilter']['body'];
+type DiffQuery = NonNullable<NonNullable<GbaKitRequests['gba-kit/diffFilter']['args']>['query']>;
+type SetMuteArgs = GbaKitRequests['gba-kit/setMute']['args'];
+type FilterArgs = NonNullable<GbaKitRequests['gba-kit/diffFilter']['args']>;
+
+/**
+ * The memory diff: the captures, the mutes, and the candidate set the last filter
+ * left. Everything a panel does with them reports its own failure through `error`,
+ * and every action that changes the state answers with the new one, so nothing has
+ * to be refetched to stay in step.
+ *
+ * The RAM itself never arrives here — a capture is a thumbnail and a tag, a result is
+ * a count and one page of rows — so a dozen captures cost the page nothing.
+ */
+export function useMemoryDiff(transport: Transport): {
+  captures: CaptureInfo[];
+  mutes: MuteBody[];
+  result: DiffFilterBody | null;
+  /** where the page of rows begins, for a view that says which of them it is showing */
+  from: number;
+  error: string | null;
+  busy: boolean;
+  capture: (tag?: string) => Promise<unknown>;
+  adopt: (state: SavedStateInfo, tag?: string) => Promise<unknown>;
+  retag: (id: number, tag: string) => Promise<unknown>;
+  forget: (id: number) => Promise<unknown>;
+  findNoise: (frames?: number) => Promise<unknown>;
+  mute: (args: SetMuteArgs) => Promise<unknown>;
+  reorder: (ids: number[]) => Promise<unknown>;
+  apply: (query: DiffQuery, size: 1 | 2 | 4) => Promise<unknown>;
+  reset: () => Promise<unknown>;
+  page: (from: number) => Promise<unknown>;
+} {
+  const state = useDebugState(transport);
+  const epoch = state?.epoch;
+  const [captures, setCaptures] = useState<CaptureInfo[]>([]);
+  const [mutes, setMutes] = useState<MuteBody[]>([]);
+  const [result, setResult] = useState<DiffFilterBody | null>(null);
+  const [from, setFrom] = useState(0);
+  const action = useAction();
+  const { run } = action;
+
+  // a restart boots a different machine and the session dropped what it held of the old
+  // one; a state load keeps every capture and the standing answer, so what is read back
+  // here is the session's own answer either way rather than an assumption. A set no
+  // query has been asked of is every address there is, which is not a result anyone
+  // asked for — `asked` is what tells the two apart.
+  useEffect(() => {
+    let ignore = false;
+    Promise.all([
+      transport.request('gba-kit/captures'),
+      transport.request('gba-kit/mutes'),
+      transport.request('gba-kit/diffFilter', {}),
+    ]).then(
+      ([c, m, f]) => {
+        if (!ignore) {
+          setCaptures(c.captures);
+          setMutes(m.mutes);
+          setResult(f.asked ? f : null);
+          setFrom(f.asked ? f.from : 0);
+        }
+      },
+      () => undefined,
+    );
+    return () => {
+      ignore = true;
+    };
+  }, [transport, epoch]);
+
+  const filter = useCallback(
+    (args: FilterArgs, at = 0) =>
+      run(async () => {
+        const body = await transport.request('gba-kit/diffFilter', { ...args, from: at });
+        setResult(body);
+        setFrom(body.from);
+        return body;
+      }),
+    [run, transport],
+  );
+
+  /**
+   * The result as the session reports it now, asking nothing of it: a mute switched on
+   * or a capture forgotten changes what the candidates are and what each row's values
+   * mean, and a matrix left standing under a changed set of columns is misread by eye.
+   * Nothing is read back where no filter has run, since there is no matrix yet.
+   *
+   * It reads and does not show, so a caller that also changes the capture strip can put
+   * both on screen together — or neither, when the read fails.
+   */
+  const reread = (at: number): Promise<DiffFilterBody | null> =>
+    result === null ? Promise.resolve(null) : transport.request('gba-kit/diffFilter', { from: at });
+
+  const show = (body: DiffFilterBody | null): void => {
+    if (body) {
+      setResult(body);
+      setFrom(body.from);
+    }
+  };
+
+  return {
+    captures,
+    mutes,
+    result,
+    from,
+    error: action.error,
+    busy: action.busy,
+    capture: (tag) =>
+      run(async () => {
+        await transport.request('gba-kit/capture', { tag });
+        const list = await transport.request('gba-kit/captures');
+        const body = await reread(from);
+        setCaptures(list.captures);
+        show(body);
+      }),
+    adopt: (state, tag) =>
+      run(async () => {
+        await transport.request('gba-kit/capture', { path: state.path, tag });
+        const list = await transport.request('gba-kit/captures');
+        const body = await reread(from);
+        setCaptures(list.captures);
+        show(body);
+      }),
+    retag: (id, tag) =>
+      run(async () => {
+        const list = await transport.request('gba-kit/retagCapture', { id, tag });
+        const body = await reread(from);
+        setCaptures(list.captures);
+        show(body);
+      }),
+    forget: (id) =>
+      run(async () => {
+        const list = await transport.request('gba-kit/forgetCapture', { id });
+        const body = await reread(0);
+        setCaptures(list.captures);
+        show(body);
+      }),
+    findNoise: (frames) =>
+      run(async () => {
+        const found = await transport.request('gba-kit/discoverNoise', { frames });
+        const body = await reread(0);
+        setMutes(found.mutes);
+        show(body);
+      }),
+    mute: (args) =>
+      run(async () => {
+        const list = await transport.request('gba-kit/setMute', args);
+        const body = await reread(0);
+        setMutes(list.mutes);
+        show(body);
+      }),
+    reorder: (ids) =>
+      run(async () => {
+        const list = await transport.request('gba-kit/reorderCaptures', { ids });
+        const body = await reread(0);
+        setCaptures(list.captures);
+        show(body);
+      }),
+    apply: (query, size) => filter({ query, size }),
+    reset: () => filter({ reset: true }),
+    page: (at) => filter({}, at),
   };
 }

@@ -206,6 +206,182 @@ describe('session transport', () => {
     expect(narrowed.addresses.length).toBeLessThanOrEqual(addresses.length);
   });
 
+  it('captures, names, answers a query and forgets, without the RAM ever crossing', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session);
+    const gKeys = session.evaluate('&g_keys').address!;
+
+    // `g_keys` follows the buttons, so holding A, then B, then A again is a value that
+    // changed and came back, which everything that merely counts frames did not do
+    for (const [mask, tag] of [
+      [1, 'A'],
+      [2, 'B'],
+      [1, 'A'],
+    ] as const) {
+      await transport.request('gba-kit/buttons', { mask });
+      await transport.request('gba-kit/stepFrame');
+      await transport.request('gba-kit/stepFrame');
+      await transport.request('gba-kit/capture', { tag });
+    }
+
+    const listed = await transport.request('gba-kit/captures');
+    expect(listed.captures.map((c) => c.tag)).toEqual(['A', 'B', 'A']);
+    expect(listed.captures[0]).toMatchObject({ from: 'machine', width: 120, height: 80 });
+    expect(Object.keys(listed.captures[0]!)).not.toContain('ram');
+
+    const [a, b, c] = listed.captures.map((capture) => capture.id) as [number, number, number];
+    // the arc back to ① is the constraint that does the work: the two links alone keep
+    // everything that merely churns, since "changed, then changed again" is what churn is
+    const query = {
+      edges: [
+        { from: a, to: b, relation: 'changed' },
+        { from: b, to: c, relation: 'changed' },
+        { from: a, to: c, relation: 'same' },
+      ],
+    };
+    const chained = await transport.request('gba-kit/diffFilter', {
+      query: { edges: query.edges.slice(0, 2) },
+      size: 2,
+    });
+    const applied = await transport.request('gba-kit/diffFilter', { query, size: 2 });
+    expect(applied.total).toBeLessThan(chained.total);
+    expect(applied.asked).toBe(true);
+    expect(applied.size).toBe(2);
+    expect(applied.rows.map((r) => r.address)).toContain(gKeys);
+    const found = applied.rows.find((r) => r.address === gKeys)!;
+    expect(found.values).toEqual([1, 2, 1]);
+    expect(found.tier).toBe('sized');
+    expect(found.path).toBe('g_keys');
+    expect(found.reasons.length).toBeGreaterThan(0);
+
+    // a query is a standing description, not a step: loosening a link brings rows back
+    const loosened = await transport.request('gba-kit/diffFilter', {
+      query: { edges: [{ from: a, to: b, relation: 'changed' }] },
+      size: 2,
+    });
+    expect(loosened.total).toBeGreaterThan(applied.total);
+
+    // nothing can be both larger than itself and equal to itself
+    await expect(
+      transport.request('gba-kit/diffFilter', {
+        query: {
+          edges: [
+            { from: a, to: b, relation: 'increased' },
+            { from: b, to: c, relation: 'increased' },
+            { from: a, to: c, relation: 'same' },
+          ],
+        },
+        size: 2,
+      }),
+    ).rejects.toThrow(/rises and falls back to itself/);
+
+    const reordered = await transport.request('gba-kit/reorderCaptures', { ids: [c, a, b] });
+    expect(reordered.captures.map((capture) => capture.id)).toEqual([c, a, b]);
+    await expect(transport.request('gba-kit/reorderCaptures', { ids: [c, a] })).rejects.toThrow(/every capture/);
+    await transport.request('gba-kit/reorderCaptures', { ids: [a, b, c] });
+
+    const retagged = await transport.request('gba-kit/retagCapture', { id: listed.captures[1]!.id, tag: 'C' });
+    expect(retagged.captures.map((c) => c.tag)).toEqual(['A', 'C', 'A']);
+
+    // a capture a standing filter compared, forgotten — the panel re-reads the result
+    // straight after, and a matrix of three columns over a strip of two cards is read wrong
+    await transport.request('gba-kit/diffFilter', {
+      query: { edges: [{ from: a, to: b, relation: 'changed' }] },
+      size: 2,
+    });
+    const left = await transport.request('gba-kit/forgetCapture', { id: listed.captures[0]!.id });
+    expect(left.captures).toHaveLength(2);
+    const reread = await transport.request('gba-kit/diffFilter', {});
+    expect(reread.rows[0]!.values).toHaveLength(2);
+    expect(reread.asked).toBe(true);
+
+    // both hosts read a capture id the same way, so neither answers one with a TypeError
+    await expect(transport.request('gba-kit/retagCapture', { id: 0, tag: 'x' })).rejects.toThrow(
+      /'id' must be a capture id/,
+    );
+    await expect(transport.request('gba-kit/capture', { tag: 42 } as never)).rejects.toThrow(/'tag' must be a string/);
+    await expect(transport.request('gba-kit/retagCapture', { id: listed.captures[1]!.id } as never)).rejects.toThrow(
+      /'tag' must be a string/,
+    );
+    await expect(transport.request('gba-kit/forgetCapture', { id: 99 })).rejects.toThrow(/no capture 99/);
+  });
+
+  it('holds a value against the capture that saw it, and takes several at once', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session);
+    const gKeys = session.evaluate('&g_keys').address!;
+
+    for (const mask of [6, 1]) {
+      await transport.request('gba-kit/buttons', { mask });
+      await transport.request('gba-kit/stepFrame');
+      await transport.request('gba-kit/stepFrame');
+      await transport.request('gba-kit/capture', {});
+    }
+    const [first, second] = (await transport.request('gba-kit/captures')).captures.map((c) => c.id) as [number, number];
+
+    // a value belongs to the capture that saw it, so two of them name the run rather than
+    // a state of the machine that has since moved on
+    const one = await transport.request('gba-kit/diffFilter', {
+      query: { values: [{ capture: first, value: 6 }] },
+      size: 2,
+    });
+    expect(one.rows.map((r) => r.address)).toContain(gKeys);
+
+    const both = await transport.request('gba-kit/diffFilter', {
+      query: {
+        values: [
+          { capture: first, value: 6 },
+          { capture: second, value: 1 },
+        ],
+      },
+      size: 2,
+    });
+    expect(both.total).toBeLessThanOrEqual(one.total);
+    expect(both.rows.map((r) => r.address)).toContain(gKeys);
+
+    await expect(
+      transport.request('gba-kit/diffFilter', { query: { values: [{ capture: 999, value: 1 }] }, size: 2 }),
+    ).rejects.toThrow(/no capture 999/);
+  });
+
+  it('adopts a save state as a capture, and mutes ranges it found by running', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session);
+    await transport.request('gba-kit/stepFrame');
+    await transport.request('gba-kit/saveState', { name: 'here' });
+
+    const adopted = await transport.request('gba-kit/capture', { state: 'here', tag: 'from a state' });
+    expect(adopted.capture).toMatchObject({ from: 'state', tag: 'from a state', frame: 1 });
+    await expect(transport.request('gba-kit/capture', { state: 'nowhere' })).rejects.toThrow(/no such state/);
+
+    const noise = await transport.request('gba-kit/discoverNoise', { frames: 4 });
+    expect(noise.frames).toBe(4);
+    expect(noise.churnBytes).toBeGreaterThan(0);
+    expect(noise.mutes.some((m) => m.source === 'idle' && m.bytes > 0)).toBe(true);
+    // a mute is a range, never a name, and it is always reversible
+    const idle = noise.mutes.find((m) => m.source === 'idle')!;
+    expect(idle.ranges.every((r) => r.hi > r.lo)).toBe(true);
+    const off = await transport.request('gba-kit/setMute', { id: idle.id, enabled: false });
+    expect(off.mutes.find((m) => m.id === idle.id)!.enabled).toBe(false);
+    const mine = await transport.request('gba-kit/setMute', { ranges: [{ lo: 0x03000000, hi: 0x03000010 }] });
+    expect(mine.mutes.find((m) => m.source === 'user')?.bytes).toBe(16);
+    const gone = await transport.request('gba-kit/setMute', { id: idle.id, remove: true });
+    expect(gone.mutes.some((m) => m.id === idle.id)).toBe(false);
+  });
+
+  it('watches an address for writes without taking the list from whoever set the others', async () => {
+    const { session } = await boot();
+    const transport = createSessionTransport(session);
+    const counter = session.program.symbolAddress('g_frame')!;
+    const body = await transport.request('gba-kit/breakOnWrite', { address: counter, size: 4 });
+    expect(body).toMatchObject({ watched: 1, address: counter, length: 4, verified: true });
+    await expect(transport.request('gba-kit/breakOnWrite', { address: -1 })).rejects.toThrow(/not an address/);
+    // a watch on memory nothing writes would verify and never fire, which reads as proof
+    await expect(transport.request('gba-kit/breakOnWrite', { address: 0x08000100 })).rejects.toThrow(
+      /is rom, which nothing writes/,
+    );
+  });
+
   it('imports and exports symbol files, telling label listeners, and reports a failed save', async () => {
     const writes: string[] = [];
     let failWrites = false;
