@@ -842,6 +842,7 @@ export class ScriptingEngine {
   write8(address: number, value: number): void {
     this.#requireWritable(address, 1, 'write8');
     this.#gba.bus.write8(address, value & 0xff);
+    this.#gba.bus.refetchOverwrittenCode(address, 1);
   }
 
   /**
@@ -856,6 +857,7 @@ export class ScriptingEngine {
     this.#requireWritable(address, 2, 'write16');
     this.#requireAligned(address, 2, 'write16', 'write');
     this.#gba.bus.write16(address, value & 0xffff);
+    this.#gba.bus.refetchOverwrittenCode(address, 2);
   }
 
   /** Write a word. **Throws** on a misaligned address — see {@link write16}. */
@@ -863,6 +865,7 @@ export class ScriptingEngine {
     this.#requireWritable(address, 4, 'write32');
     this.#requireAligned(address, 4, 'write32', 'write');
     this.#gba.bus.write32(address, value >>> 0);
+    this.#gba.bus.refetchOverwrittenCode(address, 4);
   }
 
   /**
@@ -1064,6 +1067,7 @@ export class ScriptingEngine {
     for (let i = 0; i < size; i++) {
       bus.write8(address + i, (value >>> (8 * i)) & 0xff);
     }
+    bus.refetchOverwrittenCode(address, size);
   }
 
   /** Throw unless `size` bytes at `address` are backed by memory a write can reach. */

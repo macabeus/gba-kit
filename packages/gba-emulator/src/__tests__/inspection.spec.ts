@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { Gba } from '../gba.js';
+import { ScriptingEngine, type ScriptingHost } from '../scripting.js';
 import { GbaSystemBus } from '../system-bus.js';
 
 describe('GbaSystemBus.peek', () => {
@@ -125,6 +126,51 @@ describe('GbaSystemBus.poke over code the CPU has fetched', () => {
     gba.armCpu.step();
     gba.armCpu.step();
     expect(gba.armCpu.registers[0]).toBe(1);
+  });
+});
+
+describe('ScriptingEngine writes over code the CPU has fetched', () => {
+  // A script writes from outside the machine, like a debugger: the code it edits is what runs next,
+  // although its writes take the hardware's store rules.
+  const CODE = 0x03000100;
+  const host: ScriptingHost = {
+    writeScreenshot: async () => {},
+    writeMemorySnapshot: async () => {},
+    writeSaveState: async () => {},
+    readSaveState: async () => {
+      throw new Error('not used');
+    },
+    log: () => {},
+  };
+
+  /** A machine stopped after `movs r0, #1`, with `movs r0, #2` at PC and `movs r0, #3` fetched after it. */
+  function stoppedInThumb(): { gba: Gba; engine: ScriptingEngine } {
+    const gba = new Gba();
+    [0x2001, 0x2002, 0x2003, 0xe7fe /* b . */].forEach((op, i) => gba.bus.write16(CODE + 2 * i, op));
+    gba.armCpu.cpsr = 0x3f; // System mode, Thumb
+    gba.armCpu.registers[15] = CODE;
+    gba.armCpu.step();
+    return { gba, engine: new ScriptingEngine(gba, host) };
+  }
+
+  it.each([
+    ['write8', (engine: ScriptingEngine) => engine.write8(CODE + 2, 0x42)],
+    ['write16', (engine: ScriptingEngine) => engine.write16(CODE + 2, 0x2042)],
+    ['writeBytes', (engine: ScriptingEngine) => engine.writeBytes(CODE + 2, 2, 0x2042)],
+  ])('runs the opcode %s puts at PC', (_api, write) => {
+    const { gba, engine } = stoppedInThumb();
+    write(engine); // movs r0, #0x42
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(0x42);
+  });
+
+  it('runs the opcode write32 puts after PC', () => {
+    const { gba, engine } = stoppedInThumb();
+    engine.write32(CODE + 4, 0x20442043); // movs r0, #0x43; movs r0, #0x44
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(2);
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(0x43);
   });
 });
 

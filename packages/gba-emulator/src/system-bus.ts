@@ -674,13 +674,9 @@ export class GbaSystemBus implements MemoryBus {
    * duplicated; a hex editor means the byte it typed) and without notifying data
    * watchpoints. MMIO goes through the bus so the register's side effects apply.
    * BIOS, ROM and EEPROM are refused. Returns how many leading bytes were written.
-   * A write to the opcodes the CPU has already fetched, the one at PC and the one
-   * after it, has the CPU fetch them again, so the edited code is what runs.
+   * The edited code is what runs next: see {@link refetchOverwrittenCode}.
    */
   poke(address: number, bytes: Uint8Array): number {
-    const cpu = this.#cpu;
-    const width = cpu.cpsr & CPSR_THUMB ? 2 : 4;
-    const fetched = this.#canonicalAddress((cpu.registers[15]! & -width) >>> 0);
     let written = 0;
     for (let i = 0; i < bytes.length; i++) {
       const addr = (address + i) >>> 0;
@@ -726,11 +722,28 @@ export class GbaSystemBus implements MemoryBus {
           return written;
       }
       written++;
-      if ((this.#canonicalAddress(addr) - fetched) >>> 0 < 2 * width) {
+    }
+    this.refetchOverwrittenCode(address, written);
+    return written;
+  }
+
+  /**
+   * After a write from outside the machine (a debugger's or a script's) over `length`
+   * bytes at `address`: when one of them lands, through any mirror, on the opcodes the
+   * CPU has fetched, the one at PC and the one after it, the CPU fetches them again, so
+   * the edited code is what runs. A store the program makes keeps the fetched opcodes,
+   * as on hardware, and does not call this.
+   */
+  refetchOverwrittenCode(address: number, length: number): void {
+    const cpu = this.#cpu;
+    const width = cpu.cpsr & CPSR_THUMB ? 2 : 4;
+    const fetched = this.#canonicalAddress((cpu.registers[15]! & -width) >>> 0);
+    for (let i = 0; i < length; i++) {
+      if ((this.#canonicalAddress((address + i) >>> 0) - fetched) >>> 0 < 2 * width) {
         cpu.flushPipeline();
+        return;
       }
     }
-    return written;
   }
 
   /**
