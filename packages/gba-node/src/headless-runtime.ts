@@ -60,24 +60,9 @@ export class HeadlessRuntime {
 
     const gba = new Gba();
 
-    // Load ROM
+    // Load ROM. The machine starts in the state the BIOS's boot code leaves.
     const romData = await fs.readFile(options.romPath);
     gba.loadRom(new Uint8Array(romData));
-
-    // Set up initial CPU state (post-BIOS boot)
-    const cpu = gba.armCpu;
-
-    cpu.switchMode(0x12); // IRQ mode
-    cpu.registers[13] = 0x03007fa0;
-
-    cpu.switchMode(0x13); // SVC mode
-    cpu.registers[13] = 0x03007fe0;
-
-    cpu.switchMode(0x1f); // System mode
-    cpu.registers[13] = 0x03007f00;
-
-    cpu.cpsr = 0x1f; // SYS mode, IRQs enabled, ARM state
-    cpu.registers[15] = 0x08000000; // ROM entry point
 
     // Load save state if provided
     if (options.loadSavePath) {

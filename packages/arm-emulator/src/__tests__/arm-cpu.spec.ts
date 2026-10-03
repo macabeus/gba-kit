@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ArmCpu, MODE_FIQ, MODE_IRQ, MODE_SVC, MODE_SYS } from '../arm-cpu.js';
+import { ArmCpu, MODE_FIQ, MODE_IRQ, MODE_SVC, MODE_SYS, MODE_UND, MODE_USR } from '../arm-cpu.js';
 import { GbaMemory } from '../memory.js';
 import { LR, PC, SENTINEL_ADDR, SP } from '../types.js';
 
@@ -1090,6 +1090,40 @@ describe('ArmCpu', () => {
     });
   });
 
+  describe('SWI exception', () => {
+    // GBATEK "ARM CPU Exceptions": SWI enters SVC mode with R14_svc = the address after the SWI,
+    // SPSR_svc = the old CPSR, I set, T clear, and PC = 0x08.
+    const takeException = (): number | null => null;
+
+    it('a handler that returns null leaves an ARM SWI to the vector', () => {
+      const mem = new GbaMemory();
+      const cpu = new ArmCpu(mem, { swiHandler: takeException });
+      loadArmInstructions(mem, 0x08000000, [0xef050000 /* swi 0x50000 */]);
+      cpu.cpsr = MODE_SYS | (1 << 29); // C set: the SPSR keeps the flags
+      cpu.registers[PC] = 0x08000000;
+      const cycles = cpu.step();
+      expect(cpu.getMode()).toBe(MODE_SVC);
+      expect(cpu.registers[PC]).toBe(0x08);
+      expect(cpu.registers[LR]).toBe(0x08000004);
+      expect(cpu.getSPSR()).toBe(MODE_SYS | (1 << 29));
+      expect(cpu.irqDisabled()).toBe(true);
+      expect(cycles).toBe(3); // 2S+1N, like a branch
+    });
+
+    it('a Thumb SWI enters ARM state with the return address after the halfword', () => {
+      const mem = new GbaMemory();
+      const cpu = new ArmCpu(mem, { swiHandler: takeException });
+      loadThumbInstructions(mem, 0x08000000, [0xdf05 /* swi 5 */]);
+      cpu.cpsr = MODE_SYS | (1 << 5);
+      cpu.registers[PC] = 0x08000000;
+      cpu.step();
+      expect(cpu.getT()).toBe(false);
+      expect(cpu.registers[PC]).toBe(0x08);
+      expect(cpu.registers[LR]).toBe(0x08000002);
+      expect(cpu.getSPSR()).toBe(MODE_SYS | (1 << 5));
+    });
+  });
+
   describe('Thumb mode execution', () => {
     it('runs basic Thumb instructions', () => {
       const { cpu } = setupThumbCpu([
@@ -1216,6 +1250,583 @@ describe('ArmCpu', () => {
       cpu.step();
       expect(cpu.registers[1]).toBe(DATA + 4); // one transfer, not 0x40
       expect(mem.read32(DATA)).toBe(DATA); // old base, per GBATEK's "Rb is FIRST entry" rule
+    });
+  });
+
+  describe('prefetch pipeline', () => {
+    // GBATEK "ARM CPU Overview": while the instruction at $ executes, $+4 is decoded and $+8 is
+    // fetched (Thumb: $+2 and $+4), so code stored at either runs only once the pipeline refills.
+    // mGBA keeps the same two words in cpu->prefetch[0..1]; jsmolka nes.gba test 1.
+    const MOV_R0_5 = 0xe3a00005;
+    const CODE = 0x03000000;
+
+    it('executes the instructions already in the pipeline, not the ones stored over them', () => {
+      const { cpu, mem } = setupArmCpu(
+        [
+          0xe58f1000, // str r1, [pc]        ; [$+8] = mov r0, #5
+          0xe58f1000, // str r1, [pc]        ; [$+8] = mov r0, #5
+          armMovImm(0, 1), // overwritten while in the pipeline
+          armMovImm(2, 1), // overwritten while in the pipeline
+          armBx(LR),
+        ],
+        CODE,
+      );
+      cpu.registers[1] = MOV_R0_5;
+      cpu.run(100);
+      expect(cpu.registers[0]).toBe(1);
+      expect(cpu.registers[2]).toBe(1);
+      expect(mem.read32(CODE + 8)).toBe(MOV_R0_5);
+      expect(mem.read32(CODE + 12)).toBe(MOV_R0_5);
+    });
+
+    it('executes a store three instructions ahead, which is not fetched yet', () => {
+      const { cpu } = setupArmCpu(
+        [
+          0xe58f1004, // str r1, [pc, #4]    ; [$+12] = mov r0, #5
+          armMovImm(0, 1),
+          armMovImm(2, 2),
+          armMovImm(0, 3), // replaced before it is fetched
+          armBx(LR),
+        ],
+        CODE,
+      );
+      cpu.registers[1] = MOV_R0_5;
+      cpu.run(100);
+      expect(cpu.registers[0]).toBe(5);
+    });
+
+    it('refills on a branch, even one to the next instruction', () => {
+      const { cpu } = setupArmCpu(
+        [
+          0xe58f1000, // str r1, [pc]        ; [$+8] = mov r0, #5
+          armB(-1), // b $+4: the next instruction, refetched
+          armMovImm(0, 1),
+          armBx(LR),
+        ],
+        CODE,
+      );
+      cpu.registers[1] = MOV_R0_5;
+      cpu.run(100);
+      expect(cpu.registers[0]).toBe(5);
+    });
+
+    it('refills when the PC is set from outside the CPU', () => {
+      const { cpu, mem } = setupArmCpu([armMovImm(0, 1), armBx(LR)], CODE);
+      cpu.step();
+      mem.write32(CODE, MOV_R0_5);
+      cpu.registers[PC] = CODE;
+      cpu.step();
+      expect(cpu.registers[0]).toBe(5);
+    });
+
+    it('models the Thumb pipeline as two halfwords ahead', () => {
+      const { cpu } = setupThumbCpu(
+        [
+          0x8019, // strh r1, [r3]          ; r3 = $+4
+          0x46c0, // nop
+          0x2001, // movs r0, #1            ; overwritten while in the pipeline
+          0x4770, // bx lr
+        ],
+        CODE,
+      );
+      cpu.registers[1] = 0x2005; // movs r0, #5
+      cpu.registers[3] = CODE + 4;
+      cpu.run(100);
+      expect(cpu.registers[0]).toBe(1);
+    });
+
+    it('refills after an HLE software interrupt, as the BIOS return does', () => {
+      const mem = new GbaMemory();
+      const cpu = new ArmCpu(mem, {
+        // A BIOS call that writes the code it returns to (CpuSet over the caller, say).
+        swiHandler: (c) => {
+          mem.write32(c.registers[PC]!, MOV_R0_5);
+          return 0;
+        },
+      });
+      loadArmInstructions(mem, CODE, [0xef010000 /* swi 0x10000 */, armMovImm(0, 1), armBx(LR)]);
+      cpu.cpsr = MODE_SYS;
+      cpu.registers[PC] = CODE;
+      cpu.registers[LR] = SENTINEL_ADDR;
+      cpu.run(100);
+      expect(cpu.registers[0]).toBe(5);
+    });
+
+    it('exposes the decoded and fetched opcodes while an instruction executes', () => {
+      const words = [armMovImm(0, 1), armMovImm(1, 2), armMovImm(2, 3), armMovImm(3, 4)];
+      const { cpu } = setupArmCpu(words, CODE);
+      const seen: number[][] = [];
+      cpu.setDebugHooks({
+        onInstructionPost: () => seen.push([cpu.decodedOpcode, cpu.prefetchedOpcode]),
+      });
+      cpu.step();
+      // While the instruction at $ ran, [$+4] was decoded and [$+8] fetched.
+      expect(seen[0]).toEqual([words[1]! >>> 0, words[2]! >>> 0]);
+    });
+
+    it('keeps the pipeline across a refused instruction (a debugger stop)', () => {
+      const { cpu } = setupArmCpu([0xe58f1000 /* str r1, [pc] */, armMovImm(2, 2), armMovImm(0, 1), armBx(LR)], CODE);
+      cpu.registers[1] = MOV_R0_5;
+      let refuse = true;
+      cpu.setDebugHooks({
+        onInstructionPre: (address) => {
+          if (address === CODE + 8 && refuse) {
+            refuse = false;
+            return 'break';
+          }
+          return 'continue';
+        },
+      });
+      cpu.run(100);
+      expect(cpu.registers[PC]).toBe(CODE + 8);
+      cpu.run(100);
+      expect(cpu.registers[0]).toBe(1);
+    });
+
+    it('carries the pipeline through a snapshot; an older snapshot refills from memory', () => {
+      const program = [0xe58f1000 /* str r1, [pc] */, armMovImm(2, 2), armMovImm(0, 1), armBx(LR)];
+      const { cpu, mem } = setupArmCpu(program, CODE);
+      cpu.registers[1] = MOV_R0_5;
+      cpu.step(); // the store: [CODE+8] is now mov r0, #5, the pipeline still holds mov r0, #1
+      const snap = cpu.serialize();
+      expect(Array.from(snap.pipeline!)).toEqual([CODE + 4, program[1]! >>> 0, program[2]! >>> 0, 0]);
+
+      const restored = new ArmCpu(mem);
+      restored.deserialize(snap);
+      restored.run(100);
+      expect(restored.registers[0]).toBe(1);
+
+      const legacy = { ...snap };
+      delete legacy.pipeline;
+      const fromLegacy = new ArmCpu(mem);
+      fromLegacy.deserialize(legacy);
+      fromLegacy.run(100);
+      expect(fromLegacy.registers[0]).toBe(5);
+    });
+
+    it('refetches from memory after flushPipeline, at no cost', () => {
+      const program = [0xe58f1000 /* str r1, [pc] */, armMovImm(2, 2), armMovImm(0, 1), armBx(LR)];
+      const kept = setupArmCpu(program, CODE);
+      const flushed = setupArmCpu(program, CODE);
+      for (const { cpu } of [kept, flushed]) {
+        cpu.registers[1] = MOV_R0_5;
+        cpu.step(); // the store: [CODE+8] is now mov r0, #5
+      }
+      flushed.cpu.flushPipeline(); // what a debugger's write over the fetched opcodes does
+      const cycles = [kept.cpu.step(), flushed.cpu.step()];
+      expect(cycles[1]).toBe(cycles[0]);
+      kept.cpu.run(100);
+      flushed.cpu.run(100);
+      expect(kept.cpu.registers[0]).toBe(1);
+      expect(flushed.cpu.registers[0]).toBe(5);
+    });
+
+    it('fills the pipeline through the bus fetch path, not through loads', () => {
+      class CountingMemory extends GbaMemory {
+        loads = 0;
+        fetches = 0;
+        override read32(address: number): number {
+          this.loads++;
+          return super.read32(address);
+        }
+        override fetch32(address: number): number {
+          this.fetches++;
+          return super.read32(address);
+        }
+      }
+      const mem = new CountingMemory();
+      const cpu = new ArmCpu(mem);
+      loadArmInstructions(mem, CODE, [0xe59f1004 /* ldr r1, [pc, #4] */, armMovImm(0, 1), armBx(LR), 0x12345678]);
+      cpu.cpsr = MODE_SYS;
+      cpu.registers[PC] = CODE;
+      cpu.registers[LR] = SENTINEL_ADDR;
+      cpu.run(100);
+      expect(cpu.registers[1]).toBe(0x12345678);
+      expect(mem.loads).toBe(1); // the ldr
+      expect(mem.fetches).toBeGreaterThan(3);
+    });
+  });
+
+  describe('stores of R15', () => {
+    // GBATEK "ARM.9"/"ARM.10"/"ARM.11": a stored R15 is the instruction address + 12. mGBA stores
+    // gprs[PC] (+8) plus WORD_SIZE_ARM. jsmolka arm.gba tests 356 and 510.
+    const DATA = 0x02000100;
+    const CODE = 0x08000000;
+
+    it('STR stores the instruction address + 12', () => {
+      const { cpu, mem } = setupArmCpu([0xe580f000 /* str pc, [r0] */, armBx(LR)], CODE);
+      cpu.registers[0] = DATA;
+      cpu.run(10);
+      expect(mem.read32(DATA)).toBe(CODE + 12);
+    });
+
+    it('STRH stores the low half of the instruction address + 12', () => {
+      const { cpu, mem } = setupArmCpu([0xe1c0f0b0 /* strh pc, [r0] */, armBx(LR)], CODE);
+      cpu.registers[0] = DATA;
+      cpu.run(10);
+      expect(mem.read16(DATA)).toBe((CODE + 12) & 0xffff);
+    });
+
+    it('STM stores the instruction address + 12', () => {
+      const { cpu, mem } = setupArmCpu([0xe8808000 /* stmia r0, {pc} */, armBx(LR)], CODE);
+      cpu.registers[0] = DATA;
+      cpu.run(10);
+      expect(mem.read32(DATA)).toBe(CODE + 12);
+    });
+  });
+
+  describe('load with writeback into its own base', () => {
+    // On ARM7TDMI the base writeback happens before the loaded data lands, so the data wins
+    // (mGBA ADDR_MODE_2_WRITEBACK_PRE_LOAD; jsmolka arm.gba tests 360/361, 412/413).
+    const DATA = 0x02000100;
+
+    it.each([
+      ['ldr r0, [r0, #4]!', 0xe5b00004, DATA + 4],
+      ['ldr r0, [r0], #4', 0xe4900004, DATA],
+      ['ldrh r0, [r0, #2]!', 0xe1f000b2, DATA + 2],
+    ])('%s keeps the loaded value', (_name, instr, loadedFrom) => {
+      const { cpu, mem } = setupArmCpu([instr, armBx(LR)]);
+      mem.write32(DATA, 0x11112222);
+      mem.write32(DATA + 4, 0x33334444);
+      cpu.registers[0] = DATA;
+      cpu.run(10);
+      const expected = instr === 0xe1f000b2 ? mem.read16(loadedFrom) : mem.read32(loadedFrom);
+      expect(cpu.registers[0]).toBe(expected);
+    });
+  });
+
+  describe('misaligned loads over a bus that only aligns', () => {
+    // MemoryBus returns aligned data; the CPU rotates. GBATEK "ARM.9", "THUMB.8", "THUMB.10";
+    // mGBA LOAD_16/LOAD_32 ROR. jsmolka thumb.gba test 211.
+    const BASE = 0x02000100;
+    function withBytes(cpu: ArmCpu, mem: GbaMemory): void {
+      mem.loadBytes(BASE, Uint8Array.of(0x11, 0x22, 0x33, 0x44));
+      cpu.registers[0] = BASE;
+    }
+
+    it('Thumb LDRH (register offset) rotates an odd halfword', () => {
+      const { cpu, mem } = setupThumbCpu([0x5a81 /* ldrh r1, [r0, r2] */, 0x4770]);
+      withBytes(cpu, mem);
+      cpu.registers[2] = 1;
+      cpu.run(10);
+      expect(cpu.registers[1]).toBe(0x11000022);
+    });
+
+    it('Thumb LDRH (immediate offset) rotates an odd halfword', () => {
+      const { cpu, mem } = setupThumbCpu([0x8841 /* ldrh r1, [r0, #2] */, 0x4770]);
+      withBytes(cpu, mem);
+      cpu.registers[0] = BASE + 1;
+      cpu.run(10);
+      expect(cpu.registers[1]).toBe(0x33000044);
+    });
+
+    it('Thumb LDR [sp] rotates a misaligned word', () => {
+      const { cpu, mem } = setupThumbCpu([0x9900 /* ldr r1, [sp, #0] */, 0x4770]);
+      withBytes(cpu, mem);
+      cpu.registers[SP] = BASE + 1;
+      cpu.run(10);
+      expect(cpu.registers[1]).toBe(0x11443322);
+    });
+
+    it('Thumb and ARM LDRSH at an odd address sign-extend the addressed byte', () => {
+      const thumb = setupThumbCpu([0x5e81 /* ldrsh r1, [r0, r2] */, 0x4770]);
+      thumb.mem.loadBytes(BASE, Uint8Array.of(0x11, 0x80));
+      thumb.cpu.registers[0] = BASE;
+      thumb.cpu.registers[2] = 1;
+      thumb.cpu.run(10);
+      expect(thumb.cpu.registers[1]).toBe(0xffffff80);
+
+      const arm = setupArmCpu([0xe1d010f0 /* ldrsh r1, [r0] */, armBx(LR)]);
+      arm.mem.loadBytes(BASE, Uint8Array.of(0x11, 0x22));
+      arm.cpu.registers[0] = BASE + 1;
+      arm.cpu.run(10);
+      expect(arm.cpu.registers[1]).toBe(0x22);
+    });
+
+    it('ARM LDRH and SWP rotate like the loads they are', () => {
+      const ldrh = setupArmCpu([0xe1d010b0 /* ldrh r1, [r0] */, armBx(LR)]);
+      withBytes(ldrh.cpu, ldrh.mem);
+      ldrh.cpu.registers[0] = BASE + 3;
+      ldrh.cpu.run(10);
+      expect(ldrh.cpu.registers[1]).toBe(0x33000044);
+
+      const swp = setupArmCpu([0xe1001092 /* swp r1, r2, [r0] */, armBx(LR)]);
+      withBytes(swp.cpu, swp.mem);
+      swp.cpu.registers[0] = BASE + 2;
+      swp.cpu.registers[2] = 0xcafef00d;
+      swp.cpu.run(10);
+      expect(swp.cpu.registers[1]).toBe(0x22114433);
+      expect(swp.mem.read32(BASE)).toBe(0xcafef00d);
+    });
+
+    it('passes stores the address they name, which the bus aligns', () => {
+      class RecordingMemory extends GbaMemory {
+        readonly stores: [number, number][] = [];
+        override write16(address: number, value: number): void {
+          this.stores.push([2, address]);
+          super.write16(address, value);
+        }
+        override write32(address: number, value: number): void {
+          this.stores.push([4, address]);
+          super.write32(address, value);
+        }
+      }
+      const mem = new RecordingMemory();
+      const cpu = new ArmCpu(mem);
+      loadArmInstructions(mem, 0x08000000, [0xe5801001 /* str r1, [r0, #1] */, 0xe1c010b1 /* strh r1, [r0, #1] */]);
+      cpu.cpsr = MODE_SYS;
+      cpu.registers[PC] = 0x08000000;
+      cpu.registers[0] = BASE;
+      cpu.registers[1] = 0xaabbccdd;
+      cpu.step();
+      cpu.step();
+      expect(mem.stores).toEqual([
+        [4, BASE + 1],
+        [2, BASE + 1],
+      ]);
+      // Both land on the aligned addresses the 32-bit memory decodes.
+      expect(mem.read32(BASE)).toBe(0xaabbccdd);
+      expect(mem.read32(BASE + 4)).toBe(0);
+    });
+  });
+
+  describe('block transfer edge cases', () => {
+    // GBATEK "ARM.11 Block Data Transfer", "THUMB.14", "THUMB.15"; jsmolka arm.gba 510-532.
+    const BASE = 0x02000100;
+
+    it('STM^ stores the User bank from FIQ mode', () => {
+      const { cpu, mem } = setupArmCpu([0xe8c00100 /* stmia r0, {r8}^ */, armBx(LR)]);
+      cpu.registers[8] = 0xaaaa;
+      cpu.switchMode(MODE_FIQ);
+      cpu.registers[8] = 0xbbbb;
+      cpu.registers[0] = BASE;
+      cpu.registers[LR] = SENTINEL_ADDR;
+      cpu.run(10);
+      expect(mem.read32(BASE)).toBe(0xaaaa);
+    });
+
+    it('LDM^ without R15 loads the User bank from IRQ mode', () => {
+      const { cpu, mem } = setupArmCpu([0xe8d02000 /* ldmia r0, {sp}^ */, armBx(LR)]);
+      cpu.switchMode(MODE_IRQ);
+      cpu.registers[SP] = 0x2222;
+      cpu.registers[LR] = SENTINEL_ADDR;
+      cpu.registers[0] = BASE;
+      mem.write32(BASE, 0x1234);
+      cpu.run(10);
+      expect(cpu.registers[SP]).toBe(0x2222);
+      expect(cpu.getBankedSP(MODE_SYS)).toBe(0x1234);
+    });
+
+    it('LDM {pc}^ writes the base back in its own mode and returns to a Thumb halfword', () => {
+      const { cpu, mem } = setupArmCpu([0xe8fd8001 /* ldmfd sp!, {r0, pc}^ */]);
+      cpu.registers[SP] = 0x03007f00; // SYS stack, which the return must leave alone
+      cpu.switchMode(MODE_IRQ);
+      cpu.registers[SP] = 0x03007000;
+      cpu.setSPSR(MODE_SYS | (1 << 5));
+      mem.write32(0x03007000, 0x77);
+      mem.write32(0x03007004, 0x08000102);
+      cpu.step();
+      expect(cpu.getMode()).toBe(MODE_SYS);
+      expect(cpu.getT()).toBe(true);
+      expect(cpu.registers[PC]).toBe(0x08000102);
+      expect(cpu.registers[0]).toBe(0x77);
+      expect(cpu.registers[SP]).toBe(0x03007f00);
+      expect(cpu.getBankedSP(MODE_IRQ)).toBe(0x03007008);
+    });
+
+    it.each([
+      ['stmia r1!, {r0, r1}', 0xe8a10003, BASE + 4, BASE + 8],
+      ['stmdb r1!, {r0, r1}', 0xe9210003, BASE - 4, BASE - 8],
+      ['stmia r1!, {r1, r2} (base first)', 0xe8a10006, BASE, BASE],
+    ])('%s stores the new base unless the base is the first entry', (_name, instr, slot, stored) => {
+      const { cpu, mem } = setupArmCpu([instr, armBx(LR)]);
+      cpu.registers[1] = BASE;
+      cpu.run(10);
+      expect(mem.read32(slot)).toBe(stored);
+    });
+
+    it('Thumb STMIA stores the new base when the base is not first', () => {
+      const { cpu, mem } = setupThumbCpu([0xc103 /* stmia r1!, {r0, r1} */, 0x4770]);
+      cpu.registers[1] = BASE;
+      cpu.run(10);
+      expect(mem.read32(BASE + 4)).toBe(BASE + 8);
+      expect(cpu.registers[1]).toBe(BASE + 8);
+    });
+
+    it('LDM with the base in the list keeps the loaded base', () => {
+      const { cpu, mem } = setupArmCpu([0xe8b10003 /* ldmia r1!, {r0, r1} */, armBx(LR)]);
+      cpu.registers[1] = BASE;
+      mem.write32(BASE + 4, 0xabcd);
+      cpu.run(10);
+      expect(cpu.registers[1]).toBe(0xabcd);
+    });
+
+    it.each([
+      ['stmia', 0xe8a00000, BASE, BASE + 0x40],
+      ['stmib', 0xe9a00000, BASE + 4, BASE + 0x40],
+      ['stmda', 0xe8200000, BASE - 0x3c, BASE - 0x40],
+      ['stmdb', 0xe9200000, BASE - 0x40, BASE - 0x40],
+    ])('ARM %s with an empty list stores R15 and moves the base by 0x40', (_name, instr, slot, newBase) => {
+      const { cpu, mem } = setupArmCpu([instr, armBx(LR)]);
+      cpu.registers[0] = BASE;
+      cpu.step();
+      expect(mem.read32(slot)).toBe(0x08000000 + 12);
+      expect(cpu.registers[0]).toBe(newBase);
+    });
+
+    it('ARM LDM with an empty list loads R15 and moves the base by 0x40', () => {
+      const { cpu, mem } = setupArmCpu([0xe8b00000 /* ldmia r0!, {} */]);
+      cpu.registers[0] = BASE;
+      mem.write32(BASE, 0x08000123);
+      cpu.step();
+      expect(cpu.registers[PC]).toBe(0x08000120);
+      expect(cpu.registers[0]).toBe(BASE + 0x40);
+    });
+
+    it('Thumb PUSH {} and POP {} transfer R15 and move SP by 0x40', () => {
+      const push = setupThumbCpu([0xb400]);
+      push.cpu.registers[SP] = BASE;
+      push.cpu.step();
+      expect(push.cpu.registers[SP]).toBe(BASE - 0x40);
+      expect(push.mem.read32(BASE - 0x40)).toBe(0x08000006);
+
+      const pop = setupThumbCpu([0xbc00]);
+      pop.cpu.registers[SP] = BASE;
+      pop.mem.write32(BASE, 0x08000201);
+      pop.cpu.step();
+      expect(pop.cpu.registers[PC]).toBe(0x08000200);
+      expect(pop.cpu.registers[SP]).toBe(BASE + 0x40);
+    });
+
+    it('Thumb PUSH stores below SP, lowest register lowest; POP reads them back', () => {
+      const { cpu, mem } = setupThumbCpu([0xb403 /* push {r0, r1} */, 0xbc0c /* pop {r2, r3} */, 0x4770]);
+      cpu.registers[SP] = BASE;
+      cpu.registers[0] = 0x10;
+      cpu.registers[1] = 0x11;
+      cpu.step();
+      expect(cpu.registers[SP]).toBe(BASE - 8);
+      expect(mem.read32(BASE - 8)).toBe(0x10);
+      expect(mem.read32(BASE - 4)).toBe(0x11);
+      cpu.step();
+      expect([cpu.registers[2], cpu.registers[3], cpu.registers[SP]]).toEqual([0x10, 0x11, BASE]);
+    });
+  });
+
+  describe('PSR rules', () => {
+    it('MSR in User mode writes the flags only', () => {
+      const { cpu } = setupArmCpu([0xe121f000 /* msr cpsr_c, r0 */, 0xe128f000 /* msr cpsr_f, r0 */]);
+      cpu.cpsr = MODE_USR;
+      cpu.registers[0] = 0xf00000d3;
+      cpu.step();
+      expect(cpu.cpsr).toBe(MODE_USR);
+      cpu.step();
+      expect(cpu.cpsr >>> 0).toBe((0xf0000000 | MODE_USR) >>> 0);
+    });
+
+    it('MSR leaves the bits ARMv4T does not implement at zero', () => {
+      const { cpu } = setupArmCpu([0xe12ff000 /* msr cpsr_fsxc, r0 */]);
+      cpu.registers[0] = 0xffffff1f;
+      cpu.step();
+      expect(cpu.cpsr >>> 0).toBe(0xf000001f);
+    });
+
+    it('MOVS pc, lr in a mode without an SPSR keeps the mode and sets the flags', () => {
+      const { cpu } = setupArmCpu([0xe1b0f00e /* movs pc, lr */]);
+      cpu.cpsr = MODE_SYS | (1 << 30); // Z set
+      cpu.registers[LR] = 0x08000100;
+      cpu.step();
+      expect(cpu.getMode()).toBe(MODE_SYS);
+      expect(cpu.getZ()).toBe(false);
+      expect(cpu.registers[PC]).toBe(0x08000100);
+    });
+  });
+
+  describe('reserved encodings', () => {
+    it('condition NV never executes', () => {
+      const { cpu } = setupArmCpu([0xf3a00005 /* movnv r0, #5 */, armBx(LR)]);
+      cpu.registers[0] = 1;
+      cpu.run(10);
+      expect(cpu.registers[0]).toBe(1);
+    });
+
+    it.each([
+      ['Thumb 0xDE10 (B with condition AL)', 0xde10],
+      ['Thumb 0xE800 (BLX suffix)', 0xe800],
+    ])('%s takes the undefined instruction trap', (_name, instr) => {
+      const { cpu } = setupThumbCpu([instr]);
+      cpu.step();
+      expect(cpu.getMode()).toBe(MODE_UND);
+      expect(cpu.getT()).toBe(false);
+      expect(cpu.registers[PC]).toBe(0x04);
+      expect(cpu.registers[LR]).toBe(0x08000002);
+    });
+
+    it('a coprocessor instruction takes the undefined instruction trap', () => {
+      const { cpu } = setupArmCpu([0xee000010 /* mcr p0, 0, r0, c0, c0, 0 */]);
+      cpu.step();
+      expect(cpu.getMode()).toBe(MODE_UND);
+      expect(cpu.registers[PC]).toBe(0x04);
+      expect(cpu.registers[LR]).toBe(0x08000004);
+    });
+  });
+
+  describe('PC alignment', () => {
+    it('a branch to ARM state aligns the PC to a word', () => {
+      const { cpu, mem } = setupThumbCpu([0x4700 /* bx r0 */]);
+      loadArmInstructions(mem, 0x08000100, [0xe1a0000f /* mov r0, pc */]);
+      cpu.registers[0] = 0x08000102;
+      cpu.step();
+      expect(cpu.getT()).toBe(false);
+      expect(cpu.registers[PC]).toBe(0x08000100);
+      cpu.step();
+      expect(cpu.registers[0]).toBe(0x08000108);
+    });
+  });
+
+  describe('multiply carry flag', () => {
+    // C after a flag-setting multiply comes from the Booth multiplier (multiply-carry.ts). The
+    // long-multiply rows are hardware results from mgba-suite src/multiply-long.c (CPSR >> 28).
+    it.each([
+      [0xffffffff, 0xffffffff, false, true],
+      [0x7fffffff, 0xffffffff, false, true],
+      [0x00000000, 0x80000000, true, false],
+      [0x80000000, 0x80000000, false, true],
+      [0xffffffff, 0x00000001, false, false],
+      [0xffffffff, 0x80000001, false, true],
+      [0x80000001, 0x7fffffff, true, true],
+    ])('SMULLS/UMULLS %s * %s: C = %s / %s', (rm, rs, smullC, umullC) => {
+      for (const [instr, expected] of [
+        [0xe0d10392 /* smulls r0, r1, r2, r3 */, smullC],
+        [0xe0910392 /* umulls r0, r1, r2, r3 */, umullC],
+      ] as const) {
+        const { cpu } = setupArmCpu([instr]);
+        cpu.registers[2] = rm;
+        cpu.registers[3] = rs;
+        cpu.step();
+        expect(cpu.getC()).toBe(expected);
+      }
+    });
+
+    it.each([
+      [0x12345678, 0x80000000, true], // all four cycles: the last Booth digit is negative
+      [0x12345678, 0xc0000000, false],
+      [0x89abcdef, 0x00000055, true], // one cycle
+      [0xdeadbeef, 0x0000beef, true],
+      [0x12345678, 0x00000055, false],
+    ])('MULS %s * %s: C = %s, in ARM and Thumb', (rm, rs, expected) => {
+      const arm = setupArmCpu([0xe0100392 /* muls r0, r2, r3 */]);
+      arm.cpu.cpsr = MODE_SYS | (expected ? 0 : 1 << 29);
+      arm.cpu.registers[2] = rm;
+      arm.cpu.registers[3] = rs;
+      arm.cpu.step();
+      expect(arm.cpu.getC()).toBe(expected);
+
+      const thumb = setupThumbCpu([0x4348 /* muls r0, r1 (r0 = r1 * r0) */]);
+      thumb.cpu.registers[1] = rm;
+      thumb.cpu.registers[0] = rs;
+      thumb.cpu.step();
+      expect(thumb.cpu.getC()).toBe(expected);
+      expect(thumb.cpu.registers[0]).toBe(Math.imul(rm, rs) >>> 0);
     });
   });
 });

@@ -39,9 +39,9 @@ export function serializeSnapshot(snap: GbaSnapshot): any {
       usrBankedR8to12: typedArrayToBase64(snap.cpu.usrBankedR8to12),
       spsr: typedArrayToBase64(snap.cpu.spsr),
       halted: snap.cpu.halted,
+      pipeline: snap.cpu.pipeline ? typedArrayToBase64(snap.cpu.pipeline) : undefined,
     },
     currentScanline: snap.currentScanline,
-    inIrqHandler: snap.inIrqHandler,
     scheduler: {
       currentCycle: snap.scheduler.currentCycle,
       events: snap.scheduler.events,
@@ -62,6 +62,9 @@ export function serializeSnapshot(snap: GbaSnapshot): any {
       waitcnt: snap.bus.waitcnt,
       postflg: snap.bus.postflg,
       lastBiosRead: snap.bus.lastBiosRead,
+      memoryControl: snap.bus.memoryControl,
+      prefetch: snap.bus.prefetch,
+      dmaPc: snap.bus.dmaPc,
       eeprom: {
         data: typedArrayToBase64(snap.bus.eeprom.data),
         addrBits: snap.bus.eeprom.addrBits,
@@ -74,15 +77,12 @@ export function serializeSnapshot(snap: GbaSnapshot): any {
         sendBuffer: snap.bus.eeprom.sendBuffer,
         sendPos: snap.bus.eeprom.sendPos,
       },
+      flash: snap.bus.flash ? { ...snap.bus.flash, data: typedArrayToBase64(snap.bus.flash.data) } : undefined,
     },
     ppu: {
+      ...snap.ppu,
       framebuffer: typedArrayToBase64(snap.ppu.framebuffer),
-      bg2RefX: snap.ppu.bg2RefX,
-      bg2RefY: snap.ppu.bg2RefY,
-      bg3RefX: snap.ppu.bg3RefX,
-      bg3RefY: snap.ppu.bg3RefY,
-      bg2RefLatched: snap.ppu.bg2RefLatched,
-      bg3RefLatched: snap.ppu.bg3RefLatched,
+      objLines: snap.ppu.objLines ? typedArrayToBase64(snap.ppu.objLines) : undefined,
     },
     apu: snap.apu
       ? {
@@ -116,9 +116,10 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
       usrBankedR8to12: base64ToUint32Array(data.cpu.usrBankedR8to12),
       spsr: base64ToUint32Array(data.cpu.spsr),
       halted: data.cpu.halted,
+      // Older states have no pipeline; the CPU refills it from memory at the next step.
+      pipeline: data.cpu.pipeline ? base64ToUint32Array(data.cpu.pipeline) : undefined,
     },
     currentScanline: data.currentScanline,
-    inIrqHandler: data.inIrqHandler,
     scheduler: data.scheduler,
     interrupts: data.interrupts,
     timers: data.timers,
@@ -136,6 +137,10 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
       waitcnt: data.bus.waitcnt,
       postflg: data.bus.postflg,
       lastBiosRead: data.bus.lastBiosRead,
+      memoryControl: data.bus.memoryControl,
+      // Older states have no prefetch unit; the bus restores it stopped and empty.
+      prefetch: data.bus.prefetch,
+      dmaPc: data.bus.dmaPc,
       eeprom: {
         data: base64ToUint8Array(data.bus.eeprom.data),
         addrBits: data.bus.eeprom.addrBits,
@@ -148,15 +153,14 @@ export function deserializeSnapshot(data: any): GbaSnapshot {
         sendBuffer: data.bus.eeprom.sendBuffer,
         sendPos: data.bus.eeprom.sendPos,
       },
+      // Older states have no flash chip; the bus restores a flash cartridge's bytes from `sram`.
+      flash: data.bus.flash ? { ...data.bus.flash, data: base64ToUint8Array(data.bus.flash.data) } : undefined,
     },
     ppu: {
+      ...data.ppu,
       framebuffer: base64ToUint32Array(data.ppu.framebuffer),
-      bg2RefX: data.ppu.bg2RefX,
-      bg2RefY: data.ppu.bg2RefY,
-      bg3RefX: data.ppu.bg3RefX,
-      bg3RefY: data.ppu.bg3RefY,
-      bg2RefLatched: data.ppu.bg2RefLatched,
-      bg3RefLatched: data.ppu.bg3RefLatched,
+      // Older states have no OBJ lines; the PPU rebuilds them.
+      objLines: data.ppu.objLines ? base64ToUint32Array(data.ppu.objLines) : undefined,
     },
     apu: data.apu
       ? {

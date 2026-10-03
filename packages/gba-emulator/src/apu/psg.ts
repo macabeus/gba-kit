@@ -3,11 +3,15 @@
  *
  * Channel 1: Square wave with sweep + envelope + duty cycle
  * Channel 2: Square wave with envelope + duty cycle
- * Channel 3: Programmable wave (4-bit samples from Wave RAM)
+ * Channel 3: Programmable wave (4-bit samples from two banks of Wave RAM)
  * Channel 4: Noise (LFSR) with envelope
  *
- * All channels run at CPU_FREQ / (period * prescaler). The frame sequencer
- * (512 Hz, derived from a 256 Hz base) clocks length, envelope, and sweep.
+ * Each register byte (the Game Boy's NRxy) is written on its own, with only its own effect.
+ * The channel timers count GBA CPU cycles (16.78 MHz, four times the Game Boy clock). The
+ * frame sequencer (512 Hz) clocks length, envelope, and sweep.
+ *
+ * References: GBATEK "GBA Sound Channel 1-4"; mGBA src/gb/audio.c (GBAudioRun, with
+ * timingFactor 4 on the GBA), NanoBoyAdvance src/nba/src/hw/apu/channel/.
  */
 import type {
   PsgChannel1Snapshot,
@@ -30,9 +34,32 @@ const DUTY_TABLE: ReadonlyArray<ReadonlyArray<number>> = [
 /** Channel 3 volume shift table: 0=mute, 1=100%, 2=50%, 3=25% */
 const WAVE_VOLUME_SHIFT = [4, 0, 1, 2] as const;
 
+// ─── Timer Periods ───────────────────────────────────────────────────
+
+/**
+ * CPU cycles per duty step of channels 1-2. GBATEK SOUND1CNT_X: "Frequency =
+ * 131072/(2048-n)Hz", and a period is 8 duty steps.
+ */
+function squareStepCycles(frequency: number): number {
+  return 16 * (2048 - frequency);
+}
+
+/** CPU cycles per wave RAM digit of channel 3. GBATEK SOUND3CNT_X: "Sample Rate; 2097152/(2048-n) Hz". */
+function waveStepCycles(frequency: number): number {
+  return 8 * (2048 - frequency);
+}
+
+/**
+ * CPU cycles per LFSR step of channel 4. GBATEK SOUND4CNT_H: "Frequency = 524288 Hz / r /
+ * 2^(s+1) ;For r=0 assume r=0.5 instead".
+ */
+function noiseStepCycles(divisorCode: number, clockShift: number): number {
+  return (divisorCode === 0 ? 32 : 64 * divisorCode) << clockShift;
+}
+
 // ─── Frame Sequencer ─────────────────────────────────────────────────
 
-/** Frame sequencer rate: 512 Hz (CPU_FREQ / 32768 cycles per step) */
+/** Frame sequencer rate: 512 Hz (32768 CPU cycles per step) */
 const FRAME_SEQUENCER_PERIOD = CPU_FREQ / 512;
 
 // ─── Channel 1: Square with Sweep ────────────────────────────────────
@@ -75,63 +102,62 @@ export class PsgChannel1 {
     return DUTY_TABLE[this.duty]![this.#dutyPosition]! * this.#volume;
   }
 
-  /** Write SOUND1CNT_L (sweep register, offset 0x60) */
+  /** Write NR10 (SOUND1CNT_L, 0x60): sweep */
   writeSweep(value: number): void {
     this.sweepShift = value & 0x7;
     this.sweepNegate = (value & 0x8) !== 0;
     this.sweepPeriod = (value >> 4) & 0x7;
   }
 
-  /** Read SOUND1CNT_L */
+  /** Read NR10 */
   readSweep(): number {
     return this.sweepShift | (this.sweepNegate ? 0x8 : 0) | (this.sweepPeriod << 4);
   }
 
-  /** Write SOUND1CNT_H (duty/envelope, offset 0x62) */
-  writeDutyEnvelope(value: number): void {
-    const length = value & 0x3f;
-    this.lengthCounter = 64 - length;
+  /** Write NR11 (0x62): length and duty */
+  writeLengthDuty(value: number): void {
+    this.lengthCounter = 64 - (value & 0x3f);
     this.duty = (value >> 6) & 0x3;
-    this.envelopePeriod = (value >> 8) & 0x7;
-    this.envelopeDirection = (value >> 11) & 1;
-    this.envelopeInitialVolume = (value >> 12) & 0xf;
-    this.#dacEnabled = (value & 0xf800) !== 0;
+  }
+
+  /** Read NR11: the duty is readable, the length is write-only */
+  readLengthDuty(): number {
+    return this.duty << 6;
+  }
+
+  /** Write NR12 (0x63): envelope. A zero volume with a decreasing envelope turns the DAC off. */
+  writeEnvelope(value: number): void {
+    this.envelopePeriod = value & 0x7;
+    this.envelopeDirection = (value >> 3) & 1;
+    this.envelopeInitialVolume = (value >> 4) & 0xf;
+    this.#dacEnabled = (value & 0xf8) !== 0;
     if (!this.#dacEnabled) {
       this.enabled = false;
     }
   }
 
-  /** Read SOUND1CNT_H */
-  readDutyEnvelope(): number {
-    return (
-      (this.duty << 6) |
-      (this.envelopePeriod << 8) |
-      (this.envelopeDirection << 11) |
-      (this.envelopeInitialVolume << 12)
-    );
+  /** Read NR12 */
+  readEnvelope(): number {
+    return this.envelopePeriod | (this.envelopeDirection << 3) | (this.envelopeInitialVolume << 4);
   }
 
-  /** Write SOUND1CNT_X (frequency/control, offset 0x64) */
-  writeFreqControl(value: number): void {
+  /** Write NR13 (0x64): frequency bits 0-7 */
+  writeFrequencyLow(value: number): void {
     this.frequency = (this.frequency & 0x700) | (value & 0xff);
-    if (value & 0xff00) {
-      this.frequency = (this.frequency & 0xff) | ((value & 0x700) >> 0);
-      // bit 8-10 of the 16-bit value are freq bits 8-10
-      this.frequency = value & 0x7ff;
-      this.lengthEnabled = (value & (1 << 14)) !== 0;
+  }
 
-      if (value & (1 << 15)) {
-        this.#trigger();
-      }
-    } else {
-      this.frequency = value & 0x7ff;
-      this.lengthEnabled = (value & (1 << 14)) !== 0;
+  /** Write NR14 (0x65): frequency bits 8-10, length enable, and restart (bit 7) */
+  writeFrequencyHigh(value: number): void {
+    this.frequency = (this.frequency & 0xff) | ((value & 0x7) << 8);
+    this.lengthEnabled = (value & 0x40) !== 0;
+    if (value & 0x80) {
+      this.#trigger();
     }
   }
 
-  /** Read SOUND1CNT_X (only bit 14 is readable) */
-  readFreqControl(): number {
-    return this.lengthEnabled ? 1 << 14 : 0;
+  /** Read NR14: only the length enable (bit 6) is readable */
+  readFrequencyHigh(): number {
+    return this.lengthEnabled ? 0x40 : 0;
   }
 
   /** Trigger the channel (restart) */
@@ -140,7 +166,7 @@ export class PsgChannel1 {
     if (this.lengthCounter === 0) {
       this.lengthCounter = 64;
     }
-    this.#frequencyTimer = (2048 - this.frequency) * 4;
+    this.#frequencyTimer = squareStepCycles(this.frequency);
     this.#volume = this.envelopeInitialVolume;
     this.#envelopeTimer = this.envelopePeriod;
 
@@ -171,11 +197,11 @@ export class PsgChannel1 {
     return newFreq;
   }
 
-  /** Clock the frequency timer (called at CPU rate via tick) */
+  /** Advance the frequency timer by the given number of CPU cycles */
   clockTimer(cycles: number): void {
     this.#frequencyTimer -= cycles;
     while (this.#frequencyTimer <= 0) {
-      this.#frequencyTimer += (2048 - this.frequency) * 4;
+      this.#frequencyTimer += squareStepCycles(this.frequency);
       this.#dutyPosition = (this.#dutyPosition + 1) & 7;
     }
   }
@@ -204,7 +230,7 @@ export class PsgChannel1 {
     }
   }
 
-  /** Clock length counter (256 Hz — every frame sequencer step) */
+  /** Clock length counter (256 Hz — frame sequencer steps 0, 2, 4, 6) */
   clockLength(): void {
     if (this.lengthEnabled && this.lengthCounter > 0) {
       this.lengthCounter--;
@@ -214,7 +240,7 @@ export class PsgChannel1 {
     }
   }
 
-  /** Clock envelope (64 Hz — frame sequencer steps 7) */
+  /** Clock envelope (64 Hz — frame sequencer step 7) */
   clockEnvelope(): void {
     if (this.envelopePeriod === 0) {
       return;
@@ -328,40 +354,50 @@ export class PsgChannel2 {
     return DUTY_TABLE[this.duty]![this.#dutyPosition]! * this.#volume;
   }
 
-  /** Write SOUND2CNT_L (duty/envelope, offset 0x68) */
-  writeDutyEnvelope(value: number): void {
-    const length = value & 0x3f;
-    this.lengthCounter = 64 - length;
+  /** Write NR21 (SOUND2CNT_L low byte, 0x68): length and duty */
+  writeLengthDuty(value: number): void {
+    this.lengthCounter = 64 - (value & 0x3f);
     this.duty = (value >> 6) & 0x3;
-    this.envelopePeriod = (value >> 8) & 0x7;
-    this.envelopeDirection = (value >> 11) & 1;
-    this.envelopeInitialVolume = (value >> 12) & 0xf;
-    this.#dacEnabled = (value & 0xf800) !== 0;
+  }
+
+  /** Read NR21: the duty is readable, the length is write-only */
+  readLengthDuty(): number {
+    return this.duty << 6;
+  }
+
+  /** Write NR22 (0x69): envelope. A zero volume with a decreasing envelope turns the DAC off. */
+  writeEnvelope(value: number): void {
+    this.envelopePeriod = value & 0x7;
+    this.envelopeDirection = (value >> 3) & 1;
+    this.envelopeInitialVolume = (value >> 4) & 0xf;
+    this.#dacEnabled = (value & 0xf8) !== 0;
     if (!this.#dacEnabled) {
       this.enabled = false;
     }
   }
 
-  readDutyEnvelope(): number {
-    return (
-      (this.duty << 6) |
-      (this.envelopePeriod << 8) |
-      (this.envelopeDirection << 11) |
-      (this.envelopeInitialVolume << 12)
-    );
+  /** Read NR22 */
+  readEnvelope(): number {
+    return this.envelopePeriod | (this.envelopeDirection << 3) | (this.envelopeInitialVolume << 4);
   }
 
-  /** Write SOUND2CNT_H (frequency/control, offset 0x6C) */
-  writeFreqControl(value: number): void {
-    this.frequency = value & 0x7ff;
-    this.lengthEnabled = (value & (1 << 14)) !== 0;
-    if (value & (1 << 15)) {
+  /** Write NR23 (SOUND2CNT_H low byte, 0x6C): frequency bits 0-7 */
+  writeFrequencyLow(value: number): void {
+    this.frequency = (this.frequency & 0x700) | (value & 0xff);
+  }
+
+  /** Write NR24 (0x6D): frequency bits 8-10, length enable, and restart (bit 7) */
+  writeFrequencyHigh(value: number): void {
+    this.frequency = (this.frequency & 0xff) | ((value & 0x7) << 8);
+    this.lengthEnabled = (value & 0x40) !== 0;
+    if (value & 0x80) {
       this.#trigger();
     }
   }
 
-  readFreqControl(): number {
-    return this.lengthEnabled ? 1 << 14 : 0;
+  /** Read NR24: only the length enable (bit 6) is readable */
+  readFrequencyHigh(): number {
+    return this.lengthEnabled ? 0x40 : 0;
   }
 
   #trigger(): void {
@@ -369,7 +405,7 @@ export class PsgChannel2 {
     if (this.lengthCounter === 0) {
       this.lengthCounter = 64;
     }
-    this.#frequencyTimer = (2048 - this.frequency) * 4;
+    this.#frequencyTimer = squareStepCycles(this.frequency);
     this.#volume = this.envelopeInitialVolume;
     this.#envelopeTimer = this.envelopePeriod;
     if (!this.#dacEnabled) {
@@ -377,10 +413,11 @@ export class PsgChannel2 {
     }
   }
 
+  /** Advance the frequency timer by the given number of CPU cycles */
   clockTimer(cycles: number): void {
     this.#frequencyTimer -= cycles;
     while (this.#frequencyTimer <= 0) {
-      this.#frequencyTimer += (2048 - this.frequency) * 4;
+      this.#frequencyTimer += squareStepCycles(this.frequency);
       this.#dutyPosition = (this.#dutyPosition + 1) & 7;
     }
   }
@@ -464,35 +501,49 @@ export class PsgChannel2 {
 
 // ─── Channel 3: Wave ─────────────────────────────────────────────────
 
+/** Bytes in one wave RAM bank (32 digits) */
+const WAVE_BANK_SIZE = 16;
+
 export class PsgChannel3 {
-  /** Wave RAM: 16 bytes = 32 4-bit samples */
-  readonly waveRam = new Uint8Array(16);
+  /** Wave RAM: two banks of 16 bytes (32 4-bit digits each), bank 0 first */
+  readonly waveRam = new Uint8Array(WAVE_BANK_SIZE * 2);
 
   enabled = false;
   #dacEnabled = false;
   lengthCounter = 0;
   lengthEnabled = false;
   volumeCode = 0; // 0-3
+  /** SOUND3CNT_H bit 15: play at 75% whatever the volume code says */
+  forceVolume = false;
   frequency = 0;
   #frequencyTimer = 0;
+  /** Digit being played: 0-31 within the selected bank, 0-63 across both banks in dimension mode */
   #sampleIndex = 0;
-  /** Two banks: 0 or 1 (GBA supports bank mode but we use single-bank for now) */
+  /** NR30 bit 5, Wave RAM dimension: false = one bank (32 digits), true = two banks (64 digits) */
   bankMode = false;
+  /** NR30 bit 6: the bank played back in one-bank mode; the CPU reads and writes the other one */
   bankSelect = 0;
 
   get output(): number {
     if (!this.enabled || !this.#dacEnabled) {
       return 0;
     }
-    // Read current 4-bit sample from wave RAM
-    const byteIndex = this.#sampleIndex >> 1;
-    const nibble =
-      (this.#sampleIndex & 1) === 0 ? (this.waveRam[byteIndex]! >> 4) & 0xf : this.waveRam[byteIndex]! & 0xf;
-    const shift = WAVE_VOLUME_SHIFT[this.volumeCode]!;
-    return nibble >> shift;
+    // In dimension mode the 64 digits run through bank 0, then bank 1, from a restart
+    // (mGBA src/gb/audio.c GBAudioRun shifts both banks as one register, NanoBoyAdvance
+    // wave_channel.cc restarts at bank 0).
+    const bank = this.bankMode ? this.#sampleIndex >> 5 : this.bankSelect;
+    const digit = this.#sampleIndex & 31;
+    const byte = this.waveRam[bank * WAVE_BANK_SIZE + (digit >> 1)]!;
+    // Each byte plays its high nibble first (GBATEK WAVE_RAM).
+    const nibble = (digit & 1) === 0 ? byte >> 4 : byte & 0xf;
+    if (this.forceVolume) {
+      // mGBA src/gb/audio.c GBAudioRun: "sample += sample << 1", then >> 2.
+      return (nibble * 3) >> 2;
+    }
+    return nibble >> WAVE_VOLUME_SHIFT[this.volumeCode]!;
   }
 
-  /** Write SOUND3CNT_L (enable, offset 0x70) */
+  /** Write NR30 (SOUND3CNT_L, 0x70): dimension, bank select, playback */
   writeControl(value: number): void {
     this.bankMode = (value & (1 << 5)) !== 0;
     this.bankSelect = (value >> 6) & 1;
@@ -502,31 +553,44 @@ export class PsgChannel3 {
     }
   }
 
+  /** Read NR30 */
   readControl(): number {
     return (this.bankMode ? 1 << 5 : 0) | (this.bankSelect << 6) | (this.#dacEnabled ? 1 << 7 : 0);
   }
 
-  /** Write SOUND3CNT_H (length/volume, offset 0x72) */
-  writeLengthVolume(value: number): void {
+  /** Write NR31 (0x72): length */
+  writeLength(value: number): void {
     this.lengthCounter = 256 - (value & 0xff);
-    this.volumeCode = (value >> 13) & 0x3;
   }
 
-  readLengthVolume(): number {
-    return this.volumeCode << 13;
+  /** Write NR32 (0x73): volume code (bits 5-6) and force 75% (bit 7) */
+  writeVolume(value: number): void {
+    this.volumeCode = (value >> 5) & 0x3;
+    this.forceVolume = (value & 0x80) !== 0;
   }
 
-  /** Write SOUND3CNT_X (frequency/control, offset 0x74) */
-  writeFreqControl(value: number): void {
-    this.frequency = value & 0x7ff;
-    this.lengthEnabled = (value & (1 << 14)) !== 0;
-    if (value & (1 << 15)) {
+  /** Read NR32 */
+  readVolume(): number {
+    return (this.volumeCode << 5) | (this.forceVolume ? 0x80 : 0);
+  }
+
+  /** Write NR33 (SOUND3CNT_X low byte, 0x74): sample rate bits 0-7 */
+  writeFrequencyLow(value: number): void {
+    this.frequency = (this.frequency & 0x700) | (value & 0xff);
+  }
+
+  /** Write NR34 (0x75): sample rate bits 8-10, length enable, and restart (bit 7) */
+  writeFrequencyHigh(value: number): void {
+    this.frequency = (this.frequency & 0xff) | ((value & 0x7) << 8);
+    this.lengthEnabled = (value & 0x40) !== 0;
+    if (value & 0x80) {
       this.#trigger();
     }
   }
 
-  readFreqControl(): number {
-    return this.lengthEnabled ? 1 << 14 : 0;
+  /** Read NR34: only the length enable (bit 6) is readable */
+  readFrequencyHigh(): number {
+    return this.lengthEnabled ? 0x40 : 0;
   }
 
   #trigger(): void {
@@ -534,18 +598,20 @@ export class PsgChannel3 {
     if (this.lengthCounter === 0) {
       this.lengthCounter = 256;
     }
-    this.#frequencyTimer = (2048 - this.frequency) * 2;
+    this.#frequencyTimer = waveStepCycles(this.frequency);
     this.#sampleIndex = 0;
     if (!this.#dacEnabled) {
       this.enabled = false;
     }
   }
 
+  /** Advance the frequency timer by the given number of CPU cycles */
   clockTimer(cycles: number): void {
     this.#frequencyTimer -= cycles;
+    const mask = this.bankMode ? 63 : 31;
     while (this.#frequencyTimer <= 0) {
-      this.#frequencyTimer += (2048 - this.frequency) * 2;
-      this.#sampleIndex = (this.#sampleIndex + 1) & 31;
+      this.#frequencyTimer += waveStepCycles(this.frequency);
+      this.#sampleIndex = (this.#sampleIndex + 1) & mask;
     }
   }
 
@@ -558,14 +624,21 @@ export class PsgChannel3 {
     }
   }
 
-  /** Write a byte to wave RAM */
+  /**
+   * Write a byte of wave RAM as the CPU sees it. GBATEK SOUND3CNT_L: "reading/writing to/from
+   * wave RAM will address the other (not selected) bank".
+   */
   writeWaveRam(offset: number, value: number): void {
-    this.waveRam[offset & 0xf] = value & 0xff;
+    this.waveRam[this.#cpuBankBase() + (offset & 0xf)] = value & 0xff;
   }
 
-  /** Read a byte from wave RAM */
+  /** Read a byte of wave RAM as the CPU sees it (the bank not selected for playback) */
   readWaveRam(offset: number): number {
-    return this.waveRam[offset & 0xf]!;
+    return this.waveRam[this.#cpuBankBase() + (offset & 0xf)]!;
+  }
+
+  #cpuBankBase(): number {
+    return (this.bankSelect ^ 1) * WAVE_BANK_SIZE;
   }
 
   serialize(): PsgChannel3Snapshot {
@@ -576,6 +649,7 @@ export class PsgChannel3 {
       lengthCounter: this.lengthCounter,
       lengthEnabled: this.lengthEnabled,
       volumeCode: this.volumeCode,
+      forceVolume: this.forceVolume,
       frequency: this.frequency,
       frequencyTimer: this.#frequencyTimer,
       sampleIndex: this.#sampleIndex,
@@ -585,12 +659,19 @@ export class PsgChannel3 {
   }
 
   deserialize(s: PsgChannel3Snapshot): void {
-    this.waveRam.set(s.waveRam);
+    if (s.waveRam.length === WAVE_BANK_SIZE) {
+      // A 16-byte wave RAM snapshot holds one bank that served playback and the CPU alike.
+      this.waveRam.set(s.waveRam, 0);
+      this.waveRam.set(s.waveRam, WAVE_BANK_SIZE);
+    } else {
+      this.waveRam.set(s.waveRam);
+    }
     this.enabled = s.enabled;
     this.#dacEnabled = s.dacEnabled;
     this.lengthCounter = s.lengthCounter;
     this.lengthEnabled = s.lengthEnabled;
     this.volumeCode = s.volumeCode;
+    this.forceVolume = s.forceVolume ?? false;
     this.frequency = s.frequency;
     this.#frequencyTimer = s.frequencyTimer;
     this.#sampleIndex = s.sampleIndex;
@@ -598,18 +679,24 @@ export class PsgChannel3 {
     this.bankSelect = s.bankSelect;
   }
 
-  reset(): void {
-    this.waveRam.fill(0);
+  /** Clear the registers and stop playback, keeping wave RAM (what master sound off does) */
+  powerOff(): void {
     this.enabled = false;
     this.#dacEnabled = false;
     this.lengthCounter = 0;
     this.lengthEnabled = false;
     this.volumeCode = 0;
+    this.forceVolume = false;
     this.frequency = 0;
     this.#frequencyTimer = 0;
     this.#sampleIndex = 0;
     this.bankMode = false;
     this.bankSelect = 0;
+  }
+
+  reset(): void {
+    this.powerOff();
+    this.waveRam.fill(0);
   }
 }
 
@@ -642,38 +729,50 @@ export class PsgChannel4 {
     return (~this.#lfsr & 1) * this.#volume;
   }
 
-  /** Write SOUND4CNT_L (envelope, offset 0x78) */
+  /** Write NR41 (SOUND4CNT_L low byte, 0x78): length */
+  writeLength(value: number): void {
+    this.lengthCounter = 64 - (value & 0x3f);
+  }
+
+  /** Write NR42 (0x79): envelope. A zero volume with a decreasing envelope turns the DAC off. */
   writeEnvelope(value: number): void {
-    const length = value & 0x3f;
-    this.lengthCounter = 64 - length;
-    this.envelopePeriod = (value >> 8) & 0x7;
-    this.envelopeDirection = (value >> 11) & 1;
-    this.envelopeInitialVolume = (value >> 12) & 0xf;
-    this.#dacEnabled = (value & 0xf800) !== 0;
+    this.envelopePeriod = value & 0x7;
+    this.envelopeDirection = (value >> 3) & 1;
+    this.envelopeInitialVolume = (value >> 4) & 0xf;
+    this.#dacEnabled = (value & 0xf8) !== 0;
     if (!this.#dacEnabled) {
       this.enabled = false;
     }
   }
 
+  /** Read NR42 */
   readEnvelope(): number {
-    return (this.envelopePeriod << 8) | (this.envelopeDirection << 11) | (this.envelopeInitialVolume << 12);
+    return this.envelopePeriod | (this.envelopeDirection << 3) | (this.envelopeInitialVolume << 4);
   }
 
-  /** Write SOUND4CNT_H (frequency/control, offset 0x7C) */
-  writeFreqControl(value: number): void {
+  /** Write NR43 (SOUND4CNT_H low byte, 0x7C): dividing ratio, counter width, shift clock */
+  writeFrequency(value: number): void {
     this.divisorCode = value & 0x7;
     this.widthMode = (value & (1 << 3)) !== 0;
     this.clockShift = (value >> 4) & 0xf;
-    this.lengthEnabled = (value & (1 << 14)) !== 0;
-    if (value & (1 << 15)) {
+  }
+
+  /** Read NR43 */
+  readFrequency(): number {
+    return this.divisorCode | (this.widthMode ? 1 << 3 : 0) | (this.clockShift << 4);
+  }
+
+  /** Write NR44 (0x7D): length enable and restart (bit 7) */
+  writeControl(value: number): void {
+    this.lengthEnabled = (value & 0x40) !== 0;
+    if (value & 0x80) {
       this.#trigger();
     }
   }
 
-  readFreqControl(): number {
-    return (
-      this.divisorCode | (this.widthMode ? 1 << 3 : 0) | (this.clockShift << 4) | (this.lengthEnabled ? 1 << 14 : 0)
-    );
+  /** Read NR44: only the length enable (bit 6) is readable */
+  readControl(): number {
+    return this.lengthEnabled ? 0x40 : 0;
   }
 
   #trigger(): void {
@@ -682,7 +781,7 @@ export class PsgChannel4 {
       this.lengthCounter = 64;
     }
     this.#lfsr = this.widthMode ? 0x7f : 0x7fff;
-    this.#frequencyTimer = this.#getDivisor() << this.clockShift;
+    this.#frequencyTimer = noiseStepCycles(this.divisorCode, this.clockShift);
     this.#volume = this.envelopeInitialVolume;
     this.#envelopeTimer = this.envelopePeriod;
     if (!this.#dacEnabled) {
@@ -690,14 +789,11 @@ export class PsgChannel4 {
     }
   }
 
-  #getDivisor(): number {
-    return this.divisorCode === 0 ? 8 : this.divisorCode * 16;
-  }
-
+  /** Advance the frequency timer by the given number of CPU cycles */
   clockTimer(cycles: number): void {
     this.#frequencyTimer -= cycles;
     while (this.#frequencyTimer <= 0) {
-      this.#frequencyTimer += this.#getDivisor() << this.clockShift;
+      this.#frequencyTimer += noiseStepCycles(this.divisorCode, this.clockShift);
       // Clock the LFSR
       const xor = (this.#lfsr & 1) ^ ((this.#lfsr >> 1) & 1);
       this.#lfsr >>= 1;

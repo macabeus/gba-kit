@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import { FrameTable } from '../dwarf/frame.js';
 import type { CodeIsa, IsaMode } from '../symbols.js';
-import { type MachineFacts, frameConfidence } from '../unwind/types.js';
+import { type MachineFacts, type ServiceCallPolicy, frameConfidence } from '../unwind/types.js';
 import { unwindStack } from '../unwind/walker.js';
 
 const NO_CFI = new FrameTable(undefined);
@@ -29,6 +29,7 @@ class World implements MachineFacts {
   mode = SYS;
   readonly codeFloor = 0x4000;
   readonly exceptionStub = { mode: IRQ, lrOffset: 20 };
+  serviceCall?: ServiceCallPolicy;
 
   /** A function whose body is `units`, laid out at `lo` and named by the ELF. */
   fn(lo: number, units: number[], isa: CodeIsa = 'thumb'): this {
@@ -491,6 +492,90 @@ describe('the exception boundary', () => {
     const walk = unwindStack(0x08001004, registers({ 13: 0x03007f80 }), w, NO_CFI);
     expect(walk.frames.map((f) => f.method)).toEqual(['live']);
     expect(walk.end).toMatch(/0x00000090.*is below the program.*no pushed stub frame matched/);
+  });
+});
+
+describe('the BIOS SWI handler', () => {
+  const SVC = 0x13;
+  const SWI_5 = 0xdf05;
+  /**
+   * A handler shaped like the GBA's: SVC entry block [SPSR, r11, r12, return address], then
+   * routines on the caller's stack, which at 0x118-0x13f have pushed the dispatcher's {r2, lr}
+   * and the routine's {r4, lr}.
+   */
+  const serviceCall: ServiceCallPolicy = {
+    mode: SVC,
+    returnOffset: 12,
+    statusOffset: 0,
+    blockSlots: [
+      [11, 4],
+      [12, 8],
+    ],
+    frameAt: (pc) =>
+      pc >= 0x118 && pc < 0x140
+        ? {
+            pushed: 16,
+            slots: [
+              [2, 8],
+              [14, 4],
+              [4, 16],
+            ],
+          }
+        : undefined,
+  };
+
+  /** wait() at 0x08003000 made the SWI (`push {lr}; swi 5`); its caller is at 0x08002100. */
+  function callingWorld(): World {
+    const w = new World()
+      .fn(0x08003000, [PUSH_LR, SWI_5, MOVS_R0_0, MOVS_R0_0])
+      .fn(0x08002100, [PUSH_LR, BL_LO, BL_HI, MOVS_R0_0])
+      .stack(0x03007fd0, SYS | 0x20, 0xb11, 0xc12, 0x08003004) // the entry block: a Thumb caller
+      .stack(0x03007ee0, 0x4444, 0xd0, 0x2222, 0x08001234) // r4 and the routine's lr; the caller's r2 and lr
+      .stack(0x03007ef0, 0x08002105, 0) // wait()'s pushed lr, then the root
+      .banked(SVC, 0x03007fd0);
+    w.serviceCall = serviceCall;
+    return w;
+  }
+
+  it('crosses from inside the handler to the instruction after the SWI, on the stack it was made from', () => {
+    const walk = unwindStack(0x130, registers({ 13: 0x03007ee0, 7: 0x7777 }), callingWorld(), NO_CFI);
+    expect(walk.frames.map((f) => f.method)).toEqual(['live', 'service', 'prologue']);
+    expect(walk.frames.map((f) => f.pc)).toEqual([0x130, 0x08003004, 0x08002104]);
+    // The caller is looked up at the swi, as a call site, and the BIOS frame's CFA is its sp.
+    expect(walk.frames[1]!.lookupPc).toBe(0x08003002);
+    expect(walk.frames[0]!.cfa).toBe(0x03007ef0);
+    const caller = walk.frames[1]!.regs;
+    expect(caller[13]).toBe(0x03007ef0);
+    expect([caller[2], caller[4], caller[14]]).toEqual([0x2222, 0x4444, 0x08001234]);
+    expect([caller[11], caller[12]]).toEqual([0xb11, 0xc12]);
+    expect(caller[7]).toBe(0x7777); // untouched by the handler
+    expect(caller[0]).toBeUndefined(); // the call's result, not the caller's
+  });
+
+  it('crosses an interrupt that struck inside the handler, then the handler itself', () => {
+    const w = callingWorld()
+      .fn(0x08001000, [PUSH_LR, MOVS_R0_0, MOVS_R0_0])
+      .stack(0x03007f80, 0x00000090) // the handler's saved lr: the stub's return path
+      .stack(0x03007f88, 0xa0, 0xa1, 0xa2, 0xa3, 0xac, 0x138) // the stub's block: interrupted at 0x134
+      .banked(IRQ, 0x03007f88)
+      .banked(SYS, 0x03007ee0, 0xd0)
+      .interruptedFrom(SYS);
+    const walk = unwindStack(0x08001004, registers({ 13: 0x03007f80 }), w, NO_CFI);
+    expect(walk.frames.map((f) => f.method)).toEqual(['live', 'exception', 'exception', 'service', 'prologue']);
+    expect(walk.frames.map((f) => f.pc)).toEqual([0x08001004, 0x90, 0x134, 0x08003004, 0x08002104]);
+    expect(walk.frames[3]!.regs[13]).toBe(0x03007ef0);
+  });
+
+  it('crosses no interrupt into BIOS code the handler does not describe', () => {
+    const w = callingWorld()
+      .fn(0x08001000, [PUSH_LR, MOVS_R0_0, MOVS_R0_0])
+      .stack(0x03007f80, 0x00000090)
+      .stack(0x03007f88, 0xa0, 0xa1, 0xa2, 0xa3, 0xac, 0x1004) // interrupted at 0x1000, outside every routine
+      .banked(IRQ, 0x03007f88)
+      .interruptedFrom(SYS);
+    const walk = unwindStack(0x08001004, registers({ 13: 0x03007f80 }), w, NO_CFI);
+    expect(walk.frames.map((f) => f.method)).toEqual(['live']);
+    expect(walk.end).toMatch(/no pushed stub frame matched/);
   });
 });
 

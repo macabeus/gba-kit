@@ -11,7 +11,7 @@
 import { MODE_SYS, MODE_USR } from '@gba-kit/arm-emulator/arm-cpu';
 import type { DwarfEntry } from '@gba-kit/debug-info';
 
-import type { Machine } from './machine.js';
+import { LOWEST_PROGRAM_ADDRESS, type Machine } from './machine.js';
 import type { Program } from './program.js';
 
 export type StepPredicate = (pc: number) => boolean;
@@ -240,15 +240,16 @@ export function stepOutTo(ctx: StepContext, returnAddress: number, callerSp: num
 
 /**
  * Step out of an exception handler: run until the CPU is back in the mode the
- * exception interrupted (the SPSR's), i.e. the first instruction of the
- * interrupted code after the handler's return. The BIOS stub in between has no
- * symbol, so a return address would not do.
+ * exception interrupted (the SPSR's) and at program code, at or above
+ * LOWEST_PROGRAM_ADDRESS. The mode is the test because the BIOS stub in between has
+ * no symbol to give a return address; the address floor carries an interrupt taken
+ * inside a BIOS call (IntrWait's wait) on to where that call returns to the program.
  */
 export function stepOutOfException(ctx: StepContext): StepOutcome {
   const cpu = ctx.machine.gba.armCpu;
   const interrupted = cpu.getSPSR() & 0x1f;
   return {
-    predicate: () => cpu.getMode() === interrupted,
+    predicate: (pc) => cpu.getMode() === interrupted && pc >= LOWEST_PROGRAM_ADDRESS,
     hidden: () => null,
   };
 }

@@ -108,7 +108,7 @@ export class GbaMemory implements MemoryBus {
   }
 
   read16(address: number): number {
-    // ARM7TDMI: halfword reads are aligned, unaligned rotates
+    // Halfword memory ignores address bit 0; the CPU rotates a misaligned LDRH.
     const aligned = address & ~1;
     const resolved = this.#resolve(aligned);
     if (!resolved) {
@@ -118,16 +118,11 @@ export class GbaMemory implements MemoryBus {
     if (offset + 1 >= view.byteLength) {
       return 0;
     }
-    const value = view.getUint16(offset, true); // little-endian
-    // Rotate for unaligned access on ARMv4T
-    if (address & 1) {
-      return ((value >>> 8) | (value << 24)) >>> 0;
-    }
-    return value;
+    return view.getUint16(offset, true); // little-endian
   }
 
   read32(address: number): number {
-    // ARM7TDMI: word reads are force-aligned, unaligned rotates
+    // Word memory ignores address bits 0-1; the CPU rotates a misaligned LDR.
     const aligned = address & ~3;
     const resolved = this.#resolve(aligned);
     if (!resolved) {
@@ -137,13 +132,15 @@ export class GbaMemory implements MemoryBus {
     if (offset + 3 >= view.byteLength) {
       return 0;
     }
-    const value = view.getUint32(offset, true); // little-endian
-    // Rotate for unaligned access
-    const rot = (address & 3) * 8;
-    if (rot !== 0) {
-      return ((value >>> rot) | (value << (32 - rot))) >>> 0;
-    }
-    return value;
+    return view.getUint32(offset, true); // little-endian
+  }
+
+  fetch16(address: number): number {
+    return this.read16(address);
+  }
+
+  fetch32(address: number): number {
+    return this.read32(address);
   }
 
   write8(address: number, value: number): void {
@@ -189,6 +186,22 @@ export class GbaMemory implements MemoryBus {
     view.setUint32(offset, value, true);
     this.#recordWrite(aligned, 4, value);
   }
+
+  // Every access takes one cycle: this memory models neither wait states nor a prefetch unit.
+
+  accessCycles(_address: number, _width: 1 | 2 | 4, _sequential: boolean): number {
+    return 1;
+  }
+
+  fetchCycles(_address: number, _width: 2 | 4, _sequential: boolean): number {
+    return 1;
+  }
+
+  dataCycles(_address: number, _width: 1 | 2 | 4, _sequential: boolean): number {
+    return 1;
+  }
+
+  idle(_cycles: number): void {}
 
   #recordWrite(address: number, size: 1 | 2 | 4, value: number): void {
     const entry: MemoryWrite = { address, size, value };

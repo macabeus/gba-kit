@@ -28,7 +28,7 @@ import type {
   WritableScalar,
 } from '@gba-kit/debug-info';
 import { formatBitfield, formatValue, frameConfidence, le32, scalarSize, toInt } from '@gba-kit/debug-info';
-import { BIOS_IRQ_STUB } from '@gba-kit/gba-emulator';
+import { BIOS_IRQ_STUB, BIOS_SWI_HANDLER } from '@gba-kit/gba-emulator';
 
 import {
   type ExprEnv,
@@ -209,6 +209,7 @@ export class Inspector {
       stackBoundFor,
       exceptionReturnBias,
       exceptionStub: BIOS_IRQ_STUB,
+      serviceCall: BIOS_SWI_HANDLER,
     };
   }
 
@@ -298,7 +299,7 @@ export class Inspector {
     return [
       { name: 'frame', value: String(this.machine.frame), type: 'frames' },
       { name: 'scanline', value: String(this.machine.scanline), type: 'line' },
-      { name: 'cycle', value: String(this.machine.cycle), type: 'instruction count' },
+      { name: 'cycle', value: String(this.machine.cycle), type: 'CPU cycles' },
       { name: 'function', value: fn ? fn.name : '?', type: 'symbol' },
       { name: 'halted', value: String(this.machine.halted), type: 'bool' },
       { name: 'IME', value: String(gba.interrupts.ime & 1), type: 'u16', address: 0x04000208 },

@@ -154,6 +154,7 @@ describe('GbaSystemBus write watchpoints', () => {
     bus.write32(0x040000d8, 0x02000100); // DMA3DAD
     bus.write16(0x040000dc, 1); // DMA3CNT_L (1 unit)
     bus.write16(0x040000de, 0x8000); // DMA3CNT_H: enable | immediate | 16-bit
+    gba.scheduler.tick(3); // the channel starts 3 cycles after the write
 
     expect(bus.read16(0x02000100)).toBe(0xbeef); // copy happened
     expect(hits).toHaveLength(1);
@@ -173,8 +174,22 @@ describe('GbaSystemBus write watchpoints', () => {
     bus.write32(0x040000d8, 0x02000100); // DMA3DAD
     bus.write16(0x040000dc, 1);
     bus.write16(0x040000de, 0x8000); // enable immediate
+    gba.scheduler.tick(3); // the channel starts 3 cycles after the write
 
     expect(bus.read16(0x02000100)).toBe(0xcafe); // copy still happens
+  });
+});
+
+describe('ScriptingEngine disassembly', () => {
+  it('reads code the way a debugger reads memory: no read watchpoint fires', () => {
+    const gba = new Gba();
+    gba.loadRom(new Uint8Array([0x1e, 0xff, 0x2f, 0xe1])); // bx lr
+    const engine = new ScriptingEngine(gba, stubHost);
+    let hits = 0;
+    gba.bus.addReadWatchpoint(0x08000000, 4, () => hits++);
+    expect(engine.disassemble(0x08000000, 1, 'arm')[0]!.instruction).toMatch(/bx\s+lr/i);
+    expect(engine.disassembleFunction(0x08000000, 'arm')).toHaveLength(1);
+    expect(hits).toBe(0);
   });
 });
 

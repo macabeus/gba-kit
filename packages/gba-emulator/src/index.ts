@@ -8,7 +8,7 @@
 export { Gba } from './gba.js';
 export type { HardwareEvent, RunOutcome, StopPredicate } from './gba.js';
 export type { DmaTransferInfo } from './dma.js';
-export type { BiosEnv } from './bios.js';
+export { BIOS_SWI_HANDLER } from './bios-image.js';
 
 // Subsystems
 export {
@@ -24,6 +24,7 @@ export { TimerController } from './timers.js';
 export { DmaController } from './dma.js';
 export type { DmaMemoryAccess } from './dma.js';
 export { InputController } from './input.js';
+export { SerialPort } from './serial.js';
 export { Apu } from './apu/apu.js';
 
 // Scripting
@@ -38,12 +39,14 @@ export {
   CPU_FREQ,
   CYCLES_PER_FRAME,
   CYCLES_PER_SCANLINE,
+  DISPCNT_LATCH_CYCLE,
   DmaAddrControl,
   DmaStartTiming,
   EventId,
   FRAME_RATE,
   GbaButton,
   HBLANK_CYCLES,
+  HBLANK_START_CYCLE,
   HDRAW_CYCLES,
   IrqFlag,
   MMIO,

@@ -1807,6 +1807,7 @@ const METHOD_LABELS: Record<FrameMethod, string | null> = {
   live: null,
   cfi: null,
   exception: null,
+  service: null,
   prologue: 'from its prologue',
   lr: 'from lr',
   'lr-corroborated': 'from lr, corroborated',

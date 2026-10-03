@@ -11,6 +11,7 @@
  * - GBATEK: http://problemkaputt.de/gbatek.htm
  */
 import type { CpuSnapshot } from './cpu-snapshot.js';
+import { multiplyCarry, multiplyLongCarry } from './multiply-carry.js';
 import type { CpsrFlags, DebugHooks, ExecutionResult, ExternalCall, MemoryBus, MemoryWrite } from './types.js';
 import { LR, PC, SENTINEL_ADDR, SP } from './types.js';
 import { addWithFlags, asr, bit, bits, isNegative, lsl, lsr, ror, signExtend, subWithFlags } from './utils.js';
@@ -25,6 +26,10 @@ const CPSR_I = 7;
 const CPSR_F = 6;
 const CPSR_T = 5;
 const CPSR_MODE_MASK = 0x1f;
+
+/** The PSR bits ARMv4T implements: the NZCV flags and the control byte (I, F, T, mode). */
+const PSR_FLAGS_MASK = 0xf0000000;
+const PSR_CONTROL_MASK = 0x000000ff;
 
 // ─── CPU Mode Constants ──────────────────────────────────────────────
 
@@ -70,6 +75,14 @@ const SPSR_BANK_INDEX: Record<number, number> = {
 
 /** Stub address range for external function calls */
 const STUB_BASE = 0x08f00000;
+
+/** `#pipelineAddress` of a flushed pipeline. Fetch addresses are even, so it never matches a PC. */
+const PIPELINE_EMPTY = 0xffffffff;
+
+/** Whether a branch target is the sentinel return address, in either instruction set. */
+function isSentinel(address: number): boolean {
+  return (address & ~3) >>> 0 === (SENTINEL_ADDR & ~3) >>> 0;
+}
 
 /**
  * Check if a CPU mode is valid.
@@ -123,21 +136,51 @@ function checkCondition(cond: number, n: boolean, z: boolean, c: boolean, v: boo
       return z || n !== v; // LE
     case 0xe:
       return true; // AL
-    case 0xf:
-      return true; // Unconditional (ARMv5+, treat as AL)
     default:
-      return true;
+      // NV: ARMv4T executes it as "never" (mGBA src/arm/arm.c conditionLut[0xF] = 0).
+      return false;
   }
+}
+
+// ─── Multiply Timing ────────────────────────────────────────────────
+
+/**
+ * The internal cycles (m) of a multiply: the multiplier array stops early once the multiplier's
+ * remaining top bytes are all zero, or, for a signed multiply, all ones. m is 1 when bits 31-8 are,
+ * 2 when bits 31-16 are, 3 when bits 31-24 are, and 4 otherwise (GBATEK "ARM CPU Instruction Cycle
+ * Times"; mGBA ARM_WAIT_SMUL / ARM_WAIT_UMUL).
+ */
+function multiplierCycles(multiplier: number, signed: boolean): number {
+  const m = multiplier | 0;
+  if (signed) {
+    if (m >> 8 === 0 || m >> 8 === -1) {
+      return 1;
+    }
+    if (m >> 16 === 0 || m >> 16 === -1) {
+      return 2;
+    }
+    return m >> 24 === 0 || m >> 24 === -1 ? 3 : 4;
+  }
+  if (m >>> 8 === 0) {
+    return 1;
+  }
+  if (m >>> 16 === 0) {
+    return 2;
+  }
+  return m >>> 24 === 0 ? 3 : 4;
 }
 
 // ─── SWI Handler Type ───────────────────────────────────────────────
 
 /**
- * Callback for Software Interrupt (SWI) instructions.
- * Platform-specific: on GBA, the SWI number selects a BIOS function.
- * If not provided, SWI instructions are silently ignored.
+ * Callback for Software Interrupt (SWI) instructions. On GBA, the SWI number selects a BIOS
+ * function. A handler that runs the call itself returns the cycles the call spends between taking
+ * the SWI and branching back; the SWI instruction costs those on top of its own fetch and the
+ * return branch's refill. A handler that returns null leaves the call to the code at the SWI
+ * vector: the CPU takes the exception, as it does for every SWI on hardware. Without a handler, a
+ * SWI is a call that takes 0 cycles.
  */
-export type SwiHandler = (cpu: ArmCpu, swiNumber: number) => void;
+export type SwiHandler = (cpu: ArmCpu, swiNumber: number) => number | null;
 
 // ─── ARM7TDMI Full CPU ──────────────────────────────────────────────
 
@@ -197,6 +240,9 @@ export class ArmCpu {
   /** Whether the CPU has halted (function returned to sentinel) */
   #halted = false;
 
+  /** Whether the last `step()` ran nothing because a debug hook refused the instruction. */
+  #refused = false;
+
   /** Map of stub addresses to symbol names */
   #stubs = new Map<number, string>();
 
@@ -220,6 +266,38 @@ export class ArmCpu {
 
   /** Platform-specific SWI handler */
   #swiHandler?: SwiHandler;
+
+  // ─── Prefetch Pipeline ───────────────────────────────────────────
+
+  /**
+   * The ARM7TDMI fetches two instructions ahead of the one it executes. While the instruction at
+   * $ executes, the one at $+width sits decoded and the one at $+2*width is fetched in its first
+   * cycle, before any of its own data accesses — so after a store to either address the CPU still
+   * runs the opcodes it holds, and the stored ones run once a branch refills the pipeline (GBATEK
+   * "ARM CPU Overview"; mGBA `cpu->prefetch[0..1]`).
+   *
+   * `#pipelineAddress` is the address of `#decodedOpcode`, the next instruction to execute. A step
+   * whose PC or state differs from `#pipelineAddress` and `#pipelineThumb` refills the pipeline,
+   * which covers a PC set from outside (a host, the debugger).
+   */
+  #pipelineAddress = PIPELINE_EMPTY;
+  #pipelineThumb = false;
+  #decodedOpcode = 0;
+  #fetchedOpcode = 0;
+
+  /**
+   * Cycles the instruction in progress has used so far: its data accesses, its internal cycles, any
+   * refill a branch makes and the opcode fetch that ends it, each priced by the bus as it happens
+   * (GBATEK "ARM CPU Instruction Cycle Times"; NanoBoyAdvance arm7tdmi.hh and handlers/).
+   */
+  #cycles = 0;
+
+  /**
+   * Whether the fetch that ends the instruction in progress is an S access. A data access or an
+   * internal cycle since the last fetch makes it N; a refill makes it S again (NanoBoyAdvance
+   * `pipe.access`).
+   */
+  #nextFetchSequential = true;
 
   constructor(memory: MemoryBus, options?: { hooks?: DebugHooks; swiHandler?: SwiHandler }) {
     this.memory = memory;
@@ -476,6 +554,11 @@ export class ArmCpu {
     return this.#halted;
   }
 
+  /** Whether the last `step()` ran nothing because a debug hook refused the instruction at PC. */
+  get refused(): boolean {
+    return this.#refused;
+  }
+
   /** Attach or detach debug hooks */
   setDebugHooks(hooks: DebugHooks | undefined): void {
     this.#hooks = hooks;
@@ -546,6 +629,12 @@ export class ArmCpu {
       usrBankedR8to12: new Uint32Array(this.#usrBankedR8to12),
       spsr: new Uint32Array(this.#spsr),
       halted: this.#halted,
+      pipeline: Uint32Array.of(
+        this.#pipelineAddress,
+        this.#decodedOpcode,
+        this.#fetchedOpcode,
+        this.#pipelineThumb ? 1 : 0,
+      ),
     };
   }
 
@@ -559,6 +648,12 @@ export class ArmCpu {
     this.#usrBankedR8to12.set(snap.usrBankedR8to12);
     this.#spsr.set(snap.spsr);
     this.#halted = snap.halted;
+    // A snapshot without `pipeline` restores a flushed pipeline, which the next step refills.
+    const pipeline = snap.pipeline;
+    this.#pipelineAddress = pipeline ? pipeline[0]! : PIPELINE_EMPTY;
+    this.#decodedOpcode = pipeline ? pipeline[1]! : 0;
+    this.#fetchedOpcode = pipeline ? pipeline[2]! : 0;
+    this.#pipelineThumb = pipeline ? pipeline[3] === 1 : false;
   }
 
   /** Reset CPU state for a new execution */
@@ -572,6 +667,30 @@ export class ArmCpu {
     this.#bankedLR.fill(0);
     this.#externalCalls = [];
     this.#halted = false;
+    this.#pipelineAddress = PIPELINE_EMPTY;
+  }
+
+  /**
+   * The opcode the pipeline fetched last: [$+8] in ARM state and [$+4] in Thumb state while the
+   * instruction at $ executes. Open-bus reads are built from it (GBATEK "GBA Unpredictable Things";
+   * mGBA `cpu->prefetch[1]`).
+   */
+  get prefetchedOpcode(): number {
+    return this.#fetchedOpcode;
+  }
+
+  /** The opcode in the decode stage: [$+4] in ARM state, [$+2] in Thumb state (mGBA `cpu->prefetch[0]`). */
+  get decodedOpcode(): number {
+    return this.#decodedOpcode;
+  }
+
+  /**
+   * Empty the pipeline, so the next step refills it from memory at no cost, as after a PC set from
+   * outside. For code a debugger overwrites; a store the program makes keeps the fetched opcodes,
+   * as on hardware.
+   */
+  flushPipeline(): void {
+    this.#pipelineAddress = PIPELINE_EMPTY;
   }
 
   /** Check if IRQs are disabled (CPSR I bit set) */
@@ -590,15 +709,19 @@ export class ArmCpu {
    * 5. Clear T bit (enter ARM state)
    * 6. Set PC to IRQ vector (0x00000018)
    *
-   * The BIOS stub at 0x18 (installed by Gba.#installBiosStub) handles:
+   * On the GBA the BIOS code at 0x18 (gba-emulator bios-image.ts) handles:
    * - Saving registers to IRQ stack
    * - Calling the user's handler from [0x03007FFC]
    * - Restoring registers and returning from IRQ
    *
-   * The BIOS stub at 0x80 handles IE/IF acknowledgment and BIOS IF mirror
-   * update before calling the user handler.
+   * Returns the cycles the entry takes: the N+S refill at the vector, which with the S fetch that
+   * ended the previous instruction makes GBATEK's 2S+1N for an exception. Nothing charges the fetch
+   * the handler's first instruction starts with; that gives the request-to-handler time
+   * mgba-suite's "Timer IRQ" tests measure on hardware.
    */
-  enterIrq(): void {
+  enterIrq(): number {
+    this.#cycles = 0;
+
     // Save current CPSR as SPSR_irq
     const savedCpsr = this.cpsr;
 
@@ -620,9 +743,26 @@ export class ArmCpu {
     this.cpsr |= 1 << CPSR_I; // Disable IRQs
     this.cpsr &= ~(1 << CPSR_T); // Enter ARM state
 
-    // Jump to BIOS IRQ vector — the stub handles IE/IF acknowledgment,
-    // BIOS IF mirror update, and calling the user handler
-    this.registers[PC] = 0x00000018;
+    // Jump to the BIOS IRQ vector, whose code calls the user handler.
+    this.#branchTo(0x00000018);
+    return this.#cycles;
+  }
+
+  /**
+   * Enter the Software Interrupt exception: SVC mode with LR_svc the address of the instruction
+   * after the SWI and SPSR_svc the CPSR it ran under, IRQs disabled, ARM state, PC at the 0x08
+   * vector (GBATEK "ARM CPU Exceptions"). Called while the SWI executes, when registers[PC] already
+   * holds that next address.
+   */
+  #enterSwi(): void {
+    const savedCpsr = this.cpsr;
+    const returnAddr = this.registers[PC]!;
+    this.switchMode(MODE_SVC);
+    this.registers[LR] = returnAddr;
+    this.setSPSR(savedCpsr);
+    this.cpsr |= 1 << CPSR_I;
+    this.cpsr &= ~(1 << CPSR_T);
+    this.#branchTo(0x00000008);
   }
 
   /** Enter Undefined Instruction exception */
@@ -637,22 +777,29 @@ export class ArmCpu {
     this.setSPSR(savedCpsr);
     this.cpsr |= 1 << CPSR_I; // Disable IRQs
     this.cpsr &= ~(1 << CPSR_T); // Enter ARM state
-    this.registers[PC] = 0x00000004; // UND vector
+    this.#branchTo(0x00000004); // UND vector
   }
 
   /**
-   * Execute one instruction (ARM or Thumb based on T bit).
-   * Returns false when nothing ran: the CPU is halted, or a debug hook refused the instruction.
+   * Execute one instruction (ARM or Thumb based on T bit) and return the cycles it took: its data
+   * accesses, internal cycles and branch refill, then the opcode fetch the next instruction begins
+   * with. Returns 0 when nothing ran: the CPU is halted (`halted`), a debug hook refused the
+   * instruction (`refused`), or the instruction halted the CPU at the sentinel return address. A
+   * call into a registered stub returns 1.
+   *
+   * A PC set from outside (a host, the debugger) refills the pipeline here at no cost, the first
+   * instruction's fetch included; a branch the program takes pays for its refill.
    */
-  step(): boolean {
+  step(): number {
+    this.#refused = false;
     if (this.#halted) {
-      return false;
+      return 0;
     }
 
     const pc = this.registers[PC]!;
-    if ((pc & ~1) === SENTINEL_ADDR || (pc & ~1) === (SENTINEL_ADDR & ~1)) {
+    if (isSentinel(pc)) {
       this.#halted = true;
-      return false;
+      return 0;
     }
 
     // Check stubs
@@ -671,7 +818,7 @@ export class ArmCpu {
       this.registers[0] = 0;
       const returnAddr = this.registers[LR]!;
       this.registers[PC] = returnAddr & ~1;
-      return true;
+      return 1;
     }
 
     if (this.getT()) {
@@ -705,13 +852,160 @@ export class ArmCpu {
     };
   }
 
+  // ─── Pipeline and Register Helpers ───────────────────────────────
+
+  /** Refill the pipeline from `address`: what a branch does in its two refill cycles. */
+  #fillPipeline(address: number, thumb: boolean): void {
+    if (thumb) {
+      this.#decodedOpcode = this.memory.fetch16(address);
+      this.#fetchedOpcode = this.memory.fetch16((address + 2) >>> 0);
+    } else {
+      this.#decodedOpcode = this.memory.fetch32(address);
+      this.#fetchedOpcode = this.memory.fetch32((address + 4) >>> 0);
+    }
+    this.#pipelineAddress = address;
+    this.#pipelineThumb = thumb;
+    this.#nextFetchSequential = true;
+  }
+
+  /**
+   * Write the PC as a branch does: aligned for the current instruction set (mGBA ARM_WRITE_PC and
+   * THUMB_WRITE_PC mask with -WORD_SIZE), with the pipeline refilled from the target. The refill
+   * is an N fetch of the target and an S fetch of the opcode after it, the 1N+1S every branch adds
+   * to the instruction's own fetch (GBATEK: B 2S+1N).
+   */
+  #branchTo(target: number): void {
+    const thumb = this.getT();
+    const width = thumb ? 2 : 4;
+    const address = (thumb ? target & ~1 : target & ~3) >>> 0;
+    this.registers[PC] = address;
+    this.#cycles +=
+      this.memory.fetchCycles(address, width, false) + this.memory.fetchCycles((address + width) >>> 0, width, true);
+    this.#fillPipeline(address, thumb);
+  }
+
+  // ─── Cycle Accounting ────────────────────────────────────────────
+
+  /**
+   * The opcode fetch that ends an instruction: the one the next instruction's first cycle makes,
+   * [$+8] in ARM state and [$+4] in Thumb state, $ being that next instruction. Counting it here
+   * puts the clock between two instructions after that fetch, at the cycle of the next
+   * instruction's first data access, which is when its I/O sees the hardware.
+   */
+  #chargeNextFetch(): void {
+    const width = this.#pipelineThumb ? 2 : 4;
+    const address = (this.#pipelineAddress + 2 * width) >>> 0;
+    this.#cycles += this.memory.fetchCycles(address, width, this.#nextFetchSequential);
+  }
+
+  /** A data access, in its place among the instruction's cycles; the next fetch is nonsequential. */
+  #chargeAccess(address: number, width: 1 | 2 | 4, sequential: boolean): void {
+    this.#cycles += this.memory.dataCycles(address, width, sequential);
+    this.#nextFetchSequential = false;
+  }
+
+  /** Internal cycles, in which the bus is idle; the next fetch is nonsequential. */
+  #chargeInternal(cycles: number): void {
+    this.memory.idle(cycles);
+    this.#cycles += cycles;
+    this.#nextFetchSequential = false;
+  }
+
+  /** A load: its N data cycle, then the I cycle that writes the register (GBATEK LDR: 1S+1N+1I). */
+  #chargeLoad(address: number, width: 1 | 2 | 4): void {
+    this.#chargeAccess(address, width, false);
+    this.#chargeInternal(1);
+  }
+
+  /** A store: its N data cycle (GBATEK STR: 2N, the store and the nonsequential fetch after it). */
+  #chargeStore(address: number, width: 1 | 2 | 4): void {
+    this.#chargeAccess(address, width, false);
+  }
+
+  /**
+   * Restore the CPSR from the current mode's SPSR, the return from an exception. USR and SYS have
+   * no SPSR, and there the CPSR stays as it is (mGBA `_ARMModeHasSPSR`). Returns whether it did.
+   */
+  #restoreCpsrFromSpsr(): boolean {
+    const idx = SPSR_BANK_INDEX[this.getMode()];
+    if (idx === undefined) {
+      return false;
+    }
+    const spsr = this.#spsr[idx]!;
+    // Switch first, so the banked registers of the old mode are saved and the new mode's restored.
+    this.switchMode(spsr & CPSR_MODE_MASK);
+    this.cpsr = spsr;
+    return true;
+  }
+
+  /** Register `index` as User mode sees it, whatever the current mode (LDM/STM with the S bit). */
+  #readUserRegister(index: number): number {
+    const mode = this.getMode();
+    if (index >= 8 && index <= 12 && mode === MODE_FIQ) {
+      return this.#usrBankedR8to12[index - 8]!;
+    }
+    if ((index === SP || index === LR) && mode !== MODE_USR && mode !== MODE_SYS) {
+      return index === SP ? this.#bankedSP[0]! : this.#bankedLR[0]!;
+    }
+    return this.registers[index]!;
+  }
+
+  /** Write register `index` of the User mode bank, whatever the current mode. */
+  #writeUserRegister(index: number, value: number): void {
+    const mode = this.getMode();
+    if (index >= 8 && index <= 12 && mode === MODE_FIQ) {
+      this.#usrBankedR8to12[index - 8] = value;
+    } else if ((index === SP || index === LR) && mode !== MODE_USR && mode !== MODE_SYS) {
+      if (index === SP) {
+        this.#bankedSP[0] = value;
+      } else {
+        this.#bankedLR[0] = value;
+      }
+    } else {
+      this.registers[index] = value;
+    }
+  }
+
+  // The bus returns the aligned word or halfword (see MemoryBus); the CPU applies the ARM7TDMI
+  // rules for a misaligned load (GBATEK "ARM.9 Single Data Transfer", "ARM.10 Halfword Transfer").
+
+  /** LDR: a misaligned word load reads the aligned word rotated right by 8 per byte of offset. */
+  #loadWord(address: number): number {
+    const value = this.memory.read32(address);
+    const rotation = (address & 3) * 8;
+    return rotation === 0 ? value >>> 0 : ((value >>> rotation) | (value << (32 - rotation))) >>> 0;
+  }
+
+  /** LDRH: a misaligned halfword load reads the aligned halfword rotated right by 8. */
+  #loadHalfword(address: number): number {
+    const value = this.memory.read16(address);
+    return address & 1 ? ((value >>> 8) | (value << 24)) >>> 0 : value;
+  }
+
+  /** LDRSH: a misaligned signed halfword load sign-extends the byte at the odd address. */
+  #loadSignedHalfword(address: number): number {
+    const value = this.memory.read16(address);
+    return (address & 1 ? signExtend(value >>> 8, 8) : signExtend(value, 16)) >>> 0;
+  }
+
+  /** Write a loaded value into `rd`. Loading the PC branches in the current state (no interworking on ARMv4). */
+  #writeLoaded(rd: number, value: number): void {
+    if (rd === PC) {
+      this.#branchTo(value);
+    } else {
+      this.registers[rd] = value;
+    }
+  }
+
   // ─── Thumb Execution ─────────────────────────────────────────────
 
-  /** Execute one Thumb instruction */
-  #stepThumb(): boolean {
-    const pc = this.registers[PC]!;
-    const instrAddr = pc & ~1;
-    const instr = this.memory.read16(instrAddr);
+  /** Execute one Thumb instruction; returns its cycles, or 0 when nothing ran. */
+  #stepThumb(): number {
+    const instrAddr = (this.registers[PC]! & ~1) >>> 0;
+    if (instrAddr !== this.#pipelineAddress || !this.#pipelineThumb) {
+      this.#fillPipeline(instrAddr, true);
+    }
+    const instr = this.#decodedOpcode;
 
     if (this.#execWatchActive) {
       this.#fireExecWatch(instrAddr);
@@ -720,19 +1014,31 @@ export class ArmCpu {
     if (this.#hooks?.onInstructionPre) {
       const action = this.#hooks.onInstructionPre(instrAddr, instr);
       if (action === 'break') {
-        return false;
+        this.#refused = true;
+        return 0;
       }
     }
 
-    this.registers[PC] = (pc + 2) >>> 0;
+    // Fetch stage: [$+4] enters the pipeline before this instruction touches memory. The
+    // instruction before paid for the fetch (#chargeNextFetch).
+    const fetchAddress = (instrAddr + 4) >>> 0;
+    this.#decodedOpcode = this.#fetchedOpcode;
+    this.#fetchedOpcode = this.memory.fetch16(fetchAddress);
+    this.#cycles = 0;
+    this.#nextFetchSequential = true;
+    this.#pipelineAddress = (instrAddr + 2) >>> 0;
+    this.registers[PC] = (instrAddr + 2) >>> 0;
     this.#executeThumb(instr, instrAddr);
 
+    if (!this.#halted) {
+      this.#chargeNextFetch();
+    }
     this.#hooks?.onInstructionPost?.(instrAddr, instr);
-    return !this.#halted;
+    return this.#halted ? 0 : this.#cycles;
   }
 
   /** Decode and execute a single 16-bit Thumb instruction. */
-  #executeThumb(instr: number, _instrAddr: number): void {
+  #executeThumb(instr: number, instrAddr: number): void {
     const op = instr >>> 8;
 
     // Format 19: Long Branch with Link (BL) — two-part
@@ -749,13 +1055,20 @@ export class ArmCpu {
     if ((instr & 0xf800) === 0xe000) {
       const offset11 = signExtend(instr & 0x7ff, 11);
       // ARM7TDMI pipeline: PC = instrAddr+4. registers[PC] = instrAddr+2, so add +2.
-      this.registers[PC] = (this.registers[PC]! + 2 + offset11 * 2) >>> 0;
+      this.#branchTo(this.registers[PC]! + 2 + offset11 * 2);
+      return;
+    }
+
+    // 0xE800-0xEFFF (the BLX suffix on ARMv5) and 0xDE00-0xDEFF (B with condition AL) are undefined
+    // on ARMv4T (mGBA src/arm/isa-thumb.c: ILL).
+    if ((instr & 0xf800) === 0xe800 || (instr & 0xff00) === 0xde00) {
+      this.enterUnd(instrAddr);
       return;
     }
 
     // Format 17: SWI
     if ((instr & 0xff00) === 0xdf00) {
-      this.#swiHandler?.(this, instr & 0xff);
+      this.#softwareInterrupt(instr & 0xff);
       return;
     }
 
@@ -790,8 +1103,10 @@ export class ArmCpu {
       const offset8 = (instr & 0xff) << 2;
       const address = (this.registers[SP]! + offset8) >>> 0;
       if (l === 1) {
-        this.registers[rd] = this.memory.read32(address);
+        this.#chargeLoad(address, 4);
+        this.registers[rd] = this.#loadWord(address);
       } else {
+        this.#chargeStore(address, 4);
         this.memory.write32(address, this.registers[rd]!);
       }
       return;
@@ -819,8 +1134,10 @@ export class ArmCpu {
       const rd = bits(instr, 2, 0);
       const address = (this.registers[rb]! + (offset5 << 1)) >>> 0;
       if (l === 1) {
-        this.registers[rd] = this.memory.read16(address);
+        this.#chargeLoad(address, 2);
+        this.registers[rd] = this.#loadHalfword(address);
       } else {
+        this.#chargeStore(address, 2);
         this.memory.write16(address, this.registers[rd]!);
       }
       return;
@@ -850,7 +1167,8 @@ export class ArmCpu {
       const offset8 = (instr & 0xff) << 2;
       const base = ((this.registers[PC]! + 2) & ~3) >>> 0;
       const address = (base + offset8) >>> 0;
-      this.registers[rd] = this.memory.read32(address);
+      this.#chargeLoad(address, 4);
+      this.registers[rd] = this.#loadWord(address);
       return;
     }
 
@@ -985,19 +1303,23 @@ export class ArmCpu {
       case 0x1:
         result = rdVal ^ rsVal;
         break;
+      // A shift by a register spends an I cycle reading the amount (GBATEK THUMB.4: 1S+1I).
       case 0x2: {
         const amount = rsVal & 0xff;
         [result, carry] = lsl(rdVal, amount, this.getC());
+        this.#chargeInternal(1);
         break;
       }
       case 0x3: {
         const amount = rsVal & 0xff;
         [result, carry] = lsr(rdVal, amount, this.getC());
+        this.#chargeInternal(1);
         break;
       }
       case 0x4: {
         const amount = rsVal & 0xff;
         [result, carry] = asr(rdVal, amount, this.getC());
+        this.#chargeInternal(1);
         break;
       }
       case 0x5: {
@@ -1017,6 +1339,7 @@ export class ArmCpu {
       case 0x7: {
         const amount = rsVal & 0xff;
         [result, carry] = ror(rdVal, amount, this.getC());
+        this.#chargeInternal(1);
         break;
       }
       case 0x8:
@@ -1050,8 +1373,10 @@ export class ArmCpu {
         result = rdVal | rsVal;
         break;
       case 0xd:
+        // MUL Rd, Rs is MULS Rd, Rs, Rd: Rd is the multiplier.
         result = Math.imul(rdVal, rsVal);
-        carry = false;
+        carry = multiplyCarry(rsVal, rdVal, 0);
+        this.#chargeInternal(multiplierCycles(rdVal, true));
         break;
       case 0xe:
         result = rdVal & ~rsVal;
@@ -1092,9 +1417,10 @@ export class ArmCpu {
 
     switch (op) {
       case 0: // ADD
-        this.registers[rd] = (rdVal + rsVal) >>> 0;
         if (rd === PC) {
-          this.registers[PC] = this.registers[PC]! & ~1;
+          this.#branchTo(rdVal + rsVal);
+        } else {
+          this.registers[rd] = (rdVal + rsVal) >>> 0;
         }
         break;
       case 1: {
@@ -1104,19 +1430,20 @@ export class ArmCpu {
         break;
       }
       case 2: // MOV
-        this.registers[rd] = rsVal;
         if (rd === PC) {
-          this.registers[PC] = this.registers[PC]! & ~1;
+          this.#branchTo(rsVal);
+        } else {
+          this.registers[rd] = rsVal;
         }
         break;
       case 3: // BX
-        if ((rsVal & ~1) === SENTINEL_ADDR || (rsVal & ~1) === (SENTINEL_ADDR & ~1)) {
+        if (isSentinel(rsVal)) {
           this.#halted = true;
           return;
         }
-        // T bit determined by bit 0
+        // T bit determined by bit 0; an ARM target is word-aligned.
         this.setT((rsVal & 1) !== 0);
-        this.registers[PC] = rsVal & ~1;
+        this.#branchTo(rsVal);
         break;
     }
   }
@@ -1128,24 +1455,16 @@ export class ArmCpu {
     const rb = bits(instr, 5, 3);
     const rd = bits(instr, 2, 0);
     const address = (this.registers[rb]! + this.registers[ro]!) >>> 0;
+    const width = b === 1 ? 1 : 4;
     if (l === 1) {
-      if (b === 1) {
-        this.registers[rd] = this.memory.read8(address);
-      } else {
-        // ARM7TDMI: unaligned word reads rotate
-        const aligned = address & ~3;
-        const rotation = (address & 3) * 8;
-        let value = this.memory.read32(aligned);
-        if (rotation) {
-          value = ((value >>> rotation) | (value << (32 - rotation))) >>> 0;
-        }
-        this.registers[rd] = value;
-      }
+      this.#chargeLoad(address, width);
+      this.registers[rd] = b === 1 ? this.memory.read8(address) : this.#loadWord(address);
     } else {
+      this.#chargeStore(address, width);
       if (b === 1) {
         this.memory.write8(address, this.registers[rd]!);
       } else {
-        this.memory.write32(address & ~3, this.registers[rd]!);
+        this.memory.write32(address, this.registers[rd]!);
       }
     }
   }
@@ -1158,17 +1477,18 @@ export class ArmCpu {
     const rd = bits(instr, 2, 0);
     const address = (this.registers[rb]! + this.registers[ro]!) >>> 0;
     if (s === 0 && h === 0) {
+      this.#chargeStore(address, 2);
       this.memory.write16(address, this.registers[rd]!);
-    } else if (s === 0 && h === 1) {
-      this.registers[rd] = this.memory.read16(address);
-    } else if (s === 1 && h === 0) {
+      return;
+    }
+    // LDRSB reads a byte, LDRH and LDRSH a halfword.
+    this.#chargeLoad(address, s === 1 && h === 0 ? 1 : 2);
+    if (s === 0) {
+      this.registers[rd] = this.#loadHalfword(address);
+    } else if (h === 0) {
       this.registers[rd] = signExtend(this.memory.read8(address), 8) >>> 0;
     } else {
-      if (address & 1) {
-        this.registers[rd] = signExtend(this.memory.read8(address), 8) >>> 0;
-      } else {
-        this.registers[rd] = signExtend(this.memory.read16(address), 16) >>> 0;
-      }
+      this.registers[rd] = this.#loadSignedHalfword(address);
     }
   }
 
@@ -1181,125 +1501,34 @@ export class ArmCpu {
     const base = this.registers[rb]!;
     const offset = b === 0 ? offset5 << 2 : offset5;
     const address = (base + offset) >>> 0;
+    const width = b === 1 ? 1 : 4;
     if (l === 1) {
-      if (b === 1) {
-        this.registers[rd] = this.memory.read8(address);
-      } else {
-        // ARM7TDMI: unaligned word reads rotate
-        const aligned = address & ~3;
-        const rotation = (address & 3) * 8;
-        let value = this.memory.read32(aligned);
-        if (rotation) {
-          value = ((value >>> rotation) | (value << (32 - rotation))) >>> 0;
-        }
-        this.registers[rd] = value;
-      }
+      this.#chargeLoad(address, width);
+      this.registers[rd] = b === 1 ? this.memory.read8(address) : this.#loadWord(address);
     } else {
+      this.#chargeStore(address, width);
       if (b === 1) {
         this.memory.write8(address, this.registers[rd]!);
       } else {
-        this.memory.write32(address & ~3, this.registers[rd]!);
+        this.memory.write32(address, this.registers[rd]!);
       }
     }
   }
 
+  /** Format 14: PUSH is STMDB SP! with LR as bit 14; POP is LDMIA SP! with PC as bit 15. */
   #thumbPushPop(instr: number): void {
-    const l = bit(instr, 11);
-    const r = bit(instr, 8);
-    const rlist = instr & 0xff;
-
-    if (l === 0) {
-      // PUSH
-      let sp = this.registers[SP]!;
-      let count = 0;
-      for (let i = 0; i < 8; i++) {
-        if (rlist & (1 << i)) {
-          count++;
-        }
-      }
-      if (r) {
-        count++;
-      }
-      sp = (sp - count * 4) >>> 0;
-      this.registers[SP] = sp;
-      let addr = sp;
-      for (let i = 0; i < 8; i++) {
-        if (rlist & (1 << i)) {
-          this.memory.write32(addr, this.registers[i]!);
-          addr = (addr + 4) >>> 0;
-        }
-      }
-      if (r) {
-        this.memory.write32(addr, this.registers[LR]!);
-      }
-    } else {
-      // POP
-      let addr = this.registers[SP]!;
-      for (let i = 0; i < 8; i++) {
-        if (rlist & (1 << i)) {
-          this.registers[i] = this.memory.read32(addr);
-          addr = (addr + 4) >>> 0;
-        }
-      }
-      if (r) {
-        const val = this.memory.read32(addr);
-        addr = (addr + 4) >>> 0;
-        if ((val & ~1) === SENTINEL_ADDR || (val & ~1) === (SENTINEL_ADDR & ~1)) {
-          this.#halted = true;
-          this.registers[SP] = addr;
-          return;
-        }
-        this.registers[PC] = val & ~1;
-      }
-      this.registers[SP] = addr;
-    }
+    const load = bit(instr, 11) === 1;
+    const extra = bit(instr, 8) === 1 ? (load ? 1 << PC : 1 << LR) : 0;
+    const rlist = (instr & 0xff) | extra;
+    // A stored PC (empty list) is instrAddr+6: registers[PC] is instrAddr+2.
+    this.#blockTransfer(SP, rlist, load, !load, load, true, false, (this.registers[PC]! + 4) >>> 0);
   }
 
+  /** Format 15: LDMIA/STMIA Rb!, {Rlist}. */
   #thumbBlockTransfer(instr: number): void {
-    const l = bit(instr, 11);
+    const load = bit(instr, 11) === 1;
     const rb = bits(instr, 10, 8);
-    const rlist = instr & 0xff;
-    let addr = this.registers[rb]!;
-    // Empty register list. The encoding permits Rlist == 0, and ARM7TDMI does NOT treat it as a
-    // no-op: it transfers R15 and advances the base by 0x40.
-    //
-    //   GBATEK, THUMB.15: "Empty Rlist: R15 loaded/stored (ARMv4 only), and Rb=Rb+40h
-    //   (ARMv4-v5)."
-    //
-    // The stored value is the pipeline PC (instrAddr+4) plus one instruction width, matching
-    // mGBA's `cpu->gprs[ARM_PC] + WORD_SIZE_THUMB`. registers[PC] here is instrAddr+2, so the
-    // architectural PC is registers[PC]+2 and the stored value is registers[PC]+4.
-    if (rlist === 0) {
-      if (l === 1) {
-        this.registers[PC] = this.memory.read32(addr) & ~1;
-      } else {
-        this.memory.write32(addr, (this.registers[PC]! + 4) >>> 0);
-      }
-      this.registers[rb] = (addr + 0x40) >>> 0;
-      return;
-    }
-    if (l === 1) {
-      // LDMIA
-      for (let i = 0; i < 8; i++) {
-        if (rlist & (1 << i)) {
-          this.registers[i] = this.memory.read32(addr);
-          addr = (addr + 4) >>> 0;
-        }
-      }
-      // No writeback if Rb is in the register list (loaded value takes precedence)
-      if (!(rlist & (1 << rb))) {
-        this.registers[rb] = addr;
-      }
-    } else {
-      // STMIA
-      for (let i = 0; i < 8; i++) {
-        if (rlist & (1 << i)) {
-          this.memory.write32(addr, this.registers[i]!);
-          addr = (addr + 4) >>> 0;
-        }
-      }
-      this.registers[rb] = addr;
-    }
+    this.#blockTransfer(rb, instr & 0xff, load, false, true, true, false, (this.registers[PC]! + 4) >>> 0);
   }
 
   #thumbCondBranch(instr: number): void {
@@ -1310,7 +1539,7 @@ export class ArmCpu {
     }
     // ARM7TDMI pipeline: PC reads as instrAddr+4 in Thumb mode.
     // registers[PC] is instrAddr+2 (pre-incremented), so add +2 for pipeline.
-    this.registers[PC] = (this.registers[PC]! + 2 + offset8 * 2) >>> 0;
+    this.#branchTo(this.registers[PC]! + 2 + offset8 * 2);
   }
 
   #thumbBlPrefix(instr: number): void {
@@ -1323,16 +1552,18 @@ export class ArmCpu {
     const offset11 = (instr & 0x7ff) << 1;
     const target = (this.registers[LR]! + offset11) >>> 0;
     this.registers[LR] = (this.registers[PC]! | 1) >>> 0;
-    this.registers[PC] = target & ~1;
+    this.#branchTo(target);
   }
 
   // ─── ARM Execution ───────────────────────────────────────────────
 
-  /** Execute one ARM (32-bit) instruction */
-  #stepArm(): boolean {
-    const pc = this.registers[PC]!;
-    const instrAddr = pc & ~3;
-    const instr = this.memory.read32(instrAddr);
+  /** Execute one ARM (32-bit) instruction; returns its cycles, or 0 when nothing ran. */
+  #stepArm(): number {
+    const instrAddr = (this.registers[PC]! & ~3) >>> 0;
+    if (instrAddr !== this.#pipelineAddress || this.#pipelineThumb) {
+      this.#fillPipeline(instrAddr, false);
+    }
+    const instr = this.#decodedOpcode;
 
     if (this.#execWatchActive) {
       this.#fireExecWatch(instrAddr);
@@ -1341,12 +1572,20 @@ export class ArmCpu {
     if (this.#hooks?.onInstructionPre) {
       const action = this.#hooks.onInstructionPre(instrAddr, instr);
       if (action === 'break') {
-        return false;
+        this.#refused = true;
+        return 0;
       }
     }
 
-    // Advance PC by 4 (ARM instructions are 4 bytes)
-    this.registers[PC] = (pc + 4) >>> 0;
+    // Fetch stage: [$+8] enters the pipeline before this instruction touches memory, one whose
+    // condition fails included. The instruction before paid for the fetch (#chargeNextFetch).
+    const fetchAddress = (instrAddr + 8) >>> 0;
+    this.#decodedOpcode = this.#fetchedOpcode;
+    this.#fetchedOpcode = this.memory.fetch32(fetchAddress);
+    this.#cycles = 0;
+    this.#nextFetchSequential = true;
+    this.#pipelineAddress = (instrAddr + 4) >>> 0;
+    this.registers[PC] = (instrAddr + 4) >>> 0;
 
     // Check condition code (bits 31-28)
     const cond = (instr >>> 28) & 0xf;
@@ -1354,8 +1593,11 @@ export class ArmCpu {
       this.#executeArm(instr, instrAddr);
     }
 
+    if (!this.#halted) {
+      this.#chargeNextFetch();
+    }
     this.#hooks?.onInstructionPost?.(instrAddr, instr);
-    return !this.#halted;
+    return this.#halted ? 0 : this.#cycles;
   }
 
   /**
@@ -1396,14 +1638,14 @@ export class ArmCpu {
         this.#armBranch(instr, instrAddr);
         break;
       case 0b110:
-        // Coprocessor — undefined on GBA
-        break;
       case 0b111:
-        if (bit(instr, 24) === 1) {
-          // SWI
+        if (bits27_25 === 0b111 && bit(instr, 24) === 1) {
           this.#armSwi(instr);
+        } else {
+          // Coprocessor transfers and operations take the undefined instruction trap, since the GBA
+          // has no coprocessor (mGBA ARM_ILL raises the UND exception).
+          this.enterUnd(instrAddr);
         }
-        // else coprocessor operations — undefined on GBA
         break;
     }
   }
@@ -1497,9 +1739,10 @@ export class ArmCpu {
 
     let amount: number;
     if (regShift) {
-      // Register-specified shift amount (Rs)
+      // Register-specified shift amount (Rs), read in an I cycle (GBATEK ARM.5: +1I).
       const rsReg = (instr >>> 8) & 0xf;
       amount = this.registers[rsReg]! & 0xff;
+      this.#chargeInternal(1);
     } else {
       // Immediate-specified shift amount
       amount = (instr >>> 7) & 0x1f;
@@ -1646,33 +1889,23 @@ export class ArmCpu {
         return;
     }
 
+    // With S=1 and Rd=PC the instruction returns from an exception: the CPSR comes back from the
+    // SPSR. A mode without an SPSR sets the flags as usual instead (mGBA ARM_ADDITION_S etc.).
+    const restoredCpsr = setFlags && rd === PC && this.#restoreCpsrFromSpsr();
+    if (setFlags && !restoredCpsr) {
+      this.setN((result & 0x80000000) !== 0);
+      this.setZ(result >>> 0 === 0);
+      this.setC(carry);
+      this.setV(overflow);
+    }
+
     if (writeResult) {
-      this.registers[rd] = result >>> 0;
-    }
-
-    if (setFlags) {
       if (rd === PC) {
-        // Data processing with S=1 and Rd=PC: copy SPSR to CPSR (return from exception)
-        const spsr = this.getSPSR();
-        const newMode = spsr & CPSR_MODE_MASK;
-        const oldMode = this.getMode();
-        // Must switch mode BEFORE overwriting CPSR, so banked registers are
-        // properly saved (old mode) and restored (new mode).
-        if (newMode !== oldMode) {
-          this.switchMode(newMode);
-        }
-        this.cpsr = spsr;
+        // A branch in the state the CPSR now holds.
+        this.#branchTo(result);
       } else {
-        this.setN((result & 0x80000000) !== 0);
-        this.setZ(result >>> 0 === 0);
-        this.setC(carry);
-        this.setV(overflow);
+        this.registers[rd] = result >>> 0;
       }
-    }
-
-    // If Rd is PC and we wrote to it (non-flag instructions), flush pipeline
-    if (writeResult && rd === PC) {
-      // If the T bit changed, the new mode takes effect on next fetch
     }
   }
 
@@ -1687,17 +1920,19 @@ export class ArmCpu {
     const rs = bits(instr, 11, 8);
     const rm = instr & 0xf;
 
-    let result = Math.imul(this.registers[rm]! | 0, this.registers[rs]! | 0);
-    if (accumulate) {
-      result = (result + (this.registers[rn]! | 0)) | 0;
-    }
+    const multiplicand = this.registers[rm]!;
+    const multiplier = this.registers[rs]!;
+    const accumulator = accumulate ? this.registers[rn]! : 0;
+    const result = (Math.imul(multiplicand, multiplier) + accumulator) | 0;
+    this.#chargeInternal(multiplierCycles(multiplier, true) + (accumulate ? 1 : 0));
 
     this.registers[rd] = result >>> 0;
 
     if (setFlags) {
       this.setN((result & 0x80000000) !== 0);
       this.setZ(result >>> 0 === 0);
-      // C is unpredictable on ARMv4T, V is unchanged
+      // C is the multiplier's internal carry (multiply-carry.ts); V is unchanged.
+      this.setC(multiplyCarry(multiplicand, multiplier, accumulator));
     }
   }
 
@@ -1708,37 +1943,19 @@ export class ArmCpu {
     const setFlags = bit(instr, 20) === 1;
     const rdHi = bits(instr, 19, 16);
     const rdLo = bits(instr, 15, 12);
-    const rs = bits(instr, 11, 8);
-    const rm = instr & 0xf;
+    const multiplicand = this.registers[instr & 0xf]!;
+    const multiplier = this.registers[bits(instr, 11, 8)]!;
+    const accLo = accumulate ? this.registers[rdLo]! : 0;
+    const accHi = accumulate ? this.registers[rdHi]! : 0;
+    this.#chargeInternal(multiplierCycles(multiplier, isSigned) + (accumulate ? 2 : 1));
 
-    let resultHi: number;
-    let resultLo: number;
-
-    if (isSigned) {
-      // SMULL/SMLAL: signed 32x32 -> 64
-      const a = this.registers[rm]! | 0;
-      const b = this.registers[rs]! | 0;
-      // Use BigInt for 64-bit precision
-      const product = BigInt(a) * BigInt(b);
-      resultLo = Number(product & 0xffffffffn) >>> 0;
-      resultHi = Number((product >> 32n) & 0xffffffffn) >>> 0;
-    } else {
-      // UMULL/UMLAL: unsigned 32x32 -> 64
-      const a = this.registers[rm]! >>> 0;
-      const b = this.registers[rs]! >>> 0;
-      const product = BigInt(a) * BigInt(b);
-      resultLo = Number(product & 0xffffffffn) >>> 0;
-      resultHi = Number((product >> 32n) & 0xffffffffn) >>> 0;
-    }
-
-    if (accumulate) {
-      // Add to existing RdHi:RdLo
-      const accLo = this.registers[rdLo]! >>> 0;
-      const accHi = this.registers[rdHi]! >>> 0;
-      const sum = BigInt(resultHi) * 0x100000000n + BigInt(resultLo) + BigInt(accHi) * 0x100000000n + BigInt(accLo);
-      resultLo = Number(sum & 0xffffffffn) >>> 0;
-      resultHi = Number((sum >> 32n) & 0xffffffffn) >>> 0;
-    }
+    // 32x32 -> 64 with BigInt for 64-bit precision, plus RdHi:RdLo for UMLAL/SMLAL.
+    const product = isSigned
+      ? BigInt(multiplicand | 0) * BigInt(multiplier | 0)
+      : BigInt(multiplicand >>> 0) * BigInt(multiplier >>> 0);
+    const sum = product + ((BigInt(accHi >>> 0) << 32n) | BigInt(accLo >>> 0));
+    const resultLo = Number(sum & 0xffffffffn) >>> 0;
+    const resultHi = Number((sum >> 32n) & 0xffffffffn) >>> 0;
 
     this.registers[rdLo] = resultLo;
     this.registers[rdHi] = resultHi;
@@ -1746,7 +1963,8 @@ export class ArmCpu {
     if (setFlags) {
       this.setN((resultHi & 0x80000000) !== 0);
       this.setZ(resultHi === 0 && resultLo === 0);
-      // C, V are unpredictable
+      // C is the multiplier's internal carry (multiply-carry.ts); V is unchanged.
+      this.setC(multiplyLongCarry(multiplicand, multiplier, accLo, accHi, isSigned));
     }
   }
 
@@ -1760,19 +1978,21 @@ export class ArmCpu {
     const rm = instr & 0xf;
     const address = this.registers[rn]!;
 
+    // A load and a store to the same address, each N, then the I cycle that writes Rd: GBATEK SWP
+    // 1S+2N+1I.
+    const width = byteMode ? 1 : 4;
+    this.#chargeAccess(address, width, false);
+    this.#chargeAccess(address, width, false);
+    this.#chargeInternal(1);
+
     if (byteMode) {
       const temp = this.memory.read8(address);
       this.memory.write8(address, this.registers[rm]! & 0xff);
       this.registers[rd] = temp;
     } else {
-      // SWP: unaligned word reads rotate (same as LDR)
-      const aligned = address & ~3;
-      const rotation = (address & 3) * 8;
-      let temp = this.memory.read32(aligned);
-      if (rotation) {
-        temp = ((temp >>> rotation) | (temp << (32 - rotation))) >>> 0;
-      }
-      this.memory.write32(aligned, this.registers[rm]!);
+      // SWP: the load rotates a misaligned word like LDR does.
+      const temp = this.#loadWord(address);
+      this.memory.write32(address, this.registers[rm]!);
       this.registers[rd] = temp;
     }
   }
@@ -1784,13 +2004,13 @@ export class ArmCpu {
     const rm = instr & 0xf;
     const target = this.registers[rm]!;
 
-    if ((target & ~1) === SENTINEL_ADDR || (target & ~1) === (SENTINEL_ADDR & ~1)) {
+    if (isSentinel(target)) {
       this.#halted = true;
       return;
     }
 
     this.setT((target & 1) !== 0);
-    this.registers[PC] = target & ~1;
+    this.#branchTo(target);
   }
 
   // ─── ARM Branch ──────────────────────────────────────────────────
@@ -1806,82 +2026,18 @@ export class ArmCpu {
     }
 
     // ARM7TDMI pipeline: PC = instrAddr+8. registers[PC] = instrAddr+4, so add +4.
-    this.registers[PC] = (this.registers[PC]! + 4 + offset) >>> 0;
+    this.#branchTo(this.registers[PC]! + 4 + offset);
   }
 
-  // ─── ARM Single Data Transfer (Immediate offset) ─────────────────
+  // ─── ARM Single Data Transfer (LDR/STR) ─────────────────────────
 
   /** ARM LDR/STR with immediate offset */
   #armSingleDataTransferImm(instr: number): void {
-    const pre = bit(instr, 24) === 1;
-    const up = bit(instr, 23) === 1;
-    const byteMode = bit(instr, 22) === 1;
-    const writeback = bit(instr, 21) === 1;
-    const load = bit(instr, 20) === 1;
-    const rn = bits(instr, 19, 16);
-    const rd = bits(instr, 15, 12);
-    const offset = instr & 0xfff;
-
-    let base = this.registers[rn]!;
-    if (rn === PC) {
-      base = (base + 4) >>> 0; // PC+8 relative to instruction address
-    }
-    const effectiveOffset = up ? offset : -offset;
-
-    let address: number;
-    if (pre) {
-      address = (base + effectiveOffset) >>> 0;
-    } else {
-      address = base;
-    }
-
-    if (load) {
-      if (byteMode) {
-        this.registers[rd] = this.memory.read8(address);
-      } else {
-        // ARM7TDMI: unaligned word reads rotate the value
-        const aligned = address & ~3;
-        const rotation = (address & 3) * 8;
-        let value = this.memory.read32(aligned);
-        if (rotation) {
-          value = ((value >>> rotation) | (value << (32 - rotation))) >>> 0;
-        }
-        this.registers[rd] = value;
-      }
-      if (rd === PC) {
-        this.registers[PC] = this.registers[PC]! & ~3;
-      }
-    } else {
-      let value = this.registers[rd]!;
-      if (rd === PC) {
-        value = (value + 4) >>> 0; // PC+12
-      }
-      if (byteMode) {
-        this.memory.write8(address, value & 0xff);
-      } else {
-        this.memory.write32(address & ~3, value);
-      }
-    }
-
-    // Writeback
-    if (pre && writeback) {
-      this.registers[rn] = (base + effectiveOffset) >>> 0;
-    } else if (!pre) {
-      // Post-indexed always writes back
-      this.registers[rn] = (base + effectiveOffset) >>> 0;
-    }
+    this.#armSingleDataTransfer(instr, instr & 0xfff);
   }
 
   /** ARM LDR/STR with register offset */
   #armSingleDataTransferReg(instr: number): void {
-    const pre = bit(instr, 24) === 1;
-    const up = bit(instr, 23) === 1;
-    const byteMode = bit(instr, 22) === 1;
-    const writeback = bit(instr, 21) === 1;
-    const load = bit(instr, 20) === 1;
-    const rn = bits(instr, 19, 16);
-    const rd = bits(instr, 15, 12);
-
     // Compute shifted register offset
     const rm = instr & 0xf;
     const shiftType = bits(instr, 6, 5);
@@ -1910,52 +2066,44 @@ export class ArmCpu {
       default:
         offset = rmVal;
     }
+    this.#armSingleDataTransfer(instr, offset);
+  }
 
-    let base = this.registers[rn]!;
-    if (rn === PC) {
-      base = (base + 4) >>> 0;
-    }
-    const effectiveOffset = up ? offset : -offset | 0;
+  /** LDR/STR/LDRB/STRB once the offset is known. */
+  #armSingleDataTransfer(instr: number, offset: number): void {
+    const pre = bit(instr, 24) === 1;
+    const up = bit(instr, 23) === 1;
+    const byteMode = bit(instr, 22) === 1;
+    const writeback = !pre || bit(instr, 21) === 1; // post-indexed always writes back
+    const load = bit(instr, 20) === 1;
+    const rn = bits(instr, 19, 16);
+    const rd = bits(instr, 15, 12);
 
-    let address: number;
-    if (pre) {
-      address = (base + effectiveOffset) >>> 0;
-    } else {
-      address = base;
-    }
+    // Rn=PC reads instrAddr+8; registers[PC] is instrAddr+4.
+    const base = rn === PC ? (this.registers[PC]! + 4) >>> 0 : this.registers[rn]!;
+    const indexed = (up ? base + offset : base - offset) >>> 0;
+    const address = pre ? indexed : base;
 
     if (load) {
-      if (byteMode) {
-        this.registers[rd] = this.memory.read8(address);
-      } else {
-        // ARM7TDMI: unaligned word reads rotate the value
-        const aligned = address & ~3;
-        const rotation = (address & 3) * 8;
-        let value = this.memory.read32(aligned);
-        if (rotation) {
-          value = ((value >>> rotation) | (value << (32 - rotation))) >>> 0;
-        }
-        this.registers[rd] = value;
+      this.#chargeLoad(address, byteMode ? 1 : 4);
+      const value = byteMode ? this.memory.read8(address) : this.#loadWord(address);
+      // The base is written back before the loaded value, so `ldr r0, [r0], #4` keeps the data.
+      if (writeback) {
+        this.registers[rn] = indexed;
       }
-      if (rd === PC) {
-        this.registers[PC] = this.registers[PC]! & ~3;
-      }
+      this.#writeLoaded(rd, value);
     } else {
-      let value = this.registers[rd]!;
-      if (rd === PC) {
-        value = (value + 4) >>> 0;
-      }
+      // A stored R15 is instrAddr+12 (GBATEK "ARM.9"; mGBA adds WORD_SIZE_ARM to PC+8).
+      const value = rd === PC ? (this.registers[PC]! + 8) >>> 0 : this.registers[rd]!;
+      this.#chargeStore(address, byteMode ? 1 : 4);
       if (byteMode) {
         this.memory.write8(address, value & 0xff);
       } else {
-        this.memory.write32(address & ~3, value);
+        this.memory.write32(address, value);
       }
-    }
-
-    if (pre && writeback) {
-      this.registers[rn] = (base + effectiveOffset) >>> 0;
-    } else if (!pre) {
-      this.registers[rn] = (base + effectiveOffset) >>> 0;
+      if (writeback) {
+        this.registers[rn] = indexed;
+      }
     }
   }
 
@@ -1966,69 +2114,49 @@ export class ArmCpu {
     const pre = bit(instr, 24) === 1;
     const up = bit(instr, 23) === 1;
     const immOffset = bit(instr, 22) === 1;
-    const writeback = bit(instr, 21) === 1;
+    const writeback = !pre || bit(instr, 21) === 1; // post-indexed always writes back
     const load = bit(instr, 20) === 1;
     const rn = bits(instr, 19, 16);
     const rd = bits(instr, 15, 12);
     const sh = bits(instr, 6, 5); // S and H bits: 01=H, 10=SB, 11=SH
 
-    let offset: number;
-    if (immOffset) {
-      // Immediate: high nibble | low nibble
-      offset = ((instr >>> 4) & 0xf0) | (instr & 0xf);
-    } else {
-      // Register
-      const rm = instr & 0xf;
-      offset = this.registers[rm]!;
-    }
+    // Immediate: high nibble | low nibble; register: Rm.
+    const offset = immOffset ? ((instr >>> 4) & 0xf0) | (instr & 0xf) : this.registers[instr & 0xf]!;
 
-    let base = this.registers[rn]!;
-    if (rn === PC) {
-      base = (base + 4) >>> 0;
-    }
-    const effectiveOffset = up ? offset : -offset;
-
-    let address: number;
-    if (pre) {
-      address = (base + effectiveOffset) >>> 0;
-    } else {
-      address = base;
-    }
+    // Rn=PC reads instrAddr+8; registers[PC] is instrAddr+4.
+    const base = rn === PC ? (this.registers[PC]! + 4) >>> 0 : this.registers[rn]!;
+    const indexed = (up ? base + offset : base - offset) >>> 0;
+    const address = pre ? indexed : base;
 
     if (load) {
+      this.#chargeLoad(address, sh === 0b10 ? 1 : 2);
+      let value: number;
       switch (sh) {
-        case 0b01: // LDRH (unsigned halfword)
-          // ARM7TDMI: unaligned LDRH reads aligned halfword then rotates by 8
-          if (address & 1) {
-            const hw = this.memory.read16(address & ~1);
-            this.registers[rd] = ((hw >>> 8) | (hw << 24)) >>> 0;
-          } else {
-            this.registers[rd] = this.memory.read16(address);
-          }
+        case 0b01: // LDRH
+          value = this.#loadHalfword(address);
           break;
-        case 0b10: // LDRSB (signed byte)
-          this.registers[rd] = signExtend(this.memory.read8(address), 8) >>> 0;
+        case 0b10: // LDRSB
+          value = signExtend(this.memory.read8(address), 8) >>> 0;
           break;
-        case 0b11: // LDRSH (signed halfword)
-          // ARM7TDMI: unaligned LDRSH loads byte and sign-extends (like LDRSB)
-          if (address & 1) {
-            this.registers[rd] = signExtend(this.memory.read8(address), 8) >>> 0;
-          } else {
-            this.registers[rd] = signExtend(this.memory.read16(address), 16) >>> 0;
-          }
+        default: // LDRSH
+          value = this.#loadSignedHalfword(address);
           break;
       }
+      // The base is written back before the loaded value, so a load into Rn keeps the data.
+      if (writeback) {
+        this.registers[rn] = indexed;
+      }
+      this.#writeLoaded(rd, value);
     } else {
-      // STRH (only sh=01 for store) — ignores bit 0 (force halfword alignment)
+      // STRH is sh=01; ARMv4 has no signed store. A stored R15 is instrAddr+12.
       if (sh === 0b01) {
-        this.memory.write16(address & ~1, this.registers[rd]! & 0xffff);
+        const value = rd === PC ? (this.registers[PC]! + 8) >>> 0 : this.registers[rd]!;
+        this.#chargeStore(address, 2);
+        this.memory.write16(address, value & 0xffff);
       }
-    }
-
-    if (pre && writeback) {
-      this.registers[rn] = (base + effectiveOffset) >>> 0;
-    } else if (!pre) {
-      this.registers[rn] = (base + effectiveOffset) >>> 0;
+      if (writeback) {
+        this.registers[rn] = indexed;
+      }
     }
   }
 
@@ -2038,76 +2166,106 @@ export class ArmCpu {
   #armBlockDataTransfer(instr: number): void {
     const pre = bit(instr, 24) === 1;
     const up = bit(instr, 23) === 1;
-    const sBit = bit(instr, 22) === 1; // PSR & force user mode
+    const sBit = bit(instr, 22) === 1;
     const writeback = bit(instr, 21) === 1;
     const load = bit(instr, 20) === 1;
     const rn = bits(instr, 19, 16);
     const rlist = instr & 0xffff;
+    // A stored R15 is instrAddr+12: registers[PC] is instrAddr+4.
+    this.#blockTransfer(rn, rlist, load, pre, up, writeback, sBit, (this.registers[PC]! + 8) >>> 0);
+  }
 
-    let base = this.registers[rn]!;
-
-    // Count registers in the list
-    let regCount = 0;
+  /**
+   * The block transfer shared by ARM LDM/STM and Thumb PUSH/POP/LDMIA/STMIA (GBATEK "ARM.11 Block
+   * Data Transfer", "THUMB.14", "THUMB.15"):
+   * - Registers go lowest first to the lowest address. An empty list transfers R15 alone and
+   *   moves the base by 0x40 (ARMv4).
+   * - STM writes the base back after its first transfer, so a base that is not the first entry
+   *   is stored as the new value. LDM writes it back before loading, so a loaded base wins.
+   * - With the S bit, an LDM that loads R15 also restores the CPSR from the SPSR; any other S-bit
+   *   transfer uses the User bank registers whatever the current mode.
+   */
+  #blockTransfer(
+    rn: number,
+    rlist: number,
+    load: boolean,
+    pre: boolean,
+    up: boolean,
+    writeback: boolean,
+    sBit: boolean,
+    storedPc: number,
+  ): void {
+    let list = rlist;
+    let span = 0;
     for (let i = 0; i < 16; i++) {
-      if (rlist & (1 << i)) {
-        regCount++;
+      if (list & (1 << i)) {
+        span += 4;
       }
     }
-
-    if (regCount === 0) {
-      // Edge case: empty register list
-      return;
+    if (list === 0) {
+      list = 1 << PC;
+      span = 0x40;
     }
 
-    // Calculate start address based on direction
-    let address: number;
-    if (up) {
-      address = pre ? (base + 4) >>> 0 : base;
-    } else {
-      // Down: start from base - regCount*4
-      address = pre ? (base - regCount * 4) >>> 0 : (base - regCount * 4 + 4) >>> 0;
-    }
+    const base = this.registers[rn]!;
+    const newBase = (up ? base + span : base - span) >>> 0;
+    let address = (up ? (pre ? base + 4 : base) : pre ? base - span : base - span + 4) >>> 0;
+    const loadsPc = load && (list & (1 << PC)) !== 0;
+    const userBank = sBit && !loadsPc;
+    // The first word is an N cycle and the rest S cycles; an LDM adds the I cycle that writes the
+    // last register (GBATEK LDM: nS+1N+1I, STM: (n-1)S+2N).
+    const firstAddress = address;
 
     if (load) {
+      if (writeback) {
+        this.registers[rn] = newBase;
+      }
+      let pcValue = 0;
       for (let i = 0; i < 16; i++) {
-        if (rlist & (1 << i)) {
-          this.registers[i] = this.memory.read32(address);
+        if (list & (1 << i)) {
+          this.#chargeAccess(address, 4, address !== firstAddress);
+          const value = this.memory.read32(address);
+          if (i === PC) {
+            pcValue = value;
+          } else if (userBank) {
+            this.#writeUserRegister(i, value);
+          } else {
+            this.registers[i] = value;
+          }
           address = (address + 4) >>> 0;
         }
       }
-      // If PC is in the list and S bit is set, restore CPSR from SPSR
-      if (rlist & (1 << PC) && sBit) {
-        const spsr = this.getSPSR();
-        const newMode = spsr & 0x1f;
-        const oldMode = this.getMode();
-        if (newMode !== oldMode) {
-          this.switchMode(newMode);
+      this.#chargeInternal(1);
+      if (loadsPc) {
+        if (sBit) {
+          this.#restoreCpsrFromSpsr();
         }
-        this.cpsr = spsr;
-      }
-      // If PC was loaded, align it
-      if (rlist & (1 << PC)) {
-        this.registers[PC] = this.registers[PC]! & ~3;
+        if (isSentinel(pcValue)) {
+          this.#halted = true;
+          this.registers[PC] = pcValue;
+        } else {
+          // ARMv4 loads R15 without interworking: the PC aligns for the state the CPU is in.
+          this.#branchTo(pcValue);
+        }
       }
     } else {
+      let first = true;
       for (let i = 0; i < 16; i++) {
-        if (rlist & (1 << i)) {
-          let value = this.registers[i]!;
+        if (list & (1 << i)) {
+          let value: number;
           if (i === PC) {
-            value = (value + 4) >>> 0; // PC+12
+            value = storedPc;
+          } else {
+            value = userBank ? this.#readUserRegister(i) : this.registers[i]!;
           }
+          this.#chargeAccess(address, 4, !first);
           this.memory.write32(address, value);
           address = (address + 4) >>> 0;
+          if (first && writeback) {
+            this.registers[rn] = newBase;
+          }
+          first = false;
         }
-      }
-    }
-
-    // Writeback (for LDM: no writeback if Rn is in the register list)
-    if (writeback && !(load && rlist & (1 << rn))) {
-      if (up) {
-        this.registers[rn] = (base + regCount * 4) >>> 0;
-      } else {
-        this.registers[rn] = (base - regCount * 4) >>> 0;
       }
     }
   }
@@ -2129,7 +2287,7 @@ export class ArmCpu {
     this.#writePsr(value, useSPSR, bits(instr, 19, 16));
   }
 
-  /** MSR (immediate): Move immediate to PSR flags */
+  /** MSR (immediate): Move immediate to PSR */
   #armMsrImm(instr: number): void {
     const useSPSR = bit(instr, 22) === 1;
     const imm8 = instr & 0xff;
@@ -2143,34 +2301,48 @@ export class ArmCpu {
     this.#writePsr(value, useSPSR, bits(instr, 19, 16));
   }
 
-  /** Write to PSR based on field mask */
+  /**
+   * Write to a PSR through MSR's field mask. ARMv4T implements the flags (bits 31-28) and the
+   * control byte (bits 7-0); the bits between read as zero. User mode writes the flags only
+   * (GBATEK "ARM.6 PSR Transfer"; mGBA MSR: PSR_USER_MASK, PSR_PRIV_MASK under `privilegeMode !=
+   * MODE_USER`).
+   */
   #writePsr(value: number, useSPSR: boolean, fieldMask: number): void {
     let mask = 0;
-    if (fieldMask & 0x1) {
-      mask |= 0x000000ff;
-    } // control
-    if (fieldMask & 0x2) {
-      mask |= 0x0000ff00;
-    } // extension
-    if (fieldMask & 0x4) {
-      mask |= 0x00ff0000;
-    } // status
     if (fieldMask & 0x8) {
-      mask |= 0xff000000;
-    } // flags
+      mask |= PSR_FLAGS_MASK;
+    }
+    if (fieldMask & 0x1 && this.getMode() !== MODE_USR) {
+      mask |= PSR_CONTROL_MASK;
+    }
 
     if (useSPSR) {
-      const current = this.getSPSR();
-      this.setSPSR((current & ~mask) | (value & mask));
-    } else {
-      const oldMode = this.getMode();
-      this.cpsr = (this.cpsr & ~mask) | (value & mask);
-      const newMode = this.getMode();
-      if (newMode !== oldMode) {
-        // Need to re-bank registers
-        this.#saveBankedRegisters(oldMode);
-        this.#restoreBankedRegisters(newMode);
-      }
+      this.setSPSR(((this.getSPSR() & ~mask) | (value & mask)) >>> 0);
+      return;
+    }
+    const newCpsr = ((this.cpsr & ~mask) | (value & mask)) >>> 0;
+    // Switch first, so the banked registers of the old mode are saved and the new mode's restored.
+    this.switchMode(newCpsr & CPSR_MODE_MASK);
+    this.cpsr = newCpsr;
+  }
+
+  // ─── Software Interrupt ──────────────────────────────────────────
+
+  /**
+   * SWI: an HLE handler runs the call in place of the BIOS code at the 0x08 vector and returns the
+   * cycles that code takes. The branch back refills the pipeline at the return address, as the
+   * BIOS's `movs pc, lr` does on hardware, so code the call wrote right after the SWI runs next.
+   * A call the handler leaves to the BIOS code (it returns null) takes the exception into it.
+   */
+  #softwareInterrupt(swiNumber: number): void {
+    const cycles = this.#swiHandler ? this.#swiHandler(this, swiNumber) : 0;
+    if (cycles === null) {
+      this.#enterSwi();
+      return;
+    }
+    this.#chargeInternal(cycles);
+    if (!this.#halted) {
+      this.#branchTo(this.registers[PC]!);
     }
   }
 
@@ -2178,9 +2350,8 @@ export class ArmCpu {
 
   /** ARM Software Interrupt */
   #armSwi(instr: number): void {
-    // The SWI number encoding is platform-specific. On GBA it's bits 23-16.
-    // We pass the full 24-bit comment field; the handler extracts what it needs.
+    // GBA convention: the SWI number is bits 23-16 of the ARM encoding (bits 7-0 in Thumb).
     const swiNumber = (instr >>> 16) & 0xff;
-    this.#swiHandler?.(this, swiNumber);
+    this.#softwareInterrupt(swiNumber);
   }
 }

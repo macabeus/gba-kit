@@ -5,45 +5,60 @@
  * The CPU runs until the next scheduled event, then the event fires
  * and may schedule further events.
  *
+ * Time is counted in CPU cycles on the scheduler's clock (scheduler.ts): each
+ * instruction's ARM7TDMI cost, wait states included, and the cycles of DMA
+ * transfers, BIOS calls and interrupt entry.
+ *
  * Execution is owned here, not by the CPU: timers, DMA, the PPU's scanline
  * chain, IRQ delivery and HALT all advance together. A debugger stops the
  * machine through `StopPredicate` — checked before each instruction and while
  * the CPU is halted — so a stop never charges a cycle for an instruction that
  * did not run, and the next `runFrame` finishes the same hardware frame.
  */
-import { ArmCpu } from '@gba-kit/arm-emulator/arm-cpu';
+import { ArmCpu, MODE_SYS } from '@gba-kit/arm-emulator/arm-cpu';
 
 import { Apu } from './apu/apu.js';
-import { type BiosEnv, handleSwi } from './bios.js';
+import { buildBiosImage } from './bios-image.js';
+import { handleSwi } from './bios.js';
+import { DisplayStatus } from './display-status.js';
 import { DmaController, type DmaTransferInfo } from './dma.js';
 import { InputController } from './input.js';
 import { InterruptController } from './interrupts.js';
 import { Ppu } from './ppu/ppu.js';
 import type { GbaSnapshot } from './savestate.js';
 import { Scheduler } from './scheduler.js';
+import { SerialPort } from './serial.js';
 import { GbaSystemBus } from './system-bus.js';
 import { TimerController } from './timers.js';
 import {
-  BIOS_IRQ_STUB_PUSH,
+  BIOS_LATCH_AFTER_SWI,
   BOOT_STACK_POINTERS,
   CYCLES_PER_SCANLINE,
+  DISPCNT_LATCH_CYCLE,
   DmaStartTiming,
   EventId,
   GbaButton,
-  HBLANK_CYCLES,
-  HDRAW_CYCLES,
-  IrqFlag,
+  HBLANK_START_CYCLE,
+  MMIO,
   TOTAL_SCANLINES,
   VISIBLE_SCANLINES,
 } from './types.js';
 import { captureOrigin } from './write-source.js';
 
+/** The BIOS region's contents: the HLE BIOS's ARM code (bios-image.ts). */
+const BIOS_IMAGE = buildBiosImage();
+
+/** Where the BIOS's boot code hands over to the cartridge. */
+const CARTRIDGE_ENTRY = 0x08000000;
+
 /** PPU rendering interface */
 export interface PpuInterface {
-  /** Render a single scanline */
+  /** Line-start work, at the first cycle of every scanline (0-227) */
+  beginScanline(line: number, bus: GbaSystemBus): void;
+  /** Latch DISPCNT, DISPCNT_LATCH_CYCLE into every scanline (0-227) */
+  latchDispcnt(line: number, bus: GbaSystemBus): void;
+  /** Render a single visible scanline */
   renderScanline(line: number, bus: GbaSystemBus): void;
-  /** Called at VBlank start */
-  onVBlank?(): void;
   /** Get the framebuffer */
   getFramebuffer(): Uint32Array;
   /** Reset */
@@ -86,6 +101,8 @@ export class Gba {
   readonly dma: DmaController;
   readonly input: InputController;
   readonly bus: GbaSystemBus;
+  readonly display: DisplayStatus;
+  readonly serial: SerialPort;
   readonly ppu: Ppu;
   readonly apu: Apu;
   readonly armCpu: ArmCpu;
@@ -95,20 +112,32 @@ export class Gba {
   #running = false;
   /** Set when a `StopPredicate` or a CPU debug hook refused an instruction during the current run. */
   #stopped = false;
-  /** Tracks whether the CPU is currently inside the BIOS IRQ handler */
-  #inIrqHandler = false;
-  readonly #biosEnv: BiosEnv;
   #eventSink: ((event: HardwareEvent) => void) | null = null;
 
   constructor() {
     this.scheduler = new Scheduler();
-    this.interrupts = new InterruptController();
+    this.interrupts = new InterruptController(this.scheduler);
     this.timers = new TimerController(this.scheduler, this.interrupts);
     this.dma = new DmaController(this.scheduler, this.interrupts);
     this.input = new InputController(this.interrupts);
     this.bus = new GbaSystemBus();
+    this.display = new DisplayStatus(this.bus.mmioRegisters, this.interrupts);
+    this.serial = new SerialPort(this.bus.mmioRegisters, this.scheduler, this.interrupts);
     this.ppu = new Ppu();
-    this.apu = new Apu();
+    this.apu = new Apu(this.scheduler);
+
+    // Create CPU with GBA BIOS SWI handler. A call the HLE runs in TypeScript leaves the BIOS's
+    // read-protection latch where the real BIOS's shared return code leaves it (mGBA GBASwi16); a
+    // call the BIOS image runs goes through the SWI exception and fetches that code itself.
+    this.armCpu = new ArmCpu(this.bus, {
+      swiHandler: (cpu, swiNumber) => {
+        const cycles = handleSwi(cpu, swiNumber);
+        if (cycles !== null) {
+          this.bus.latchBiosOpcode(BIOS_LATCH_AFTER_SWI);
+        }
+        return cycles;
+      },
+    });
 
     // Wire subsystem references
     this.bus.connect({
@@ -117,6 +146,9 @@ export class Gba {
       dma: this.dma,
       input: this.input,
       apu: this.apu,
+      display: this.display,
+      serial: this.serial,
+      cpu: this.armCpu,
     });
 
     // Connect APU to timers for DirectSound FIFO playback
@@ -124,8 +156,8 @@ export class Gba {
     // Connect APU to DMA for sound FIFO refills
     this.apu.connectDma(this.dma);
 
-    // Wire PPU ref point reload: when the game writes BG2X/BG2Y/BG3X/BG3Y,
-    // the PPU must reload its internal accumulators (for per-scanline affine effects).
+    // Wire PPU ref point reload: when the game writes BG2X/BG2Y/BG3X/BG3Y, the PPU reloads
+    // its internal accumulator (for per-scanline affine effects).
     this.ppu.mmioRegisters = this.bus.mmioRegisters;
     this.bus.onBgRefPointWrite = (bgIndex, isX) => {
       this.ppu.reloadBgRefPoint(bgIndex, isX);
@@ -137,30 +169,51 @@ export class Gba {
       read32: (addr) => this.bus.read32(addr),
       write16: (addr, val) => this.bus.write16(addr, val),
       write32: (addr, val) => this.bus.write32(addr, val),
-      // Data-watchpoint attribution for DMA writes (armCpu is created below; invoked during DMA).
+      // Data-watchpoint attribution for DMA writes: the instruction that enables the channel.
       getOrigin: () => captureOrigin(this.armCpu.registers[15]!, this.armCpu.cpsr),
       setDmaSource: (channel, origin) => this.bus.setDmaSource(channel, origin),
       clearDmaSource: () => this.bus.clearDmaSource(),
+      dataCycles: (addr, width, sequential) => this.bus.dataCycles(addr, width, sequential),
+      idle: (cycles) => this.bus.idle(cycles),
     });
 
-    // The HLE BIOS reaches this machine's interrupt controller and no other.
-    this.#biosEnv = {
-      onIntrWait: (flags) => {
-        this.interrupts.intrWaitFlags = flags;
-      },
-    };
+    this.bus.loadBios(BIOS_IMAGE);
+    this.#skipBiosBoot();
 
-    // Create CPU with GBA BIOS SWI handler
-    this.armCpu = new ArmCpu(this.bus, { swiHandler: (cpu, swiNumber) => handleSwi(cpu, swiNumber, this.#biosEnv) });
-    for (const [mode, sp] of BOOT_STACK_POINTERS) {
-      this.armCpu.setBankedSP(mode, sp);
+    // Start at line 0, where the V-count comparison runs like on any other line
+    this.display.setScanline(0);
+    this.#beginLine(this.scheduler.currentCycle);
+  }
+
+  /**
+   * The machine as the BIOS's boot code leaves it when it jumps to the cartridge, where the
+   * emulator starts instead of running a boot ROM it does not have (mGBA gba.c GBASkipBIOS and
+   * io.c GBAIOInit; NanoBoyAdvance Core::SkipBootScreen):
+   * - I/O: DISPCNT 0x0080 (forced blank), BG2 and BG3 PA and PD 0x0100, RCNT 0x8000, SOUNDBIAS
+   *   0x0200 and POSTFLG 1. The boot code writes them, so they go through the bus while the CPU
+   *   still sits at the reset vector, in the BIOS.
+   * - CPU: the IRQ, SVC and SYS stacks of BOOT_STACK_POINTERS, SYS mode, ARM state, IRQs and FIQs
+   *   enabled, PC at the cartridge's entry point.
+   * The bus starts the BIOS read-protection latch at BIOS_LATCH_AFTER_BOOT.
+   */
+  #skipBiosBoot(): void {
+    const cpu = this.armCpu;
+    cpu.resetState();
+    this.bus.write16(MMIO.DISPCNT, 0x0080);
+    for (const identity of [MMIO.BG2PA, MMIO.BG2PD, MMIO.BG3PA, MMIO.BG3PD]) {
+      this.bus.write16(identity, 0x0100);
     }
+    this.bus.write16(MMIO.RCNT, 0x8000);
+    this.bus.write16(MMIO.SOUNDBIAS, 0x0200);
+    this.bus.write8(MMIO.POSTFLG, 1);
 
-    // Install HLE BIOS IRQ handler stub
-    this.#installBiosStub();
-
-    // Schedule initial HBlank
-    this.#scheduleHDraw();
+    for (const [mode, sp] of BOOT_STACK_POINTERS) {
+      cpu.switchMode(mode);
+      cpu.registers[13] = sp;
+    }
+    cpu.switchMode(MODE_SYS);
+    cpu.cpsr = MODE_SYS;
+    cpu.registers[15] = CARTRIDGE_ENTRY;
   }
 
   /** Load a ROM into the system */
@@ -226,34 +279,29 @@ export class Gba {
     this.#running = true;
     this.#stopped = false;
     let outcome: RunOutcome = 'done';
+    const scheduler = this.scheduler;
 
     while (this.#running && !done()) {
-      // If halted, fast-forward to next event (but keep APU running)
+      // Due events fire one per pass, so a frame that ends among them ends the run.
+      if (scheduler.runNextDueEvent()) {
+        continue;
+      }
+
       if (this.interrupts.halted) {
+        // A halted CPU sleeps until the next event.
         if (shouldStop?.()) {
           outcome = 'stopped';
           break;
         }
-        const skip = this.scheduler.cyclesUntilNextEvent();
-        if (skip === Infinity) {
+        const next = scheduler.nextEventCycle;
+        if (next === Infinity) {
           outcome = 'stalled';
           break;
         }
-        this.scheduler.tick(skip);
-        this.apu.tick(skip);
-        continue;
-      }
-
-      // Run CPU until next event
-      const cyclesToNext = this.scheduler.cyclesUntilNextEvent();
-      if (cyclesToNext === Infinity) {
-        // No events scheduled — run a batch of CPU cycles
-        this.#runCpuCycles(CYCLES_PER_SCANLINE, shouldStop);
-      } else if (cyclesToNext <= 0) {
-        // Events are due — process them
-        this.scheduler.tick(0);
+        this.bus.idle(next - scheduler.currentCycle);
+        scheduler.advance(next - scheduler.currentCycle);
       } else {
-        this.#runCpuCycles(cyclesToNext, shouldStop);
+        this.#runCpu(shouldStop);
       }
 
       if (this.#stopped) {
@@ -270,15 +318,21 @@ export class Gba {
     return outcome;
   }
 
-  /** Run CPU for approximately the given number of cycles */
-  #runCpuCycles(cycles: number, shouldStop?: StopPredicate): void {
+  /**
+   * Run the CPU until the next event is due, moving the clock after each instruction (see
+   * scheduler.ts), so an event that an I/O access schedules ahead of the others ends the run on time.
+   */
+  #runCpu(shouldStop?: StopPredicate): void {
     const cpu = this.armCpu;
-    let cyclesRun = 0;
+    const scheduler = this.scheduler;
+    // Bound the run when nothing is scheduled, so `done` is asked again.
+    const limit = scheduler.currentCycle + CYCLES_PER_SCANLINE;
 
-    while (cyclesRun < cycles) {
-      // Check for pending IRQ before each instruction
-      if (this.interrupts.irqPending()) {
-        this.#handleIrq();
+    while (scheduler.currentCycle < scheduler.nextEventCycle && scheduler.currentCycle < limit) {
+      // Check for pending IRQ before each instruction. Entering it takes cycles, so look at the
+      // clock again before running the handler's first instruction.
+      if (this.interrupts.irqPending() && this.#handleIrq()) {
+        continue;
       }
 
       // If halted (e.g. by SWI Halt/VBlankIntrWait), stop running CPU
@@ -294,167 +348,95 @@ export class Gba {
         break;
       }
 
-      // Track PC before step to detect BIOS IRQ handler return
-      let pcBeforeStep = 0;
-      if (this.#inIrqHandler) {
-        pcBeforeStep = cpu.registers[15]!;
-      }
-
-      const ok = cpu.step();
-      if (!ok) {
-        // Either the CPU halted itself, or a debug hook refused the instruction. In
-        // both cases nothing executed, so nothing is charged.
-        if (cpu.halted) {
-          this.#running = false;
-        } else {
-          this.#stopped = true;
-        }
+      const cycles = cpu.step();
+      // A refused instruction or a CPU that halted itself ran nothing, so nothing is charged.
+      if (cpu.refused) {
+        this.#stopped = true;
         break;
       }
-      cyclesRun += 1;
-
-      // Detect BIOS IRQ handler return: the SUBS PC, LR, #4 at address 0x94
-      // returns from IRQ mode to the interrupted context. After this executes,
-      // we check if we need to re-halt for IntrWait (matching real BIOS behavior
-      // where the IntrWait loop re-halts after each non-matching interrupt).
-      if (this.#inIrqHandler && pcBeforeStep === 0x94) {
-        this.#inIrqHandler = false;
-
-        if (this.interrupts.intrWaitFlags !== 0) {
-          const biosIf = this.bus.read16(0x03007ff8);
-          if (biosIf & this.interrupts.intrWaitFlags) {
-            // IntrWait satisfied — clear flags and let game code continue
-            this.bus.write16(0x03007ff8, biosIf & ~this.interrupts.intrWaitFlags);
-            this.interrupts.intrWaitFlags = 0;
-          } else {
-            // Not satisfied — re-halt (IntrWait loop continues waiting)
-            this.interrupts.halted = true;
-            break;
-          }
-        }
+      if (cpu.halted) {
+        this.#running = false;
+        break;
       }
+      scheduler.advance(cycles);
     }
-
-    // Advance the scheduler clock and APU
-    this.scheduler.tick(cyclesRun);
-    this.apu.tick(cyclesRun);
   }
 
-  /** Handle an IRQ by switching the CPU to the IRQ handler */
-  #handleIrq(): void {
+  /** Handle an IRQ by switching the CPU to the IRQ handler; returns whether the CPU took it. */
+  #handleIrq(): boolean {
     // Don't fire if CPU has IRQs disabled (CPSR I bit)
     if (this.armCpu.irqDisabled()) {
-      return;
+      return false;
     }
 
-    // Update BIOS IF mirror at 0x03007FF8 before entering the handler.
-    // This matches real GBA BIOS behavior: the BIOS reads IE & IF, ANDs them,
-    // and ORs the result into the mirror. The user handler may then acknowledge
-    // IF, but the mirror preserves which interrupts actually fired.
-    // IntrWait checks this mirror to decide when the waited interrupt has occurred.
-    const pending = this.interrupts.ie & this.interrupts.if_;
-    const currentMirror = this.bus.read16(0x03007ff8);
-    this.bus.write16(0x03007ff8, currentMirror | pending);
-
-    this.#inIrqHandler = true;
     this.#eventSink?.({ kind: 'irq-enter', pc: this.armCpu.registers[15]! });
-    this.armCpu.enterIrq();
+    this.scheduler.advance(this.armCpu.enterIrq());
+    return true;
   }
 
   // ─── Scanline Timing ──────────────────────────────────────────────
 
-  #scheduleHDraw(): void {
-    // Render the scanline at the START of HDraw (not at HBlank).
-    // On real GBA, the PPU reads VRAM during HDraw. Games write sprite tile
-    // data during HBlank/VBlank and may clear it during HDraw (expecting the
-    // PPU to have already consumed it). Rendering here ensures the PPU sees
-    // the correct VRAM state before the CPU can modify it.
+  /**
+   * A line began at the cycle `lineStart`: the PPU takes its line-start state (affine reference
+   * points, mosaic counters, window flip-flops, the OBJ line), latches DISPCNT DISPCNT_LATCH_CYCLE
+   * later, and HBlank comes HBLANK_START_CYCLE later.
+   */
+  #beginLine(lineStart: number): void {
+    this.ppu.beginScanline(this.#currentScanline, this.bus);
+    this.scheduler.scheduleAt(EventId.DispcntLatch, lineStart + DISPCNT_LATCH_CYCLE, () => this.#onDispcntLatch());
+    this.scheduler.scheduleAt(EventId.HBlank, lineStart + HBLANK_START_CYCLE, (due) => this.#onHBlank(due));
+  }
+
+  #onDispcntLatch(): void {
+    this.ppu.latchDispcnt(this.#currentScanline, this.bus);
+  }
+
+  #onHBlank(due: number): void {
+    // The PPU has drawn the line when HBlank begins, from the registers and memory as the CPU left
+    // them during the line's HDraw, so a write a V-count IRQ handler makes shows on that same line
+    // (mGBA video.c _startHblank calls drawScanline here).
     if (this.#currentScanline < VISIBLE_SCANLINES) {
       this.ppu.renderScanline(this.#currentScanline, this.bus);
     }
 
-    this.scheduler.schedule(EventId.HBlank, HDRAW_CYCLES, () => {
-      this.#onHBlank();
-    });
-  }
-
-  #onHBlank(): void {
     this.#eventSink?.({ kind: 'hblank', scanline: this.#currentScanline });
-    // Set HBlank flag in DISPSTAT
-    const dispstat = this.bus.mmioRegisters[4]! | (this.bus.mmioRegisters[5]! << 8);
-    this.bus.mmioRegisters[4] = (dispstat | 0x02) & 0xff; // Set HBlank bit
+    this.display.enterHBlank(due);
 
-    // HBlank IRQ
-    if (dispstat & (1 << 4)) {
-      this.interrupts.requestInterrupt(IrqFlag.HBlank);
-    }
-
-    // HBlank DMA (PPU already rendered at the start of HDraw)
     if (this.#currentScanline < VISIBLE_SCANLINES) {
-      this.dma.trigger(DmaStartTiming.HBlank);
+      this.dma.trigger(DmaStartTiming.HBlank, due);
     }
 
-    // Schedule end of HBlank
-    this.scheduler.schedule(EventId.HBlankEnd, HBLANK_CYCLES, () => {
-      this.#onHBlankEnd();
-    });
+    // The line ends 1232 cycles after it began, on the hardware grid however late this ran.
+    this.scheduler.scheduleAt(EventId.HBlankEnd, due + CYCLES_PER_SCANLINE - HBLANK_START_CYCLE, (end) =>
+      this.#onHBlankEnd(end),
+    );
   }
 
-  #onHBlankEnd(): void {
-    // Clear HBlank flag
-    this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! & ~0x02;
+  #onHBlankEnd(due: number): void {
+    this.display.leaveHBlank();
 
-    // Advance scanline
+    // Advance scanline; after the last line the frame ends and line 0 begins
     this.#currentScanline++;
-
-    // Update VCOUNT
-    this.bus.mmioRegisters[6] = this.#currentScanline & 0xff;
-
-    // Check VCount match
-    const dispstat = this.bus.mmioRegisters[4]! | (this.bus.mmioRegisters[5]! << 8);
-    const vcountTarget = (dispstat >> 8) & 0xff;
-    if (this.#currentScanline === vcountTarget) {
-      // Set VCount flag
-      this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! | 0x04;
-      if (dispstat & (1 << 5)) {
-        this.interrupts.requestInterrupt(IrqFlag.VCount);
-      }
-    } else {
-      this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! & ~0x04;
+    if (this.#currentScanline === TOTAL_SCANLINES) {
+      this.#currentScanline = 0;
+      this.#frameCount++;
     }
+    this.display.setScanline(this.#currentScanline, due);
+    this.dma.triggerVideoCapture(this.#currentScanline, due);
 
     if (this.#currentScanline === VISIBLE_SCANLINES) {
-      // Enter VBlank
-      this.#onVBlankStart();
-    } else if (this.#currentScanline >= TOTAL_SCANLINES) {
-      // End of frame — wrap back to scanline 0
-      this.#currentScanline = 0;
-      this.bus.mmioRegisters[6] = 0;
-      this.#frameCount++;
-      // Clear VBlank flag
-      this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! & ~0x01;
+      this.#onVBlankStart(due);
     }
 
-    // Schedule next HDraw
-    this.#scheduleHDraw();
+    this.#beginLine(due);
   }
 
-  #onVBlankStart(): void {
+  #onVBlankStart(due: number): void {
     this.#eventSink?.({ kind: 'vblank' });
-    // Set VBlank flag in DISPSTAT
-    this.bus.mmioRegisters[4] = this.bus.mmioRegisters[4]! | 0x01;
-
-    // VBlank IRQ
-    const dispstat = this.bus.mmioRegisters[4]! | (this.bus.mmioRegisters[5]! << 8);
-    if (dispstat & (1 << 3)) {
-      this.interrupts.requestInterrupt(IrqFlag.VBlank);
-    }
+    this.display.enterVBlank(due);
 
     // Trigger VBlank DMA
-    this.dma.trigger(DmaStartTiming.VBlank);
-
-    // Notify PPU
-    this.ppu.onVBlank?.();
+    this.dma.trigger(DmaStartTiming.VBlank, due);
   }
 
   // ─── Save State ─────────────────────────────────────────────────
@@ -466,7 +448,6 @@ export class Gba {
       cpu: this.armCpu.serialize(),
       currentScanline: this.#currentScanline,
       frameCount: this.#frameCount,
-      inIrqHandler: this.#inIrqHandler,
       scheduler: this.scheduler.serialize(),
       interrupts: this.interrupts.serialize(),
       timers: this.timers.serialize(),
@@ -491,7 +472,6 @@ export class Gba {
     this.#stopped = false;
     this.#currentScanline = snap.currentScanline;
     this.#frameCount = snap.frameCount ?? 0;
-    this.#inIrqHandler = snap.inIrqHandler;
 
     // Restore subsystems
     this.interrupts.deserialize(snap.interrupts);
@@ -501,8 +481,11 @@ export class Gba {
     this.dma.deserialize(snap.dma);
     this.bus.deserialize(snap.bus);
     this.ppu.deserialize(snap.ppu);
+    // A snapshot without APU state restores the APU as at power-on, following the restored clock.
     if (snap.apu) {
       this.apu.deserialize(snap.apu);
+    } else {
+      this.apu.reset();
     }
 
     // Restore CPU state
@@ -516,13 +499,20 @@ export class Gba {
   /** Give every pending event its callback back, without moving it. */
   #reattachSchedulerCallbacks(): void {
     if (this.scheduler.isScheduled(EventId.HBlank)) {
-      this.scheduler.reattach(EventId.HBlank, () => this.#onHBlank());
+      this.scheduler.reattach(EventId.HBlank, (due) => this.#onHBlank(due));
     }
     if (this.scheduler.isScheduled(EventId.HBlankEnd)) {
-      this.scheduler.reattach(EventId.HBlankEnd, () => this.#onHBlankEnd());
+      this.scheduler.reattach(EventId.HBlankEnd, (due) => this.#onHBlankEnd(due));
     }
+    // A snapshot from before the DISPCNT latch event restores without it: that one line keeps the
+    // previous line's latch, and the next line start schedules it again.
+    if (this.scheduler.isScheduled(EventId.DispcntLatch)) {
+      this.scheduler.reattach(EventId.DispcntLatch, () => this.#onDispcntLatch());
+    }
+    this.interrupts.reattachEvents();
     this.timers.reattachEvents();
     this.dma.reattachEvents();
+    this.serial.reattachEvents();
   }
 
   /** Stop emulation */
@@ -536,7 +526,6 @@ export class Gba {
     this.#stopped = false;
     this.#currentScanline = 0;
     this.#frameCount = 0;
-    this.#inIrqHandler = false;
     this.scheduler.reset();
     this.interrupts.reset();
     this.timers.reset();
@@ -545,48 +534,8 @@ export class Gba {
     this.bus.reset();
     this.ppu.reset();
     this.apu.reset();
-    this.#installBiosStub();
-    this.#scheduleHDraw();
-  }
-
-  /**
-   * Install a minimal HLE BIOS stub.
-   *
-   * Matches the real GBA BIOS IRQ handler behavior:
-   * The BIOS just saves registers, calls the user handler from [0x03FFFFFC],
-   * restores registers, and returns. It does NOT acknowledge IF or update
-   * the BIOS IF mirror — the game's own IRQ handler is responsible for that.
-   *
-   * SWI handler at 0x08: handled in HLE (bios.ts), but we need a
-   * return path. The SWI handler just needs MOVS PC, LR to return.
-   */
-  #installBiosStub(): void {
-    // ─── UND handler (at 0x04) ─────────────────────────────────────
-    this.bus.writeBios32(0x04, 0xe1b0f00e); // MOVS PC, LR
-
-    // ─── SWI handler (at 0x08) ─────────────────────────────────────
-    this.bus.writeBios32(0x08, 0xe1b0f00e); // MOVS PC, LR
-
-    // ─── IRQ vector (at 0x18) ────────────────────────────────────
-    // B 0x80: offset = (0x80 - 0x18 - 8) / 4 = 0x18
-    this.bus.writeBios32(0x18, 0xea000018); // B 0x80
-
-    // ─── IRQ handler (at 0x80) ───────────────────────────────────
-    // Matches real GBA BIOS (and mGBA's HLE stub): save regs, call user
-    // handler via LDR PC, restore, return. The BIOS does NOT acknowledge
-    // IF or update the BIOS IF mirror — that's the user handler's job.
-    // 0x80: STMFD SP!, {R0-R3, R12, LR}   — save regs to IRQ stack
-    this.bus.writeBios32(0x80, BIOS_IRQ_STUB_PUSH);
-    // 0x84: MOV R0, #0x04000000            — IO register base
-    this.bus.writeBios32(0x84, 0xe3a00301);
-    // 0x88: ADD LR, PC, #0                 — LR = 0x88+8 = 0x90 (return point)
-    this.bus.writeBios32(0x88, 0xe28fe000);
-    // 0x8C: LDR PC, [R0, #-4]             — PC = [0x03FFFFFC] = user handler
-    this.bus.writeBios32(0x8c, 0xe510f004);
-    // — user handler returns here (0x90) —
-    // 0x90: LDMFD SP!, {R0-R3, R12, LR}   — restore regs from IRQ stack
-    this.bus.writeBios32(0x90, 0xe8bd500f);
-    // 0x94: SUBS PC, LR, #4               — return from IRQ, restore CPSR
-    this.bus.writeBios32(0x94, 0xe25ef004);
+    this.#skipBiosBoot();
+    this.display.setScanline(0);
+    this.#beginLine(this.scheduler.currentCycle);
   }
 }

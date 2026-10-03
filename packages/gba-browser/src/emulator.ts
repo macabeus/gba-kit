@@ -5,9 +5,9 @@
  * Manages the emulation loop, screen rendering, and keyboard input.
  */
 import type { DebugHooks } from '@gba-kit/arm-emulator';
-import { ArmCpu, MODE_SYS } from '@gba-kit/arm-emulator/arm-cpu';
+import type { ArmCpu } from '@gba-kit/arm-emulator/arm-cpu';
 import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassembler';
-import { BOOT_STACK_POINTERS, Gba } from '@gba-kit/gba-emulator';
+import { Gba } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
 /** Keyboard mapping: key → GBA button bit */
@@ -25,6 +25,11 @@ const KEY_MAP: Record<string, number> = {
 };
 
 export type EmulatorState = 'idle' | 'running' | 'paused';
+
+/** How long a step runs looking for the instruction it stops at: a second of emulated time. */
+const STEP_FRAMES = 60;
+/** How long `runToAddress` runs looking for its address: ten seconds of emulated time. */
+const RUN_TO_ADDRESS_FRAMES = 600;
 
 export interface Breakpoint {
   address: number;
@@ -45,6 +50,8 @@ export class EmulatorBridge {
   #callbacks: EmulatorCallbacks | null = null;
   #breakpoints: Map<number, Breakpoint> = new Map();
   #hitBreakpoint = false;
+  /** Where the bridge last resumed the CPU: a breakpoint there lets that one instruction run. */
+  #resumeAddress: number | null = null;
   /** Whether the CPU's debug-hook slot currently holds this bridge's breakpoint hooks.
    *  The slot is shared with any other driver of the same `Gba` (a debug session), so
    *  the bridge only ever clears what it installed. */
@@ -101,32 +108,11 @@ export class EmulatorBridge {
     this.#renderFrame();
   }
 
-  /** Load a ROM from an ArrayBuffer */
+  /** Load a ROM from an ArrayBuffer, into a machine in the state the BIOS's boot code leaves. */
   loadRom(data: ArrayBuffer): void {
     this.stop();
     this.#gba.reset();
     this.#gba.loadRom(new Uint8Array(data));
-
-    const cpu = this.#gba.armCpu;
-
-    // Set up initial CPU state matching post-BIOS boot: the BIOS initializes each
-    // mode's stack and then jumps to ROM, and skipping it means replicating that.
-    for (const [mode, sp] of BOOT_STACK_POINTERS) {
-      cpu.switchMode(mode);
-      cpu.registers[13] = sp;
-    }
-
-    // System mode (privileged, but uses the USR registers), IRQs enabled, ARM state
-    cpu.switchMode(MODE_SYS);
-    cpu.cpsr = MODE_SYS;
-
-    // PC to ROM entry point
-    cpu.registers[15] = 0x08000000;
-
-    // Read the ROM header to determine entry mode
-    // GBA ROMs start with an ARM branch instruction at 0x08000000
-    // The branch usually jumps to Thumb code, but the entry is always ARM
-
     this.#setState('paused');
   }
 
@@ -140,6 +126,7 @@ export class EmulatorBridge {
 
     // Install breakpoint hooks if any breakpoints are set
     this.#updateDebugHooks();
+    this.#resumeAddress = this.#gba.armCpu.registers[15]!;
 
     this.#emulationLoop();
   }
@@ -165,16 +152,16 @@ export class EmulatorBridge {
     if (this.#state !== 'paused') {
       return;
     }
-    this.#gba.armCpu.step();
-    this.#gba.scheduler.tick(1);
-    this.#gba.apu.tick(1);
+    this.#runUntil(() => true, STEP_FRAMES);
     this.#renderFrame();
     this.#callbacks?.onFrame();
   }
 
   /** Run a single emulation frame and render to the attached canvas. */
   runOneFrame(): void {
+    this.#resumeAddress = this.#gba.armCpu.registers[15]!;
     this.#gba.runFrame();
+    this.#resumeAddress = null;
     this.#renderFrame();
     this.#callbacks?.onFrame();
   }
@@ -189,20 +176,7 @@ export class EmulatorBridge {
     const targetPC = currentPC + instrSize;
 
     // Run until we reach the next instruction or hit a breakpoint
-    let cyclesRun = 0;
-    for (let i = 0; i < 100_000; i++) {
-      this.#gba.armCpu.step();
-      this.#gba.scheduler.tick(1);
-      cyclesRun++;
-      if (this.#gba.armCpu.registers[15]! === targetPC) {
-        break;
-      }
-      if (this.#breakpoints.has(this.#gba.armCpu.registers[15]!)) {
-        break;
-      }
-    }
-    this.#gba.apu.tick(cyclesRun);
-
+    this.#runUntil((pc) => pc === targetPC, STEP_FRAMES);
     this.#renderFrame();
     this.#callbacks?.onFrame();
   }
@@ -212,18 +186,41 @@ export class EmulatorBridge {
     if (this.#state !== 'paused') {
       return;
     }
-    let cyclesRun = 0;
-    for (let i = 0; i < 10_000_000; i++) {
-      this.#gba.armCpu.step();
-      this.#gba.scheduler.tick(1);
-      cyclesRun++;
-      if (this.#gba.armCpu.registers[15]! === address) {
+    this.#runUntil((pc) => pc === address, RUN_TO_ADDRESS_FRAMES);
+    this.#renderFrame();
+    this.#callbacks?.onFrame();
+  }
+
+  /**
+   * Run the machine through its own loop (interrupts, halts, DMA and sound all advance) until the
+   * instruction about to run is at a PC `reached` accepts, a breakpoint stops it, or `frames`
+   * frames have passed. The instruction at the starting PC runs first, and `reached` is asked only
+   * while the CPU is awake.
+   */
+  #runUntil(reached: (pc: number) => boolean, frames: number): void {
+    const cpu = this.#gba.armCpu;
+    const start = cpu.registers[15]!;
+    let first = true;
+    const shouldStop = (): boolean => {
+      if (this.#gba.interrupts.halted) {
+        return false;
+      }
+      const pc = cpu.registers[15]!;
+      if (first) {
+        first = false;
+        if (pc === start) {
+          return false;
+        }
+      }
+      return reached(pc);
+    };
+    this.#resumeAddress = start;
+    for (let i = 0; i < frames; i++) {
+      if (this.#gba.runFrame(shouldStop) !== 'done') {
         break;
       }
     }
-    this.#gba.apu.tick(cyclesRun);
-    this.#renderFrame();
-    this.#callbacks?.onFrame();
+    this.#resumeAddress = null;
   }
 
   // ─── Breakpoints ──────────────────────────────────────────────────
@@ -259,12 +256,15 @@ export class EmulatorBridge {
     let addr = address;
 
     for (let i = 0; i < count; i++) {
+      // A debugger's read (`bus.peek`): no read watchpoint fires, no EEPROM transaction is
+      // clocked, and the BIOS reads as stored even while the CPU runs outside it.
+      const { data } = this.#gba.bus.peek(addr, isThumb ? 2 : 4);
       if (isThumb) {
-        const instr = this.#gba.bus.read16(addr);
+        const instr = data[0]! | (data[1]! << 8);
         result.push({ address: addr, mnemonic: disassembleThumb(instr, addr), isThumb: true });
         addr += 2;
       } else {
-        const instr = this.#gba.bus.read32(addr);
+        const instr = (data[0]! | (data[1]! << 8) | (data[2]! << 16) | (data[3]! << 24)) >>> 0;
         result.push({ address: addr, mnemonic: disassembleArm(instr, addr), isThumb: false });
         addr += 4;
       }
@@ -348,12 +348,13 @@ export class EmulatorBridge {
 
   // ─── Memory Access ────────────────────────────────────────────────
 
+  /**
+   * `size` bytes at `address`, read the way a debugger reads memory (`bus.peek`): side-effect
+   * free, the BIOS whole, a write-only I/O register as last written, and 0 from the first unmapped
+   * byte on.
+   */
   readMemory(address: number, size: number): Uint8Array {
-    const data = new Uint8Array(size);
-    for (let i = 0; i < size; i++) {
-      data[i] = this.#gba.bus.read8(address + i);
-    }
-    return data;
+    return this.#gba.bus.peek(address, size).data;
   }
 
   // ─── Save States ────────────────────────────────────────────────
@@ -422,6 +423,7 @@ export class EmulatorBridge {
     }
 
     this.#gba.runFrame();
+    this.#resumeAddress = null;
     this.#renderFrame();
     this.#callbacks?.onFrame();
 
@@ -463,6 +465,11 @@ export class EmulatorBridge {
     if (hasBreakpoints) {
       const hooks: DebugHooks = {
         onInstructionPre: (address: number) => {
+          const resumed = this.#resumeAddress === address;
+          this.#resumeAddress = null;
+          if (resumed) {
+            return 'continue';
+          }
           const bp = this.#breakpoints.get(address);
           if (bp?.enabled) {
             this.#hitBreakpoint = true;

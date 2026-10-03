@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { Gba } from '../gba.js';
+import { ScriptingEngine, type ScriptingHost } from '../scripting.js';
 import { GbaSystemBus } from '../system-bus.js';
 
 describe('GbaSystemBus.peek', () => {
@@ -82,7 +83,113 @@ describe('GbaSystemBus.poke', () => {
   });
 });
 
+describe('GbaSystemBus.poke over code the CPU has fetched', () => {
+  // GBATEK "ARM CPU Overview": the opcodes at $+width and $+2*width are already in the pipeline
+  // while $ executes, so a store the program makes over them runs only after a refill. A debugger's
+  // write reaches the code that runs next.
+  const CODE = 0x03000100;
+
+  function thumbAt(gba: Gba, code: number[]): void {
+    code.forEach((op, i) => gba.bus.write16(CODE + 2 * i, op));
+    gba.armCpu.cpsr = 0x3f; // System mode, Thumb
+    gba.armCpu.registers[15] = CODE;
+  }
+
+  it('runs the edited opcodes at PC and after it', () => {
+    const gba = new Gba();
+    thumbAt(gba, [0x2001 /* movs r0, #1 */, 0x2002 /* movs r0, #2 */, 0x2003 /* movs r0, #3 */, 0xe7fe /* b . */]);
+    gba.armCpu.step();
+    expect(gba.bus.poke(CODE + 2, Uint8Array.of(0x42, 0x20, 0x43, 0x20))).toBe(4); // movs r0, #0x42; movs r0, #0x43
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(0x42);
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(0x43);
+  });
+
+  it('reaches the opcodes through a mirror of the memory they run from', () => {
+    const gba = new Gba();
+    thumbAt(gba, [0x2001 /* movs r0, #1 */, 0x2002 /* movs r0, #2 */, 0xe7fe /* b . */]);
+    gba.armCpu.step();
+    gba.bus.poke(CODE + 2 + 0x8000, Uint8Array.of(0x42, 0x20)); // the IWRAM mirror
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(0x42);
+  });
+
+  it('leaves a store the program made over its own pipeline unseen, when the edit is elsewhere', () => {
+    const gba = new Gba();
+    // str r1, [r2] puts movs r0, #5 over the opcode two ahead, which the pipeline already holds
+    thumbAt(gba, [0x6011 /* str r1, [r2] */, 0x46c0 /* nop */, 0x2001 /* movs r0, #1 */, 0xe7fe /* b . */]);
+    gba.armCpu.registers[1] = 0x46c02005; // movs r0, #5; nop
+    gba.armCpu.registers[2] = CODE + 4;
+    gba.armCpu.step();
+    gba.bus.poke(CODE + 0x40, Uint8Array.of(0xff));
+    gba.armCpu.step();
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(1);
+  });
+});
+
+describe('ScriptingEngine writes over code the CPU has fetched', () => {
+  // A script writes from outside the machine, like a debugger: the code it edits runs next, while
+  // its writes follow the hardware's store rules.
+  const CODE = 0x03000100;
+  const host: ScriptingHost = {
+    writeScreenshot: async () => {},
+    writeMemorySnapshot: async () => {},
+    writeSaveState: async () => {},
+    readSaveState: async () => {
+      throw new Error('not used');
+    },
+    log: () => {},
+  };
+
+  /** A machine stopped after `movs r0, #1`, with `movs r0, #2` at PC and `movs r0, #3` fetched after it. */
+  function stoppedInThumb(): { gba: Gba; engine: ScriptingEngine } {
+    const gba = new Gba();
+    [0x2001, 0x2002, 0x2003, 0xe7fe /* b . */].forEach((op, i) => gba.bus.write16(CODE + 2 * i, op));
+    gba.armCpu.cpsr = 0x3f; // System mode, Thumb
+    gba.armCpu.registers[15] = CODE;
+    gba.armCpu.step();
+    return { gba, engine: new ScriptingEngine(gba, host) };
+  }
+
+  it.each([
+    ['write8', (engine: ScriptingEngine) => engine.write8(CODE + 2, 0x42)],
+    ['write16', (engine: ScriptingEngine) => engine.write16(CODE + 2, 0x2042)],
+    ['writeBytes', (engine: ScriptingEngine) => engine.writeBytes(CODE + 2, 2, 0x2042)],
+  ])('runs the opcode %s puts at PC', (_api, write) => {
+    const { gba, engine } = stoppedInThumb();
+    write(engine); // movs r0, #0x42
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(0x42);
+  });
+
+  it('runs the opcode write32 puts after PC', () => {
+    const { gba, engine } = stoppedInThumb();
+    engine.write32(CODE + 4, 0x20442043); // movs r0, #0x43; movs r0, #0x44
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(2);
+    gba.armCpu.step();
+    expect(gba.armCpu.registers[0]).toBe(0x43);
+  });
+});
+
 describe('read watchpoints', () => {
+  it('fire on loads, not on the opcodes the CPU fetches past a branch', () => {
+    const gba = new Gba();
+    const rom = new Uint8Array(16);
+    const view = new DataView(rom.buffer);
+    [0xe59f1004 /* ldr r1, [pc, #4] */, 0xeafffffe /* b . */, 0x12345678, 0x9abcdef0].forEach((word, i) =>
+      view.setUint32(i * 4, word, true),
+    );
+    gba.loadRom(rom);
+    const seen: Array<{ address: number; value: number }> = [];
+    gba.bus.addReadWatchpoint(0x08000008, 8, ({ address, value }) => seen.push({ address, value }));
+    gba.runFrame();
+    // `b .` fetches the two words after it on every pass; only the ldr reads the table.
+    expect(seen).toEqual([{ address: 0x0800000c, value: 0x9abcdef0 }]);
+  });
+
   it('reads a word with its top bit set as an unsigned number, wherever it comes from', () => {
     const bus = new GbaSystemBus();
     const rom = new Uint8Array(8);

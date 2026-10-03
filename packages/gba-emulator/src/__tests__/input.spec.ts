@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import { InputController } from '../input.js';
 import { InterruptController } from '../interrupts.js';
+import { Scheduler } from '../scheduler.js';
 import { GbaButton } from '../types.js';
 
 function createInput() {
-  const interrupts = new InterruptController();
+  const interrupts = new InterruptController(new Scheduler());
   const input = new InputController(interrupts);
   return { input, interrupts };
 }

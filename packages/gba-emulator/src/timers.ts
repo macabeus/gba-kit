@@ -27,7 +27,7 @@ interface TimerChannel {
   /** Cycle count when this timer was last updated (for computing elapsed ticks) */
   lastUpdateCycle: number;
   /** Overflow callback (for DirectSound FIFO) */
-  onOverflow?: () => void;
+  onOverflow?: (at: number) => void;
 }
 
 const TIMER_EVENT_IDS = [
@@ -38,6 +38,16 @@ const TIMER_EVENT_IDS = [
 ] as const;
 
 const TIMER_IRQ_FLAGS = [IrqFlag.Timer0, IrqFlag.Timer1, IrqFlag.Timer2, IrqFlag.Timer3] as const;
+
+/**
+ * While an instruction runs, the clock stands just after its opcode fetch (scheduler.ts). A counter
+ * read sees the count READ_OFFSET cycles before that, and a control write acts at the clock's
+ * cycle, which gives the counts the hardware reads (mGBA io.c GBAIORead,
+ * `GBATimerUpdateRegister(gba, 0, 2)`, and GBATimerWriteTMCNT_HI; mgba-suite Timing calibration,
+ * "Timer IRQ"). An overflow's event fires READ_OFFSET cycles after the overflow, when a read can
+ * first see it; a control or reload write that comes after the overflow services it sooner.
+ */
+const READ_OFFSET = 2;
 
 export class TimerController {
   readonly #channels: TimerChannel[] = [];
@@ -61,23 +71,54 @@ export class TimerController {
     }
   }
 
-  /** Set an overflow callback for a timer (used by DirectSound). */
-  setOverflowCallback(index: number, callback: () => void): void {
+  /** Set an overflow callback for a timer (used by DirectSound); it receives the overflow's cycle. */
+  setOverflowCallback(index: number, callback: (at: number) => void): void {
     this.#channels[index]!.onOverflow = callback;
   }
 
-  /** Read timer counter (TM0CNT_L etc.). Syncs counter to current cycle. */
+  /** Read timer counter (TM0CNT_L etc.): the count as of the read (see READ_OFFSET). */
   readCounter(index: number): number {
     const ch = this.#channels[index]!;
     if (ch.enabled && !ch.cascade) {
-      this.#syncCounter(index);
+      this.#syncCounter(index, this.#scheduler.currentCycle - READ_OFFSET);
     }
     return ch.counter & 0xffff;
   }
 
-  /** Write timer reload value (TM0CNT_L etc.). Does NOT update running counter. */
+  /** The reload value as last written. TMxCNT_L reads the counter, so this is the write side's register. */
+  readReload(index: number): number {
+    return this.#channels[index]!.reload;
+  }
+
+  /**
+   * Write timer reload value (TM0CNT_L etc.). The counter takes it at its next start or overflow.
+   * An overflow in an earlier cycle has already reloaded the old value, so it is serviced first;
+   * one in the write's own cycle takes the new value (mgba-suite "Timer IRQ tests", FFFF: the
+   * timer that overflows as TM0CNT_L is rewritten counts on from the value written).
+   */
   writeReload(index: number, value: number): void {
+    const source = this.#countingTimer(index);
+    if (source >= 0) {
+      this.#serviceOverflowsBefore(source, this.#scheduler.currentCycle - 1);
+    }
     this.#channels[index]!.reload = value & 0xffff;
+  }
+
+  /**
+   * The running timer whose prescaler drives timer `index`: itself, or the one a count-up chain
+   * starts at; -1 when none runs.
+   */
+  #countingTimer(index: number): number {
+    for (let i = index; i >= 0; i--) {
+      const ch = this.#channels[i]!;
+      if (!ch.enabled) {
+        return -1;
+      }
+      if (!ch.cascade) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   /** Read timer control (TM0CNT_H etc.). */
@@ -86,10 +127,22 @@ export class TimerController {
     return (ch.prescaler & 3) | (ch.cascade ? 1 << 2 : 0) | (ch.irqEnable ? 1 << 6 : 0) | (ch.enabled ? 1 << 7 : 0);
   }
 
-  /** Write timer control (TM0CNT_H etc.). */
+  /**
+   * Write timer control (TM0CNT_H etc.). Starting a timer loads the reload value. A running timer
+   * whose prescaler or cascade bit changes keeps the count it has reached and goes on at the new
+   * rate (mGBA timer.c GBATimerWriteTMCNT_HI). Either way the timer counts on its prescaler's grid
+   * (see #prescalerTick).
+   */
   writeControl(index: number, value: number): void {
     const ch = this.#channels[index]!;
+    const now = this.#scheduler.currentCycle;
     const wasEnabled = ch.enabled;
+    const oldPrescaler = ch.prescaler;
+    const oldCascade = ch.cascade;
+    if (wasEnabled && !oldCascade) {
+      this.#serviceOverflowsBefore(index, now);
+      this.#syncCounter(index, now);
+    }
 
     ch.prescaler = value & 3;
     ch.cascade = index > 0 && (value & (1 << 2)) !== 0;
@@ -99,7 +152,7 @@ export class TimerController {
     if (!wasEnabled && ch.enabled) {
       // Timer just enabled: reload counter
       ch.counter = ch.reload;
-      ch.lastUpdateCycle = this.#scheduler.currentCycle;
+      ch.lastUpdateCycle = this.#prescalerTick(ch, now);
 
       if (!ch.cascade) {
         this.#scheduleOverflow(index);
@@ -107,13 +160,41 @@ export class TimerController {
     } else if (wasEnabled && !ch.enabled) {
       // Timer disabled: cancel scheduled overflow
       this.#scheduler.cancel(TIMER_EVENT_IDS[index]!);
+    } else if (ch.enabled && (ch.prescaler !== oldPrescaler || ch.cascade !== oldCascade)) {
+      ch.lastUpdateCycle = this.#prescalerTick(ch, now);
+      if (ch.cascade) {
+        this.#scheduler.cancel(TIMER_EVENT_IDS[index]!);
+      } else {
+        this.#scheduleOverflow(index);
+      }
     }
   }
 
-  /** Sync a non-cascade timer's counter based on elapsed cycles. */
-  #syncCounter(index: number): void {
+  /**
+   * The last tick of the timer's prescaler at or before `now`. The prescaler is a divider that runs
+   * off the system clock all the time, so a timer started or switched between two of its ticks
+   * counts its first step at the next one, less than a period after the write (mGBA timer.c
+   * GBATimerWriteTMCNT_HI, `mTimingCurrentTime & ~tickMask`; NanoBoyAdvance timer.cc
+   * OnControlWritten, `prescaler_offset = GetTimestampNow() & channel.mask`).
+   */
+  #prescalerTick(ch: TimerChannel, now: number): number {
+    return now - (now % TIMER_PRESCALERS[ch.prescaler]!);
+  }
+
+  /** Service the overflows that happened by `now` and still wait out READ_OFFSET, so a write at `now` follows them. */
+  #serviceOverflowsBefore(index: number, now: number): void {
+    const id = TIMER_EVENT_IDS[index]!;
+    while (this.#scheduler.dueCycle(id) - READ_OFFSET <= now) {
+      const overflow = this.#scheduler.dueCycle(id) - READ_OFFSET;
+      this.#scheduler.cancel(id);
+      this.#onOverflow(index, overflow);
+    }
+  }
+
+  /** Bring a non-cascade timer's counter up to the cycle `now`. */
+  #syncCounter(index: number, now: number): void {
     const ch = this.#channels[index]!;
-    const elapsed = this.#scheduler.currentCycle - ch.lastUpdateCycle;
+    const elapsed = now - ch.lastUpdateCycle;
     const prescaler = TIMER_PRESCALERS[ch.prescaler]!;
     const ticks = Math.floor(elapsed / prescaler);
 
@@ -123,33 +204,38 @@ export class TimerController {
     }
   }
 
-  /** Schedule the next overflow event for a timer. */
+  /**
+   * Schedule the next overflow, counted from the cycle the counter was last brought up to; its
+   * event fires READ_OFFSET cycles after it.
+   */
   #scheduleOverflow(index: number): void {
     const ch = this.#channels[index]!;
     const ticksUntilOverflow = 0x10000 - ch.counter;
     const prescaler = TIMER_PRESCALERS[ch.prescaler]!;
-    const cycles = ticksUntilOverflow * prescaler;
-
-    this.#scheduler.schedule(TIMER_EVENT_IDS[index]!, cycles, () => {
-      this.#onOverflow(index);
-    });
+    const overflow = ch.lastUpdateCycle + ticksUntilOverflow * prescaler;
+    this.#scheduler.scheduleAt(TIMER_EVENT_IDS[index]!, overflow + READ_OFFSET, (due) =>
+      this.#onOverflow(index, due - READ_OFFSET),
+    );
   }
 
-  /** Handle a timer overflow. */
-  #onOverflow(index: number): void {
+  /**
+   * Handle a timer overflow that happened at the cycle `due`. The timer reloads and counts on from
+   * that cycle, and its IRQ request carries it, so both hold whenever the event is serviced.
+   */
+  #onOverflow(index: number, due: number): void {
     const ch = this.#channels[index]!;
 
     // Reload counter
     ch.counter = ch.reload;
-    ch.lastUpdateCycle = this.#scheduler.currentCycle;
+    ch.lastUpdateCycle = due;
 
     // Fire IRQ if enabled
     if (ch.irqEnable) {
-      this.#interrupts.requestInterrupt(TIMER_IRQ_FLAGS[index]!);
+      this.#interrupts.requestInterrupt(TIMER_IRQ_FLAGS[index]!, due);
     }
 
     // Notify listeners (DirectSound FIFO)
-    ch.onOverflow?.();
+    ch.onOverflow?.(due);
 
     // Cascade: increment next timer
     if (index < 3) {
@@ -158,7 +244,7 @@ export class TimerController {
         next.counter = (next.counter + 1) & 0xffff;
         if (next.counter === 0) {
           // Cascade overflow
-          this.#onOverflow(index + 1);
+          this.#onOverflow(index + 1, due);
         }
       }
     }
@@ -211,7 +297,7 @@ export class TimerController {
       const ch = this.#channels[i]!;
       const id = TIMER_EVENT_IDS[i]!;
       if (this.#scheduler.isScheduled(id)) {
-        this.#scheduler.reattach(id, () => this.#onOverflow(i));
+        this.#scheduler.reattach(id, (due) => this.#onOverflow(i, due - READ_OFFSET));
       } else if (ch.enabled && !ch.cascade) {
         this.#scheduleOverflow(i); // an older snapshot, with no overflow event of its own
       }

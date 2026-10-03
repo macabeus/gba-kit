@@ -4,7 +4,6 @@
  * write through `poke`, and the run loop is the machine's own (`runFrame` with a
  * stop predicate), never the CPU stepped by hand.
  */
-import { MODE_SYS } from '@gba-kit/arm-emulator/arm-cpu';
 import type { HardwareEvent, RunOutcome, StopPredicate } from '@gba-kit/gba-emulator';
 import { BOOT_STACK_POINTERS, Gba } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
@@ -67,15 +66,6 @@ export class Machine {
   boot(): void {
     this.gba.reset();
     this.gba.loadRom(this.rom);
-    const cpu = this.gba.armCpu;
-    cpu.resetState();
-    for (const [mode, sp] of BOOT_STACK_POINTERS) {
-      cpu.switchMode(mode);
-      cpu.registers[13] = sp;
-    }
-    cpu.switchMode(MODE_SYS);
-    cpu.cpsr = MODE_SYS; // SYS mode, IRQs enabled, ARM state
-    cpu.registers[15] = 0x08000000;
   }
 
   get pc(): number {

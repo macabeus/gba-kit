@@ -1,7 +1,7 @@
 /**
  * Bounded rings for the trace logger and the hardware event log. Both are
  * stamped with the machine's time (frame, scanline, cycle). "Cycle" is what the
- * emulator's scheduler counts: one per instruction plus event time — an instruction count, not ARM7TDMI bus cycles.
+ * emulator's scheduler counts: ARM7TDMI bus cycles since reset, wait states included.
  */
 import type { HardwareEvent } from '@gba-kit/gba-emulator';
 

@@ -2,8 +2,27 @@
  * GBA DMA Controller
  *
  * 4 DMA channels with priority (0 highest, 3 lowest).
- * Supports immediate, VBlank, HBlank, and special (sound FIFO) start modes.
- * DMA halts the CPU during transfers.
+ * Supports immediate, VBlank, HBlank, and special (sound FIFO, video capture) start modes.
+ *
+ * A channel copies SAD, DAD and CNT_L into its internal counters when its enable bit goes from 0
+ * to 1 (GBATEK "DMA Transfers": "Upon DMA Enable (Bit 15) changing from 0 to 1: Reloads SAD, DAD,
+ * CNT_L"). Each unit passes through the channel's data latch; for a source below EWRAM (the BIOS
+ * and the unused region after it) the channel skips the read and writes what the latch holds from
+ * its last read (mGBA dma.c GBADMAService; mgba-suite "DMA tests").
+ *
+ * The channels share one bus master. A channel asks for the bus 3 cycles after its trigger, a
+ * sound FIFO channel as soon as its FIFO asks for data (mGBA audio.c GBAAudioSampleFIFO), and
+ * once one has it the CPU stops until no channel is left. That run begins and ends with an
+ * internal cycle, 2I however many channels it serves back to back (GBATEK "DMA Transfers":
+ * "Internal time for DMA processing is 2I"; NanoBoyAdvance dma.cc Run). It moves one unit at a
+ * time, a read then a write, always for the highest-priority channel that is waiting, so a
+ * channel triggered mid-transfer takes over at the next unit and the lower one resumes after it
+ * (GBATEK: "DMA Channels with lower priority are paused until channels with higher priority have
+ * completed"; mGBA dma.c re-arbitrates after every unit). Every access is sequential but a
+ * channel's first one to the game pak (NanoBoyAdvance dma.cc RunChannel), which gives the times
+ * mgba-suite's Timing "DMA" rows measured on hardware. The clock moves with each unit, so an
+ * event that comes due during a transfer fires after the unit it falls in, and the transfer
+ * resumes once it has.
  */
 import type { InterruptController } from './interrupts.js';
 import type { DmaSnapshot } from './savestate.js';
@@ -21,9 +40,9 @@ interface DmaChannel {
   srcLatch: number;
   /** Latched destination address (written by CPU) */
   dstLatch: number;
-  /** Word count (12-bit for DMA0-2, 16-bit for DMA3) */
+  /** Units the current transfer has left to move (internal, updated during transfer) */
   wordCount: number;
-  /** Latched word count */
+  /** Latched word count (DMAx_CNT_L: 14-bit for DMA0-2, 16-bit for DMA3) */
   wordCountLatch: number;
   /** Destination address control */
   dstControl: DmaAddrControl;
@@ -35,12 +54,16 @@ interface DmaChannel {
   wordSize: boolean;
   /** Start timing */
   startTiming: DmaStartTiming;
+  /** Game Pak DRQ (DMA3CNT_H bit 11), stored and read back; on DMA0-2 bit 11 reads 0 */
+  gamePakDrq: boolean;
   /** IRQ on completion */
   irqEnable: boolean;
   /** DMA enabled */
   enabled: boolean;
   /** Instruction that last enabled this channel (the origin of its writes for watchpoints). */
   startOrigin: WriteOrigin;
+  /** The last unit read, both halves equal after a 16-bit read; what an unreadable source gives. */
+  latch: number;
 }
 
 const ZERO_ORIGIN: WriteOrigin = { pc: 0, instructionAddress: 0, thumb: false };
@@ -56,7 +79,33 @@ export interface DmaMemoryAccess {
   /** Mark/unmark subsequent writes as coming from a DMA channel (watchpoints). */
   setDmaSource?(channel: number, origin: WriteOrigin): void;
   clearDmaSource?(): void;
+  /** One access made now, and the cycles it takes (the bus's `dataCycles`). */
+  dataCycles(address: number, width: 2 | 4, sequential: boolean): number;
+  /** Cycles in which the channel holds the bus without an access (the bus's `idle`). */
+  idle(cycles: number): void;
 }
+
+/** Cycles from a channel's trigger to its request for the bus (mGBA GBADMAWriteCNT_HI: "DMAs take 3 cycles to start"). */
+const DMA_START_DELAY = 3;
+
+/** The internal cycle a run begins with, and the one it ends with. */
+const RUN_EDGE_CYCLES = 1;
+
+/** Where the game pak's address space begins. */
+const CARTRIDGE_BASE = 0x08000000;
+
+/** Where the game pak's ROM mirrors end and SRAM begins. A source in the ROM always increments. */
+const SRAM_BASE = 0x0e000000;
+
+/** The lowest source a DMA reads; below it the channel writes its latch (mGBA GBADMAService, `source >= GBA_BASE_EWRAM`). */
+const READABLE_BASE = 0x02000000;
+
+/** Sound FIFO DMA moves 4 words per request, whatever CNT_L and the width bit say (GBATEK "Sound DMA"). */
+const FIFO_UNITS = 4;
+
+/** Video capture runs on lines 2-161 and stops when VCOUNT reaches 162 (GBATEK "Video Capture Mode"). */
+const CAPTURE_FIRST_LINE = 2;
+const CAPTURE_END_LINE = 162;
 
 const DMA_EVENT_IDS = [EventId.Dma0, EventId.Dma1, EventId.Dma2, EventId.Dma3] as const;
 const DMA_IRQ_FLAGS = [IrqFlag.Dma0, IrqFlag.Dma1, IrqFlag.Dma2, IrqFlag.Dma3] as const;
@@ -79,6 +128,19 @@ export class DmaController {
   readonly #interrupts: InterruptController;
   #memory: DmaMemoryAccess | undefined;
 
+  /** The channels that asked for the bus and have units left, bit n for DMAn. */
+  #waiting = 0;
+  /** Whether a run holds the bus: it has spent the internal cycle it begins with. */
+  #running = false;
+  /** The channel that moved the run's last unit, -1 before the first. */
+  #current = -1;
+  /** Whether that channel has made its nonsequential game pak access since it took the bus. */
+  #gamePakAccessed = false;
+  /** Whether the run is moving units now; a channel that asks then waits for the next unit. */
+  #moving = false;
+  /** The unit the run last moved, as the bus carried it: a halfword on both halves. */
+  #busValue = 0;
+
   constructor(scheduler: Scheduler, interrupts: InterruptController) {
     this.#scheduler = scheduler;
     this.#interrupts = interrupts;
@@ -96,9 +158,11 @@ export class DmaController {
         repeat: false,
         wordSize: false,
         startTiming: DmaStartTiming.Immediately,
+        gamePakDrq: false,
         irqEnable: false,
         enabled: false,
         startOrigin: ZERO_ORIGIN,
+        latch: 0,
       });
     }
   }
@@ -106,6 +170,21 @@ export class DmaController {
   /** Set memory access functions (called during system bus setup to break circular dep) */
   setMemoryAccess(memory: DmaMemoryAccess): void {
     this.#memory = memory;
+  }
+
+  /** DMAx_SAD as last written. The register is write-only: the CPU reads open bus there, a debugger reads this. */
+  readSrcLatch(index: number): number {
+    return this.#channels[index]!.srcLatch;
+  }
+
+  /** DMAx_DAD as last written (write-only, like DMAx_SAD). */
+  readDstLatch(index: number): number {
+    return this.#channels[index]!.dstLatch;
+  }
+
+  /** DMAx_CNT_L as last written (write-only: the CPU reads 0 there). */
+  readWordCountLatch(index: number): number {
+    return this.#channels[index]!.wordCountLatch;
   }
 
   /** Write source address (DMAx_SAD) — 27-bit for DMA0, 28-bit for DMA1-3 */
@@ -134,13 +213,19 @@ export class DmaController {
       ((ch.srcControl & 3) << 7) |
       (ch.repeat ? 1 << 9 : 0) |
       (ch.wordSize ? 1 << 10 : 0) |
+      (ch.gamePakDrq ? 1 << 11 : 0) |
       ((ch.startTiming & 3) << 12) |
       (ch.irqEnable ? 1 << 14 : 0) |
       (ch.enabled ? 1 << 15 : 0)
     );
   }
 
-  /** Write control register (DMAx_CNT_H) */
+  /**
+   * Write control register (DMAx_CNT_H). The control bits take effect at once; the internal
+   * counters reload, and an immediate transfer starts, only when the write sets a clear enable bit
+   * (mGBA dma.c GBADMAWriteCNT_HI, `!wasEnabled`), so rewriting a running channel's control leaves
+   * its addresses and count where the transfer has brought them.
+   */
   writeControl(index: number, value: number): void {
     const ch = this.#channels[index]!;
     const wasEnabled = ch.enabled;
@@ -149,64 +234,113 @@ export class DmaController {
     ch.srcControl = ((value >> 7) & 3) as DmaAddrControl;
     ch.repeat = (value & (1 << 9)) !== 0;
     ch.wordSize = (value & (1 << 10)) !== 0;
+    ch.gamePakDrq = index === 3 && (value & (1 << 11)) !== 0;
     ch.startTiming = ((value >> 12) & 3) as DmaStartTiming;
     ch.irqEnable = (value & (1 << 14)) !== 0;
     ch.enabled = (value & (1 << 15)) !== 0;
 
-    if (ch.enabled) {
+    if (!wasEnabled && ch.enabled) {
       // Capture the instruction that started this DMA (for watchpoint attribution).
       ch.startOrigin = this.#memory?.getOrigin?.() ?? ZERO_ORIGIN;
-      // (Re-)enabling DMA always reloads addresses and word count from latches,
-      // whether transitioning from disabled→enabled OR re-writing while enabled.
-      // Real GBA hardware reloads on any control write with enable=1.
-      ch.srcAddr = ch.srcLatch;
-      ch.dstAddr = ch.dstLatch;
-      ch.wordCount = ch.wordCountLatch === 0 ? (index === 3 ? 0x10000 : 0x4000) : ch.wordCountLatch;
+      // The internal address counters are aligned to the transfer width, so a misaligned SAD/DAD
+      // loses its low bits here (mGBA GBADMAWriteCNT_HI: `nextSource &= -width`). Sound FIFO DMA
+      // moves words.
+      const alignMask = ch.wordSize || this.#isSoundFifo(index) ? ~3 : ~1;
+      ch.srcAddr = (ch.srcLatch & alignMask) >>> 0;
+      ch.dstAddr = (ch.dstLatch & alignMask) >>> 0;
+      ch.wordCount = this.#unitsPerTransfer(index);
 
       if (ch.startTiming === DmaStartTiming.Immediately) {
-        // Immediate DMA executes synchronously (blocks the CPU on real GBA)
-        this.#executeTransfer(index);
+        this.#scheduleTransfer(index, this.#scheduler.currentCycle);
       }
     } else if (wasEnabled && !ch.enabled) {
       this.#scheduler.cancel(DMA_EVENT_IDS[index]!);
+      this.#waiting &= ~(1 << index);
     }
   }
 
-  /** Trigger DMA channels waiting for a specific start timing */
-  trigger(timing: DmaStartTiming): void {
+  /**
+   * What the data bus carries after a channel moved a unit, until the CPU drives it again: an
+   * open-bus read while a DMA runs, and in the instruction right after it, returns this (mGBA
+   * dma.c GBADMAService sets `gba->bus` after every unit; memory.c GBALoadBad; mgba-suite Misc
+   * edge "DMA Prefetch").
+   */
+  get busValue(): number {
+    return this.#busValue;
+  }
+
+  /** What a transfer moves: CNT_L units, 0 meaning the most there are, and always 4 words for a sound FIFO. */
+  #unitsPerTransfer(index: number): number {
+    if (this.#isSoundFifo(index)) {
+      return FIFO_UNITS;
+    }
+    const count = this.#channels[index]!.wordCountLatch;
+    return count === 0 ? (index === 3 ? 0x10000 : 0x4000) : count;
+  }
+
+  /** Trigger the DMA channels waiting for `timing`, which occurred at the cycle `at`. */
+  trigger(timing: DmaStartTiming, at: number): void {
     for (let i = 0; i < 4; i++) {
       const ch = this.#channels[i]!;
       if (ch.enabled && ch.startTiming === timing) {
-        this.#scheduleTransfer(i);
+        this.#scheduleTransfer(i, at);
       }
     }
   }
 
-  /** Trigger sound FIFO DMA (channels 1 and 2 with Special timing) */
-  triggerSoundFifo(channel: 1 | 2): void {
-    const ch = this.#channels[channel]!;
-    if (ch.enabled && ch.startTiming === DmaStartTiming.Special) {
-      this.#executeFifoTransfer(channel);
+  /**
+   * The sound FIFO at `fifoAddress` (FIFO_A or FIFO_B) asks for data: the DMA1 or DMA2 in Special
+   * timing whose destination is that FIFO moves 4 words into it (GBATEK "Sound DMA": the
+   * destination "must be FIFO_A (040000A0h) or FIFO_B (040000A4h)"; mGBA audio.c
+   * GBAAudioScheduleFifoDma binds the FIFO to the channel by its destination).
+   */
+  requestSoundFifo(fifoAddress: number): void {
+    for (let i = 1; i <= 2; i++) {
+      const ch = this.#channels[i]!;
+      if (ch.enabled && ch.startTiming === DmaStartTiming.Special && ch.dstAddr === fifoAddress) {
+        this.#requestBus(i);
+        return;
+      }
     }
   }
 
-  #scheduleTransfer(index: number): void {
-    // DMA transfers happen "immediately" in emulation terms (2 cycles startup)
-    this.#scheduler.schedule(DMA_EVENT_IDS[index]!, 2, () => {
-      this.#executeTransfer(index);
-    });
-  }
-
-  /** Observer for every transfer as it starts (an event log's DMA rows). */
-  onTransfer: ((channel: number, info: DmaTransferInfo) => void) | null = null;
-
-  #executeTransfer(index: number): void {
-    const memory = this.#memory;
-    if (!memory) {
+  /**
+   * The LCD began `line` at the cycle `at`. DMA3 in Special timing is video capture: it starts a
+   * transfer as each line from 2 to 161 begins, and the hardware clears its enable bit when VCOUNT
+   * reaches 162 (GBATEK "Video Capture Mode"; NanoBoyAdvance ppu.cc UpdateVideoTransferDMA).
+   */
+  triggerVideoCapture(line: number, at: number): void {
+    const ch = this.#channels[3]!;
+    if (!ch.enabled || ch.startTiming !== DmaStartTiming.Special) {
       return;
     }
+    if (line >= CAPTURE_FIRST_LINE && line < CAPTURE_END_LINE) {
+      this.#scheduleTransfer(3, at);
+    } else if (line === CAPTURE_END_LINE) {
+      ch.enabled = false;
+      this.#scheduler.cancel(DMA_EVENT_IDS[3]!);
+      this.#waiting &= ~(1 << 3);
+    }
+  }
+
+  /** DMA1 and DMA2 in Special timing serve the sound FIFOs. */
+  #isSoundFifo(index: number): boolean {
+    return (index === 1 || index === 2) && this.#channels[index]!.startTiming === DmaStartTiming.Special;
+  }
+
+  #scheduleTransfer(index: number, triggeredAt: number): void {
+    this.#scheduler.scheduleAt(DMA_EVENT_IDS[index]!, triggeredAt + DMA_START_DELAY, () => this.#onStart(index));
+  }
+
+  /**
+   * Observer for each transfer as its start delay ends (an event log's DMA rows). Sound FIFO
+   * transfers ask for the bus directly from `requestSoundFifo` and bypass it.
+   */
+  onTransfer: ((channel: number, info: DmaTransferInfo) => void) | null = null;
+
+  /** A triggered channel's start delay has passed: it asks for the bus. */
+  #onStart(index: number): void {
     const ch = this.#channels[index]!;
-    const step = ch.wordSize ? 4 : 2;
     this.onTransfer?.(index, {
       source: ch.srcAddr >>> 0,
       destination: ch.dstAddr >>> 0,
@@ -215,51 +349,130 @@ export class DmaController {
       timing: ch.startTiming,
       origin: ch.startOrigin,
     });
-
-    // Attribute this channel's writes to its start instruction (for watchpoints).
-    memory.setDmaSource?.(index, ch.startOrigin);
-    for (let i = 0; i < ch.wordCount; i++) {
-      if (ch.wordSize) {
-        const value = memory.read32(ch.srcAddr);
-        memory.write32(ch.dstAddr, value);
-      } else {
-        const value = memory.read16(ch.srcAddr);
-        memory.write16(ch.dstAddr, value);
-      }
-
-      // Update source address
-      ch.srcAddr = this.#updateAddr(ch.srcAddr, ch.srcControl, step);
-      // Update destination address
-      ch.dstAddr = this.#updateAddr(ch.dstAddr, ch.dstControl, step);
-    }
-    memory.clearDmaSource?.();
-
-    this.#onTransferComplete(index);
+    this.#requestBus(index);
   }
 
-  /** Special FIFO transfer: always 4 words of 32-bit, destination fixed */
-  #executeFifoTransfer(index: number): void {
+  /** Channel `index` waits for the bus; the run serves it once no higher-priority channel waits. */
+  #requestBus(index: number): void {
+    this.#waiting |= 1 << index;
+    if (!this.#moving) {
+      this.#run();
+    }
+  }
+
+  /**
+   * Hold the bus and move units, each for the highest-priority waiting channel, until none is
+   * left. When an event comes due the run pauses after the current unit and resumes as its own
+   * `DmaResume` event, after the events already due.
+   */
+  #run(): void {
     const memory = this.#memory;
     if (!memory) {
       return;
     }
-    const ch = this.#channels[index]!;
+    const scheduler = this.#scheduler;
+    scheduler.cancel(EventId.DmaResume);
+    this.#moving = true;
+    if (!this.#running) {
+      this.#running = true;
+      this.#current = -1;
+      this.#idle(memory, RUN_EDGE_CYCLES);
+    }
 
-    memory.setDmaSource?.(index, ch.startOrigin);
-    for (let i = 0; i < 4; i++) {
-      const value = memory.read32(ch.srcAddr);
-      memory.write32(ch.dstAddr, value);
-      ch.srcAddr = this.#updateAddr(ch.srcAddr, ch.srcControl, 4);
-      // Destination fixed for FIFO
+    let moved = false;
+    let source = -1;
+    for (;;) {
+      const waiting = this.#waiting;
+      if (waiting === 0) {
+        this.#idle(memory, RUN_EDGE_CYCLES);
+        this.#running = false;
+        break;
+      }
+      if (moved && scheduler.nextEventCycle <= scheduler.currentCycle) {
+        scheduler.scheduleAt(EventId.DmaResume, scheduler.currentCycle, () => this.#run());
+        break;
+      }
+      const index = 31 - Math.clz32(waiting & -waiting);
+      const ch = this.#channels[index]!;
+      if (!ch.enabled) {
+        this.#waiting &= ~(1 << index);
+        continue;
+      }
+      if (index !== this.#current) {
+        this.#current = index;
+        this.#gamePakAccessed = false;
+      }
+      if (index !== source) {
+        // Attribute the channel's writes to its start instruction (for watchpoints).
+        source = index;
+        memory.setDmaSource?.(index, ch.startOrigin);
+      }
+      this.#moveUnit(index, ch, memory);
+      moved = true;
+      if (--ch.wordCount === 0) {
+        this.#waiting &= ~(1 << index);
+        this.#onTransferComplete(index);
+      }
     }
     memory.clearDmaSource?.();
+    this.#moving = false;
+  }
 
-    // FIFO DMA always repeats — don't disable
-    if (ch.irqEnable) {
-      this.#interrupts.requestInterrupt(DMA_IRQ_FLAGS[index]!);
+  /** Cycles in which the run holds the bus without an access. */
+  #idle(memory: DmaMemoryAccess, cycles: number): void {
+    memory.idle(cycles);
+    this.#scheduler.advance(cycles);
+  }
+
+  /**
+   * Move one unit from the channel's source to its destination through its latch, the read then
+   * the write, each moving the clock by its cycles. A 16-bit read fills both halves of the latch,
+   * and a 16-bit write takes the half the destination's bit 1 selects (mGBA GBADMAService,
+   * `info->latch >> (8 * (dest & 2))`). A sound FIFO channel moves words to its fixed FIFO.
+   */
+  #moveUnit(index: number, ch: DmaChannel, memory: DmaMemoryAccess): void {
+    const fifo = this.#isSoundFifo(index);
+    const step = fifo || ch.wordSize ? 4 : 2;
+    const src = ch.srcAddr >>> 0;
+    const dst = ch.dstAddr >>> 0;
+    let srcSequential = true;
+    let dstSequential = true;
+    if (!this.#gamePakAccessed) {
+      if (src >= CARTRIDGE_BASE) {
+        srcSequential = false;
+        this.#gamePakAccessed = true;
+      } else if (dst >= CARTRIDGE_BASE) {
+        dstSequential = false;
+        this.#gamePakAccessed = true;
+      }
+    }
+
+    const scheduler = this.#scheduler;
+    scheduler.advance(memory.dataCycles(src, step, srcSequential));
+    if (src >= READABLE_BASE) {
+      if (step === 4) {
+        ch.latch = memory.read32(src) >>> 0;
+      } else {
+        const value = memory.read16(src) & 0xffff;
+        ch.latch = (value | (value << 16)) >>> 0;
+      }
+    }
+    scheduler.advance(memory.dataCycles(dst, step, dstSequential));
+    if (step === 4) {
+      memory.write32(dst, ch.latch);
+      this.#busValue = ch.latch;
+    } else {
+      memory.write16(dst, (ch.latch >>> ((dst & 2) * 8)) & 0xffff);
+      this.#busValue = ((ch.latch & 0xffff) | (ch.latch << 16)) >>> 0;
+    }
+
+    ch.srcAddr = this.#nextSource(ch.srcAddr, ch.srcControl, step);
+    if (!fifo) {
+      ch.dstAddr = this.#nextAddress(ch.dstAddr, ch.dstControl, step);
     }
   }
 
+  /** A transfer moved its last unit: its IRQ, then a repeat reloads it for the next trigger. */
   #onTransferComplete(index: number): void {
     const ch = this.#channels[index]!;
 
@@ -267,19 +480,27 @@ export class DmaController {
       this.#interrupts.requestInterrupt(DMA_IRQ_FLAGS[index]!);
     }
 
+    // A repeating VBlank, HBlank or Special channel stays enabled for its next trigger; any other
+    // channel clears its enable bit once its transfer is done (GBATEK "DMA Repeat bit").
     if (ch.repeat && ch.startTiming !== DmaStartTiming.Immediately) {
-      // Reload word count, optionally reload destination
-      ch.wordCount = ch.wordCountLatch === 0 ? (index === 3 ? 0x10000 : 0x4000) : ch.wordCountLatch;
-
-      if (ch.dstControl === DmaAddrControl.IncrementReload) {
-        ch.dstAddr = ch.dstLatch;
+      ch.wordCount = this.#unitsPerTransfer(index);
+      if (ch.dstControl === DmaAddrControl.IncrementReload && !this.#isSoundFifo(index)) {
+        ch.dstAddr = (ch.dstLatch & (ch.wordSize ? ~3 : ~1)) >>> 0;
       }
     } else {
       ch.enabled = false;
     }
   }
 
-  #updateAddr(addr: number, control: DmaAddrControl, step: number): number {
+  /** The source address after a unit: a source in the game pak ROM increments whatever SAD control says (mGBA dma.c). */
+  #nextSource(addr: number, control: DmaAddrControl, step: number): number {
+    if (addr >>> 0 >= CARTRIDGE_BASE && addr >>> 0 < SRAM_BASE) {
+      return addr + step;
+    }
+    return this.#nextAddress(addr, control, step);
+  }
+
+  #nextAddress(addr: number, control: DmaAddrControl, step: number): number {
     switch (control) {
       case DmaAddrControl.Increment:
       case DmaAddrControl.IncrementReload:
@@ -296,8 +517,11 @@ export class DmaController {
     for (let i = 0; i < 4; i++) {
       const id = DMA_EVENT_IDS[i]!;
       if (this.#scheduler.isScheduled(id)) {
-        this.#scheduler.reattach(id, () => this.#executeTransfer(i));
+        this.#scheduler.reattach(id, () => this.#onStart(i));
       }
+    }
+    if (this.#scheduler.isScheduled(EventId.DmaResume)) {
+      this.#scheduler.reattach(EventId.DmaResume, () => this.#run());
     }
   }
 
@@ -316,9 +540,16 @@ export class DmaController {
         repeat: ch.repeat,
         wordSize: ch.wordSize,
         startTiming: ch.startTiming,
+        gamePakDrq: ch.gamePakDrq,
         irqEnable: ch.irqEnable,
         enabled: ch.enabled,
+        latch: ch.latch,
       })),
+      waiting: this.#waiting,
+      running: this.#running,
+      current: this.#current,
+      gamePakAccessed: this.#gamePakAccessed,
+      busValue: this.#busValue,
     };
   }
 
@@ -338,9 +569,26 @@ export class DmaController {
       ch.repeat = s.repeat;
       ch.wordSize = s.wordSize;
       ch.startTiming = s.startTiming as DmaStartTiming;
+      ch.gamePakDrq = s.gamePakDrq ?? false;
       ch.irqEnable = s.irqEnable;
       ch.enabled = s.enabled;
+      ch.latch = s.latch ?? 0;
     }
+    // A snapshot without `running` holds a sound FIFO channel's count as CNT_L. It was taken
+    // between transfers, so the count becomes the 4 words the channel's next request moves.
+    if (snap.running === undefined) {
+      for (let i = 1; i <= 2; i++) {
+        if (this.#isSoundFifo(i)) {
+          this.#channels[i]!.wordCount = FIFO_UNITS;
+        }
+      }
+    }
+    this.#waiting = snap.waiting ?? 0;
+    this.#running = snap.running ?? false;
+    this.#current = snap.current ?? -1;
+    this.#gamePakAccessed = snap.gamePakAccessed ?? false;
+    this.#busValue = snap.busValue ?? 0;
+    this.#moving = false;
   }
 
   /** Reset all DMA channels */
@@ -358,9 +606,18 @@ export class DmaController {
       ch.repeat = false;
       ch.wordSize = false;
       ch.startTiming = DmaStartTiming.Immediately;
+      ch.gamePakDrq = false;
       ch.irqEnable = false;
       ch.enabled = false;
+      ch.latch = 0;
       this.#scheduler.cancel(DMA_EVENT_IDS[i]!);
     }
+    this.#scheduler.cancel(EventId.DmaResume);
+    this.#waiting = 0;
+    this.#running = false;
+    this.#current = -1;
+    this.#gamePakAccessed = false;
+    this.#moving = false;
+    this.#busValue = 0;
   }
 }

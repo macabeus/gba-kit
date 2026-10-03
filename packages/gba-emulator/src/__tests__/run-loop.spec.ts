@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
 import { Gba } from '../gba.js';
-import { CYCLES_PER_FRAME, CYCLES_PER_SCANLINE } from '../types.js';
+import { CYCLES_PER_FRAME, CYCLES_PER_SCANLINE, EventId, HBLANK_START_CYCLE } from '../types.js';
 
-/** ARM: `add r0, r0, #1` then `b` back to it — a loop that counts instructions in r0. */
+/** ARM: `add r0, r0, #1` then `b` back to it — a loop that counts its iterations in r0. */
 const COUNT_LOOP = [0xe2800001, 0xeafffffd];
+/**
+ * What the loop costs from ROM at WAITCNT=0 (GBATEK "Waitstate Control": 4 waits for an N access
+ * and 2 for an S access of WS0's 16-bit bus, so an ARM opcode is 8 cycles nonsequential, 6
+ * sequential). The `add` is its S fetch, the `b` its S fetch and a refill of 1N+1S.
+ */
+const ADD_CYCLES = 6;
+const LOOP_CYCLES = ADD_CYCLES + 6 + 8 + 6;
+/** The loop's longest instruction, the `b`: an event that comes due during it fires at most this late. */
+const LONGEST_INSTRUCTION = 20;
 /** ARM: `swi 0x05` (VBlankIntrWait) then `b .` */
 const VBLANK_WAIT = [0xef050000, 0xeafffffe];
 
@@ -40,7 +49,7 @@ describe('Gba run loop: debugger stops', () => {
     expect(gba.runFrame(() => gba.armCpu.registers[0] === 1)).toBe('stopped');
     expect(gba.armCpu.registers[0]).toBe(1);
     expect(gba.armCpu.registers[15]).toBe(0x08000004);
-    expect(gba.scheduler.currentCycle).toBe(1);
+    expect(gba.scheduler.currentCycle).toBe(ADD_CYCLES);
   });
 
   it('a CPU debug hook that refuses an instruction charges no cycle either', () => {
@@ -49,7 +58,7 @@ describe('Gba run loop: debugger stops', () => {
     expect(gba.runFrame()).toBe('stopped');
     expect(gba.armCpu.registers[15]).toBe(0x08000004);
     expect(gba.armCpu.registers[0]).toBe(1);
-    expect(gba.scheduler.currentCycle).toBe(1);
+    expect(gba.scheduler.currentCycle).toBe(ADD_CYCLES);
   });
 
   it('can stop a halted CPU without advancing to the next event', () => {
@@ -60,29 +69,38 @@ describe('Gba run loop: debugger stops', () => {
     expect(gba.scheduler.currentCycle).toBe(cycle);
   });
 
+  /** The cycle the next line's HBlank is due at: the scanline grid, wherever the clock stands. */
+  function nextHBlank(gba: Gba): number {
+    return gba.scheduler.currentCycle + gba.scheduler.cyclesUntilEvent(EventId.HBlank);
+  }
+
   it('frames stay on the hardware grid across a mid-frame stop', () => {
     const gba = boot(COUNT_LOOP);
     expect(gba.runFrame(() => gba.armCpu.registers[0] === 5000)).toBe('stopped');
     expect(gba.frameCount).toBe(0);
     expect(gba.runFrame()).toBe('done'); // finishes the SAME frame
     expect(gba.frameCount).toBe(1);
-    expect(gba.scheduler.currentCycle).toBe(CYCLES_PER_FRAME);
     expect(gba.scanline).toBe(0);
+    // The frame ends with the instruction during which its last cycle passed.
+    expect(gba.scheduler.currentCycle - CYCLES_PER_FRAME).toBeGreaterThanOrEqual(0);
+    expect(gba.scheduler.currentCycle - CYCLES_PER_FRAME).toBeLessThan(LONGEST_INSTRUCTION);
+    expect(nextHBlank(gba)).toBe(CYCLES_PER_FRAME + HBLANK_START_CYCLE);
     expect(gba.runFrame()).toBe('done');
-    expect(gba.scheduler.currentCycle).toBe(2 * CYCLES_PER_FRAME);
+    expect(nextHBlank(gba)).toBe(2 * CYCLES_PER_FRAME + HBLANK_START_CYCLE);
   });
 
-  it('a frame is one instruction per cycle on this loop', () => {
+  it('a frame runs the loop at its ARM7TDMI cost from ROM', () => {
     const gba = boot(COUNT_LOOP);
     gba.runFrame();
-    expect(gba.armCpu.registers[0]).toBe(CYCLES_PER_FRAME / 2);
+    // Every iteration that begins before the frame's last cycle runs.
+    expect(gba.armCpu.registers[0]).toBe(Math.ceil(CYCLES_PER_FRAME / LOOP_CYCLES));
   });
 
   it('runScanline advances exactly one scanline', () => {
     const gba = boot(COUNT_LOOP);
     expect(gba.runScanline()).toBe('done');
     expect(gba.scanline).toBe(1);
-    expect(gba.scheduler.currentCycle).toBe(CYCLES_PER_SCANLINE);
+    expect(nextHBlank(gba)).toBe(CYCLES_PER_SCANLINE + HBLANK_START_CYCLE);
     for (let i = 0; i < 227; i++) {
       gba.runScanline();
     }
@@ -103,10 +121,13 @@ describe('Gba HLE BIOS state is per instance', () => {
     const a = boot(VBLANK_WAIT);
     const b = boot(COUNT_LOOP);
     a.runFrame();
-    expect(a.interrupts.intrWaitFlags).toBe(1);
-    expect(b.interrupts.intrWaitFlags).toBe(0);
+    // A sleeps in its BIOS's IntrWait loop; B never called it.
+    expect(a.interrupts.halted).toBe(true);
+    expect(a.armCpu.registers[15]).toBeLessThan(0x4000);
+    expect(b.interrupts.halted).toBe(false);
     b.runFrame();
-    expect(b.interrupts.intrWaitFlags).toBe(0);
+    expect(b.interrupts.halted).toBe(false);
+    expect(b.armCpu.registers[15]).toBeGreaterThanOrEqual(0x08000000);
   });
 });
 

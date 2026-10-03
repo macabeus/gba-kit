@@ -25,11 +25,25 @@ export const TOTAL_SCANLINES = VISIBLE_SCANLINES + VBLANK_SCANLINES; // 228
 /** Cycles per frame */
 export const CYCLES_PER_FRAME = CYCLES_PER_SCANLINE * TOTAL_SCANLINES; // 280,896
 
-/** Visible portion of a scanline in cycles */
+/** Visible portion of a scanline in cycles: 240 dots of 4 cycles */
 export const HDRAW_CYCLES = 960;
 
-/** HBlank portion in cycles */
+/** HBlank portion in cycles: 68 dots */
 export const HBLANK_CYCLES = 272;
+
+/**
+ * The cycle of a line at which HBlank begins for the rest of the machine: the DISPSTAT flag sets,
+ * the HBlank IRQ and HBlank DMA start, and the line's picture is complete (GBATEK "LCD I/O Display
+ * Status": "Although the drawing time is only 960 cycles (240*4), the H-Blank flag is "0" for a
+ * total of 1006 cycles."; mGBA video.h sets VIDEO_HDRAW_LENGTH to 1008 instead).
+ */
+export const HBLANK_START_CYCLE = 1006;
+
+/**
+ * The cycle of a line at which the PPU latches DISPCNT for its layer enables (NanoBoyAdvance
+ * ppu.cc: `scheduler.Add(40, PPU_latch_dispcnt)` at every line start that latches).
+ */
+export const DISPCNT_LATCH_CYCLE = 40;
 
 /** Target frame rate (Hz) */
 export const FRAME_RATE = CPU_FREQ / CYCLES_PER_FRAME; // ~59.7275 Hz
@@ -56,6 +70,16 @@ export const BOOT_STACK_POINTERS: ReadonlyArray<readonly [mode: number, sp: numb
  * drift apart.
  */
 export const BIOS_IRQ_STUB_PUSH = 0xe92d500f;
+
+/**
+ * The opcodes the BIOS read-protection latch holds when code outside the BIOS reads it: the last
+ * opcode the real BIOS fetched before handing control back (GBATEK "BIOS Memory"). After boot it
+ * is [0DCh+8], after an SWI [188h+8], and after an IRQ [13Ch+8], the word the installed IRQ stub
+ * places behind its own return. During an IRQ handler it is [134h+8], the stub's return itself.
+ */
+export const BIOS_LATCH_AFTER_BOOT = 0xe129f000;
+export const BIOS_LATCH_AFTER_SWI = 0xe3a02004;
+export const BIOS_LATCH_AFTER_IRQ = 0xe55ec002;
 
 /**
  * The stub as something reading the machine's stack sees it: the mode it runs in,
@@ -86,7 +110,10 @@ export const SCREEN_HEIGHT = 160;
 
 // ─── Event IDs ────────────────────────────────────────────────────────
 
-/** Unique IDs for scheduled hardware events */
+/**
+ * Unique IDs for scheduled hardware events. Snapshots store each event at its ID's index, so
+ * VBlank and VBlankEnd, which nothing schedules any more, keep their slots.
+ */
 export const enum EventId {
   HBlank,
   HBlankEnd,
@@ -100,6 +127,16 @@ export const enum EventId {
   Dma1,
   Dma2,
   Dma3,
+  /** An interrupt request reaching the CPU (InterruptController) */
+  Irq,
+  /** A Normal-mode serial transfer completing (SerialPort) */
+  Serial,
+  /** The PPU latching DISPCNT, DISPCNT_LATCH_CYCLE into a line */
+  DispcntLatch,
+  /** Setting IME reaching the CPU's IRQ line while a request is already signalled (InterruptController) */
+  ImeLine,
+  /** A DMA run that paused for an event taking the bus again (DmaController) */
+  DmaResume,
   /** Sentinel — total count of event types */
   Count,
 }
@@ -203,10 +240,12 @@ export const MMIO = {
   BLDY: 0x04000054,
 
   // Sound
+  SOUND3CNT_L: 0x04000070,
   SOUNDCNT_L: 0x04000080,
   SOUNDCNT_H: 0x04000082,
   SOUNDCNT_X: 0x04000084,
   SOUNDBIAS: 0x04000088,
+  WAVE_RAM: 0x04000090,
   FIFO_A: 0x040000a0,
   FIFO_B: 0x040000a4,
 
@@ -238,9 +277,20 @@ export const MMIO = {
   TM3CNT_L: 0x0400010c,
   TM3CNT_H: 0x0400010e,
 
+  // Serial
+  SIODATA32: 0x04000120,
+  SIOCNT: 0x04000128,
+  SIODATA8: 0x0400012a,
+
   // Input
   KEYINPUT: 0x04000130,
   KEYCNT: 0x04000132,
+
+  // Serial, continued
+  RCNT: 0x04000134,
+  JOYCNT: 0x04000140,
+  JOY_RECV: 0x04000150,
+  JOY_TRANS: 0x04000154,
 
   // Interrupts
   IE: 0x04000200,

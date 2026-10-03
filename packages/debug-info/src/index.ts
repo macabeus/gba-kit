@@ -53,6 +53,8 @@ export {
   type FrameMethod,
   type MachineFacts,
   type ProgramFacts,
+  type ServiceCallFrame,
+  type ServiceCallPolicy,
   type TargetPolicy,
   type UnwoundFrame,
 } from './unwind/types.js';
