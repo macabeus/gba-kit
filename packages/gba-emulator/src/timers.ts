@@ -27,7 +27,7 @@ interface TimerChannel {
   /** Cycle count when this timer was last updated (for computing elapsed ticks) */
   lastUpdateCycle: number;
   /** Overflow callback (for DirectSound FIFO) */
-  onOverflow?: () => void;
+  onOverflow?: (at: number) => void;
 }
 
 const TIMER_EVENT_IDS = [
@@ -71,8 +71,8 @@ export class TimerController {
     }
   }
 
-  /** Set an overflow callback for a timer (used by DirectSound). */
-  setOverflowCallback(index: number, callback: () => void): void {
+  /** Set an overflow callback for a timer (used by DirectSound); it receives the overflow's cycle. */
+  setOverflowCallback(index: number, callback: (at: number) => void): void {
     this.#channels[index]!.onOverflow = callback;
   }
 
@@ -229,7 +229,7 @@ export class TimerController {
     }
 
     // Notify listeners (DirectSound FIFO)
-    ch.onOverflow?.();
+    ch.onOverflow?.(due);
 
     // Cascade: increment next timer
     if (index < 3) {

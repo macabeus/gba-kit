@@ -124,7 +124,7 @@ export class Gba {
     this.display = new DisplayStatus(this.bus.mmioRegisters, this.interrupts);
     this.serial = new SerialPort(this.bus.mmioRegisters, this.scheduler, this.interrupts);
     this.ppu = new Ppu();
-    this.apu = new Apu();
+    this.apu = new Apu(this.scheduler);
 
     // Create CPU with GBA BIOS SWI handler. A call the HLE runs in TypeScript leaves the BIOS's
     // read-protection latch where the real BIOS's shared return code leaves it (mGBA GBASwi16); a
@@ -287,9 +287,8 @@ export class Gba {
         continue;
       }
 
-      const start = scheduler.currentCycle;
       if (this.interrupts.halted) {
-        // A halted CPU sleeps until the next event; the APU keeps running.
+        // A halted CPU sleeps until the next event.
         if (shouldStop?.()) {
           outcome = 'stopped';
           break;
@@ -304,7 +303,6 @@ export class Gba {
       } else {
         this.#runCpu(shouldStop);
       }
-      this.apu.tick(scheduler.currentCycle - start);
 
       if (this.#stopped) {
         outcome = 'stopped';

@@ -36,26 +36,32 @@ function fifoABytes(gba: Gba): number[] {
   return Array.from({ length: fifo.size }, (_, i) => fifo.buffer[(fifo.readIndex + i) & 31]! & 0xff);
 }
 
+/** A stand-in for the machine's clock, which a test moves by hand. */
+interface TestClock {
+  currentCycle: number;
+}
+
 /**
- * An Apu wired to stand-in timers, so a test pops FIFO samples by calling the timer 0
- * overflow callback; master sound on, SOUNDBIAS at its default 0x200.
+ * An Apu on a stand-in clock and stand-in timers, so a test pops FIFO samples by calling the timer
+ * 0 overflow callback; master sound on, SOUNDBIAS at its default 0x200.
  */
-function apuWithTimers(): { apu: Apu; overflowTimer0: () => void } {
-  const callbacks: Array<() => void> = [];
+function apuWithTimers(): { apu: Apu; clock: TestClock; overflowTimer0: () => void } {
+  const callbacks: Array<(at: number) => void> = [];
   const timers = {
-    setOverflowCallback: (index: number, cb: () => void) => {
+    setOverflowCallback: (index: number, cb: (at: number) => void) => {
       callbacks[index] = cb;
     },
   } as unknown as TimerController;
-  const apu = new Apu();
+  const clock: TestClock = { currentCycle: 0 };
+  const apu = new Apu(clock);
   apu.connectTimers(timers);
   apu.writeRegister8(0x84, 0x80);
-  return { apu, overflowTimer0: () => callbacks[0]!() };
+  return { apu, clock, overflowTimer0: () => callbacks[0]!(clock.currentCycle) };
 }
 
-/** Run the APU for `samples` output samples (512 cycles each at 32768 Hz) and return the left channel. */
-function leftSamples(apu: Apu, samples: number): number[] {
-  apu.tick(512 * samples);
+/** Run the clock for `samples` output samples (512 cycles each at 32768 Hz) and return the left channel. */
+function leftSamples({ apu, clock }: { apu: Apu; clock: TestClock }, samples: number): number[] {
+  clock.currentCycle += 512 * samples;
   const out = new Float32Array(samples * 2);
   const n = apu.readSamples(out);
   return Array.from({ length: n }, (_, i) => out[i * 2]!);
@@ -110,7 +116,7 @@ describe('sound registers take byte writes natively', () => {
     gba.bus.write8(IO + 0x6d, 0xc0); // NR24: length enable + restart
     expect(gba.bus.read16(IO + 0x84) & 2).toBe(2);
 
-    gba.apu.tick(FRAME_SEQUENCER_PERIOD * 2); // a length clock expires the channel
+    gba.scheduler.advance(FRAME_SEQUENCER_PERIOD * 2); // a length clock expires the channel
     expect(gba.bus.read16(IO + 0x84) & 2).toBe(0);
 
     gba.bus.write8(IO + 0x6c, 0x55); // NR23
@@ -279,24 +285,26 @@ describe('sound register read masks', () => {
 describe('mixer', () => {
   it('a FIFO spans the full ±0x200 at 100% and half of it at 50%', () => {
     // GBATEK "Max Output Levels": "Each of the two FIFOs can span the FULL output range (+/-200h)."
-    const { apu, overflowTimer0 } = apuWithTimers();
+    const machine = apuWithTimers();
+    const { apu, overflowTimer0 } = machine;
     apu.writeRegister32(0xa0, 0x7f7f7f7f);
     apu.writeRegister16(0x82, 0x0304); // FIFO A 100%, left + right, timer 0
     overflowTimer0();
-    expect(leftSamples(apu, 1)).toEqual([508 / 512]);
+    expect(leftSamples(machine, 1)).toEqual([508 / 512]);
 
     apu.writeRegister8(0x82, 0x00); // 50%
-    expect(leftSamples(apu, 1)).toEqual([254 / 512]);
+    expect(leftSamples(machine, 1)).toEqual([254 / 512]);
   });
 
   it('the sum clips at the 10-bit DAC range around the bias', () => {
-    const { apu, overflowTimer0 } = apuWithTimers();
+    const machine = apuWithTimers();
+    const { apu, overflowTimer0 } = machine;
     apu.writeRegister32(0xa0, 0x7f7f7f7f);
     apu.writeRegister32(0xa4, 0x7f7f7f7f);
     apu.writeRegister16(0x82, 0x330c); // A and B at 100%, both sides, timer 0
     overflowTimer0();
     // 508 + 508 + 0x200 clips at 0x3FF
-    expect(leftSamples(apu, 1)).toEqual([0x1ff / 0x200]);
+    expect(leftSamples(machine, 1)).toEqual([0x1ff / 0x200]);
 
     apu.writeRegister32(0xa0, 0x80808080);
     apu.writeRegister32(0xa4, 0x80808080);
@@ -306,27 +314,74 @@ describe('mixer', () => {
     overflowTimer0();
     overflowTimer0();
     // -512 - 512 + 0x200 clips at 0
-    expect(leftSamples(apu, 1)).toEqual([-1]);
+    expect(leftSamples(machine, 1)).toEqual([-1]);
   });
 
   it('silence is 0 whatever SOUNDBIAS is', () => {
-    const { apu } = apuWithTimers();
+    const machine = apuWithTimers();
+    const { apu } = machine;
     apu.writeRegister16(0x88, 0x0000);
-    expect(leftSamples(apu, 4)).toEqual([0, 0, 0, 0]);
+    expect(leftSamples(machine, 4)).toEqual([0, 0, 0, 0]);
     apu.writeRegister16(0x88, 0x0100);
-    expect(leftSamples(apu, 4)).toEqual([0, 0, 0, 0]);
+    expect(leftSamples(machine, 4)).toEqual([0, 0, 0, 0]);
   });
 
   it('one PSG channel at full volume spans a quarter of the range', () => {
     // GBATEK "Max Output Levels": "Each of the four PSGs can span one QUARTER of the output
     // range (+/-80h)." mGBA reaches 15 * 8 * 8 >> 2 = 240.
-    const { apu } = apuWithTimers();
+    const machine = apuWithTimers();
+    const { apu } = machine;
     apu.writeRegister16(0x80, 0x2277); // master volume 7 both sides, channel 2 left + right
     apu.writeRegister8(0x82, 0x02); // PSG at 100%
     apu.writeRegister16(0x68, 0xf080); // 50% duty, volume 15
     apu.writeRegister16(0x6c, 0x8000 | 1750);
-    const samples = leftSamples(apu, 512);
+    const samples = leftSamples(machine, 512);
     expect(Math.max(...samples)).toBe(240 / 512);
     expect(Math.min(...samples)).toBe(0);
+  });
+});
+
+describe('the APU runs on the machine clock', () => {
+  /** A machine running `b .` from ROM while HBlank DMA3 copies 32 words in EWRAM on every visible line. */
+  function busyWithHBlankDma(): Gba {
+    const gba = new Gba();
+    gba.loadRom(new Uint8Array([0xfe, 0xff, 0xff, 0xea])); // b .
+    gba.bus.write32(0x040000d4, 0x02000000); // DMA3SAD
+    gba.bus.write32(0x040000d8, 0x02001000); // DMA3DAD
+    gba.bus.write16(0x040000dc, 32); // DMA3CNT_L
+    gba.bus.write16(0x040000de, 0x8000 | (2 << 12) | (1 << 10) | (1 << 9)); // enable, HBlank, 32-bit, repeat
+    return gba;
+  }
+
+  it('makes one sample per 512 cycles of the machine, the cycles a DMA holds the bus included', () => {
+    // The machine makes CPU_FREQ / 32768 = 512 cycles per output sample, whoever spends them:
+    // here a third of each visible line goes to DMA (mGBA audio.c GBAAudioSample samples up to the
+    // timestamp of the machine's clock).
+    const gba = busyWithHBlankDma();
+    const out = new Float32Array(2048);
+    let samples = 0;
+    const start = gba.scheduler.currentCycle;
+    for (let frame = 0; frame < 30; frame++) {
+      gba.runFrame();
+      samples += gba.apu.readSamples(out);
+    }
+    expect(gba.dma.serialize().channels[3]!.enabled).toBe(true);
+    expect(samples).toBe(Math.floor((gba.scheduler.currentCycle - start) / 512));
+  });
+
+  it('restores to the same stream of samples', () => {
+    const a = busyWithHBlankDma();
+    a.runFrame();
+    const b = new Gba();
+    b.loadRom(new Uint8Array([0xfe, 0xff, 0xff, 0xea]));
+    b.deserialize(a.serialize());
+    a.apu.readSamples(new Float32Array(4096));
+    b.apu.readSamples(new Float32Array(4096));
+    a.runFrame();
+    b.runFrame();
+    const outA = new Float32Array(2048);
+    const outB = new Float32Array(2048);
+    expect(b.apu.readSamples(outB)).toBe(a.apu.readSamples(outA));
+    expect(b.serialize().apu).toEqual(a.serialize().apu);
   });
 });

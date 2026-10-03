@@ -25,6 +25,11 @@
  *
  * The bus hands writes over at their own width (writeRegister8/16/32), so each byte keeps
  * its own side effects.
+ *
+ * The APU runs on the machine's clock. It catches up to it whenever something depends on it — a
+ * register access, a FIFO sample popped at its timer's overflow, the host asking for samples, a
+ * snapshot — so every cycle the machine spends, a DMA's included, reaches the sound hardware once
+ * (mGBA audio.c GBAAudioSample, which samples up to a timestamp).
  */
 import type { DmaController } from '../dma.js';
 import type { ApuSnapshot } from '../savestate.js';
@@ -43,6 +48,11 @@ const DEFAULT_SAMPLE_RATE = 32768;
 
 /** Right shift of the PSG mix for SOUNDCNT_H bits 0-1: 25%, 50%, 100%, and 3 (prohibited) as 100% */
 const PSG_RATIO_SHIFT = [4, 3, 2, 2] as const;
+
+/** The machine's clock as the APU reads it (the Scheduler). */
+export interface ApuClock {
+  readonly currentCycle: number;
+}
 
 // ─── APU Class ───────────────────────────────────────────────────────
 
@@ -89,8 +99,27 @@ export class Apu {
   #timers: TimerController | null = null;
   #dma: DmaController | null = null;
 
-  constructor(sampleRate: number = DEFAULT_SAMPLE_RATE) {
+  readonly #clock: ApuClock;
+  /** The machine cycle the channels, the frame sequencer and the sample timer have reached. */
+  #syncedCycle: number;
+
+  constructor(clock: ApuClock, sampleRate: number = DEFAULT_SAMPLE_RATE) {
+    this.#clock = clock;
+    this.#syncedCycle = clock.currentCycle;
     this.#cyclesPerSample = Math.floor(CPU_FREQ / sampleRate);
+  }
+
+  /** Bring the APU up to the machine's clock. */
+  #sync(): void {
+    this.#syncTo(this.#clock.currentCycle);
+  }
+
+  /** Bring the APU up to the machine cycle `cycle`, if it has not reached it yet. */
+  #syncTo(cycle: number): void {
+    if (cycle > this.#syncedCycle) {
+      this.#advance(cycle - this.#syncedCycle);
+      this.#syncedCycle = cycle;
+    }
   }
 
   // ─── Timer Integration ─────────────────────────────────────────────
@@ -111,8 +140,9 @@ export class Apu {
       return;
     }
 
-    // Timer 0 callback
-    this.#timers.setOverflowCallback(0, () => {
+    // A FIFO plays its next sample at its timer's overflow, so the APU runs up to that cycle first.
+    this.#timers.setOverflowCallback(0, (at) => {
+      this.#syncTo(at);
       if (this.#dsA.timerSelect === 0) {
         this.#dsA.popSample();
         if (this.#dsA.needsRefill()) {
@@ -127,8 +157,8 @@ export class Apu {
       }
     });
 
-    // Timer 1 callback
-    this.#timers.setOverflowCallback(1, () => {
+    this.#timers.setOverflowCallback(1, (at) => {
+      this.#syncTo(at);
       if (this.#dsA.timerSelect === 1) {
         this.#dsA.popSample();
         if (this.#dsA.needsRefill()) {
@@ -152,6 +182,7 @@ export class Apu {
    * GBAIOWrite masks). Reads have no side effects.
    */
   readRegister16(offset: number): number {
+    this.#sync();
     switch (offset) {
       case 0x60:
         return this.#ch1.readSweep();
@@ -197,6 +228,7 @@ export class Apu {
    * byte restarts a channel (mGBA src/gba/io.c GBAIOWrite8, NanoBoyAdvance bus/io.cc).
    */
   writeRegister8(offset: number, value: number): void {
+    this.#sync();
     value &= 0xff;
     // GBATEK SOUNDCNT_X: while bit 7 is cleared, "all PSG registers at 4000060h..4000081h are
     // reset to zero" and hold there, while "registers 4000082h and 4000088h are kept
@@ -296,6 +328,7 @@ export class Apu {
 
   /** Write a halfword at an even `offset` (0x60-0xA6): a FIFO takes it whole, a register byte by byte */
   writeRegister16(offset: number, value: number): void {
+    this.#sync();
     if (offset >= 0xa0 && offset <= 0xa7) {
       this.#fifo(offset).writeFifo(offset, value & 0xffff, 2);
       return;
@@ -412,8 +445,8 @@ export class Apu {
 
   // ─── Sample Generation ─────────────────────────────────────────────
 
-  /** Advance APU state by the given number of CPU cycles */
-  tick(cycles: number): void {
+  /** Advance the channels, the frame sequencer and the sample timer by `cycles` CPU cycles. */
+  #advance(cycles: number): void {
     // Advance in slices that end on sample boundaries, so each sample sees the channels as
     // they are at its own cycle, however long the caller's batch is.
     while (cycles > 0) {
@@ -557,6 +590,7 @@ export class Apu {
    * The output array should have room for `output.length / 2` stereo pairs.
    */
   readSamples(output: Float32Array): number {
+    this.#sync();
     const requestedFrames = Math.floor(output.length / 2);
     const available = Math.min(requestedFrames, this.#ringSamples);
 
@@ -577,8 +611,12 @@ export class Apu {
 
   // ─── Serialization ─────────────────────────────────────────────────
 
-  /** Serialize to a plain snapshot (ring buffer is NOT saved — it's ephemeral audio). */
+  /**
+   * Serialize to a plain snapshot, the APU as it stands at the machine's clock (ring buffer is NOT
+   * saved — it's ephemeral audio).
+   */
   serialize(): ApuSnapshot {
+    this.#sync();
     return {
       ch1: this.#ch1.serialize(),
       ch2: this.#ch2.serialize(),
@@ -600,8 +638,9 @@ export class Apu {
     };
   }
 
-  /** Restore from a snapshot. Re-installs timer callbacks. */
+  /** Restore from a snapshot taken at the machine's clock, which the clock has been restored to. */
   deserialize(snap: ApuSnapshot): void {
+    this.#syncedCycle = this.#clock.currentCycle;
     this.#ch1.deserialize(snap.ch1);
     this.#ch2.deserialize(snap.ch2);
     this.#ch3.deserialize(snap.ch3);
@@ -633,6 +672,7 @@ export class Apu {
   // ─── Reset ─────────────────────────────────────────────────────────
 
   reset(): void {
+    this.#syncedCycle = this.#clock.currentCycle;
     this.#ch1.reset();
     this.#ch2.reset();
     this.#ch3.reset();
