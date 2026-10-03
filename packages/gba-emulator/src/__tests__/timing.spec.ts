@@ -50,9 +50,9 @@ describe('wait states', () => {
   it('WAITCNT sets the game pak’s, memory control sets EWRAM’s, and 32-bit accesses to 16-bit buses count twice', () => {
     const bus = new Gba().bus;
     // GBATEK "Waitstate Control": WAITCNT=0 gives WS0 4/2, WS1 4/4, WS2 4/8 waits and SRAM 4.
-    expect([bus.accessCycles(ROM, 2, false), bus.accessCycles(ROM, 2, true)]).toEqual([5, 3]);
-    expect([bus.accessCycles(0x0a000000, 2, true), bus.accessCycles(0x0c000000, 2, true)]).toEqual([5, 9]);
-    expect([bus.accessCycles(ROM, 4, false), bus.accessCycles(ROM, 4, true)]).toEqual([8, 6]);
+    expect([bus.accessCycles(ROM, 2, false), bus.accessCycles(ROM + 2, 2, true)]).toEqual([5, 3]);
+    expect([bus.accessCycles(0x0a000002, 2, true), bus.accessCycles(0x0c000002, 2, true)]).toEqual([5, 9]);
+    expect([bus.accessCycles(ROM, 4, false), bus.accessCycles(ROM + 4, 4, true)]).toEqual([8, 6]);
     expect(bus.accessCycles(0x0e000000, 1, false)).toBe(5);
     // GBATEK "Memory Control": the BIOS's 0x0D gives EWRAM 2 waits, 3/3/6 cycles for 8/16/32 bits.
     expect([
@@ -67,12 +67,30 @@ describe('wait states', () => {
     ]).toEqual([1, 2, 1]);
 
     bus.write16(WAITCNT, 0x4317); // SRAM 8, WS0 3/1, WS1 4/4, WS2 8/8 (GBATEK: what cartridges use)
-    expect([bus.accessCycles(ROM, 2, false), bus.accessCycles(ROM, 2, true), bus.accessCycles(ROM, 4, false)]).toEqual([
-      4, 2, 6,
-    ]);
+    expect([
+      bus.accessCycles(ROM, 2, false),
+      bus.accessCycles(ROM + 2, 2, true),
+      bus.accessCycles(ROM, 4, false),
+    ]).toEqual([4, 2, 6]);
     expect(bus.accessCycles(0x0e000000, 1, false)).toBe(9);
     bus.write8(0x04000803, 0x0e); // memory control: EWRAM 1 wait
     expect([bus.accessCycles(EWRAM, 2, false), bus.accessCycles(EWRAM, 4, false)]).toEqual([2, 4]);
+  });
+
+  it('an access at the start of a 128 KB block of the game pak is nonsequential', () => {
+    // GBATEK "GBA System Control": "LDMIA [801fff8h],r0-r7" has non-sequential timing at 8020000h.
+    const bus = new Gba().bus;
+    expect([bus.accessCycles(ROM + 0x1fffe, 2, true), bus.accessCycles(ROM + 0x20000, 2, true)]).toEqual([3, 5]);
+    expect([bus.accessCycles(0x0a040000, 4, true), bus.accessCycles(0x0c000000, 1, true)]).toEqual([10, 5]);
+    expect(bus.accessCycles(IWRAM + 0x20000, 4, true)).toBe(1);
+  });
+
+  it('a block transfer that runs from OAM into the game pak pays an N access there', () => {
+    // mgba-suite Timing "ldmia r2!, {r3-r7}" from 0x07FFFFF0, run from IWRAM: 14 cycles on hardware,
+    // 1S fetch, four OAM words, N32 at 0x08000000 and the I cycle.
+    const gba = machine([0xe8b200f8 /* ldmia r2!, {r3-r7} */], IWRAM);
+    gba.armCpu.registers[2] = 0x07fffff0;
+    expect(gba.armCpu.step()).toBe(1 + 4 + 8 + 1);
   });
 
   // mgba-suite Timing, measured on hardware: for each WAITCNT setting (no prefetch, prefetch, WS0

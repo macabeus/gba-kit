@@ -141,6 +141,7 @@ const ROM_S_WAITS = [
 
 /** Where the game pak's ROM mirrors begin, and SRAM, which is beyond them. */
 const CARTRIDGE_BASE = 0x08000000;
+const ROM_REGION = 0x08;
 const SRAM_REGION = 0x0e;
 
 /** WAITCNT bit 14: the game pak prefetch buffer. */
@@ -1102,8 +1103,17 @@ export class GbaSystemBus implements MemoryBus {
 
   // ─── Access Timing ────────────────────────────────────────────────
 
+  /**
+   * The game pak counts S accesses within one 128 KB block of its address space: an access at the
+   * start of a block is an N access whatever came before it, a step from OAM into the cartridge
+   * included (GBATEK "GBA System Control": "The GBA forcefully uses non-sequential timing at the
+   * beginning of each 128K-block of gamepak ROM"; NanoBoyAdvance bus.cc, `(address & 0x1FFFF) == 0`).
+   */
   accessCycles(address: number, width: 1 | 2 | 4, sequential: boolean): number {
     const region = address >>> 24;
+    if (sequential && region >= ROM_REGION && region < SRAM_REGION && (address & (0x20000 - width)) === 0) {
+      sequential = false;
+    }
     if (width === 4) {
       return sequential ? this.#cyclesS32[region]! : this.#cyclesN32[region]!;
     }
