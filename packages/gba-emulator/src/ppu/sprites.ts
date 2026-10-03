@@ -120,8 +120,9 @@ export function renderSpriteScanline(
     if (x >= 256) {
       x -= 512;
     }
-    // Entirely off-screen to the right, or (normal OBJs) to the left: not fetched, no cycles.
-    if (x >= SCREEN_WIDTH || (!affine && x + width < 0)) {
+    // A box with no pixel on screen is not fetched and takes no cycles past its OAM walk (NBA
+    // sprite.cc DrawSpriteFetchOAM, `remaining_pixels <= 0`).
+    if (x >= SCREEN_WIDTH || x + boundW <= 0) {
       continue;
     }
     // GBATEK: normal OBJs take width cycles, affine ones 10 + 2 * width (here 2 of each go to the OAM walk).

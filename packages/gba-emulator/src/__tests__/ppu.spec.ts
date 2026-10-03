@@ -192,6 +192,29 @@ describe('PPU: OBJ layer', () => {
     expect(t.px(200, 0)).toBe(rgb(0, 0, 0));
   });
 
+  it('a sprite with no pixel on screen takes only its OAM walk: affine ones parked left of it give no cycles back', () => {
+    // NBA sprite.cc DrawSpriteFetchOAM drops an OBJ whose box ends left of x = 0 after its attribute
+    // fetch; mGBA GBAVideoRendererCleanOAM drops it before its cost too.
+    const t = setup();
+    for (let i = 0; i < 0x400; i += 4) {
+      t.vram32(0x10000 + i, 0x11111111);
+    }
+    objColor(t, 1, RED);
+    // OAM 0-9: 8x8 affine sprites at x = -100. OAM 10-31: 64x32 sprites at x = 8 * (i - 10).
+    for (let i = 0; i < 10; i++) {
+      t.oam(i, 1 << 8, 512 - 100, 0);
+    }
+    for (let i = 10; i < 32; i++) {
+      t.oam(i, 1 << 14, (3 << 14) | ((i - 10) * 8), 1 << 12);
+    }
+    t.io(0x00, DISPCNT_OBJ);
+    t.frame();
+    t.frame();
+    // The parked sprites cost their 2 OAM cycles each, so the same 19 wide ones fit as without them.
+    expect(t.px(200, 0)).toBe(rgb(31, 0, 0));
+    expect(t.px(210, 0)).toBe(rgb(0, 0, 0));
+  });
+
   it('builds a line of sprites a line ahead: OAM written during line N shows from line N + 2', () => {
     const t = setup();
     for (let i = 0; i < 0x800; i += 4) {
