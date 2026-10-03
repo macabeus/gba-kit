@@ -26,6 +26,7 @@ export interface GbaSnapshot {
   input: InputSnapshot;
   bus: SystemBusSnapshot;
   ppu: PpuSnapshot;
+  /** A snapshot without it restores the APU as at power-on. */
   apu?: ApuSnapshot;
 }
 

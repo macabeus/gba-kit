@@ -482,8 +482,11 @@ export class Gba {
     this.dma.deserialize(snap.dma);
     this.bus.deserialize(snap.bus);
     this.ppu.deserialize(snap.ppu);
+    // A snapshot without APU state restores the APU as at power-on, following the restored clock.
     if (snap.apu) {
       this.apu.deserialize(snap.apu);
+    } else {
+      this.apu.reset();
     }
 
     // Restore CPU state

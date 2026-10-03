@@ -384,4 +384,24 @@ describe('the APU runs on the machine clock', () => {
     expect(b.apu.readSamples(outB)).toBe(a.apu.readSamples(outA));
     expect(b.serialize().apu).toEqual(a.serialize().apu);
   });
+
+  it('a snapshot without APU state restores the APU at power-on, following the restored clock', () => {
+    const gba = busyWithHBlankDma();
+    gba.runFrame();
+    const snap = gba.serialize();
+    delete snap.apu;
+    for (let frame = 0; frame < 10; frame++) {
+      gba.runFrame();
+    }
+    gba.deserialize(snap);
+    expect(gba.serialize().apu).toEqual(new Gba().serialize().apu);
+    const restoredAt = gba.scheduler.currentCycle;
+    const out = new Float32Array(2048);
+    let samples = 0;
+    for (let frame = 0; frame < 2; frame++) {
+      gba.runFrame();
+      samples += gba.apu.readSamples(out);
+    }
+    expect(samples).toBe(Math.floor((gba.scheduler.currentCycle - restoredAt) / 512));
+  });
 });
