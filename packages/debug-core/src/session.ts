@@ -12,7 +12,7 @@
  * inspected, resumed, or replayed exactly.
  */
 import { FRAME_METHODS, type FrameMethod, type VarNode } from '@gba-kit/debug-info';
-import type { HardwareEvent, WatchpointRead, WatchpointWrite } from '@gba-kit/gba-emulator';
+import { FRAME_RATE, type HardwareEvent, type WatchpointRead, type WatchpointWrite } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
 import {
@@ -149,7 +149,7 @@ export interface HistoryInfo {
   recordingStart: number | null;
 }
 
-const FRAME_MS = 1000 / 59.7275;
+const FRAME_MS = 1000 / FRAME_RATE;
 /** how often a running session emits a frame, unless the options say otherwise */
 export const DEFAULT_FRAME_EVENT_INTERVAL_MS = 33;
 /** `#hiddenInline` sentinel: hide the inlined layers that begin at the stop address */

@@ -5,16 +5,16 @@
  * GBA.pressButton/releaseButton/runFrame path that ScriptingEngine uses.
  *
  * Two replay modes:
- * - Visual: frame-by-frame via requestAnimationFrame for smooth playback,
+ * - Visual: at the GBA's frame rate, paced by a FrameClock over requestAnimationFrame,
  *   reporting the active segment index for script-line highlighting.
  * - Instant: synchronous via ScriptingEngine.pressSequence() for fast replay.
  *
  * Extension points:
- * - Variable frame-rate: adjust rAF timing for slow-motion or fast-forward
+ * - Variable frame-rate: scale the time the FrameClock sees for slow-motion or fast-forward
  * - Debugger: pause replay at specific segments or on conditions
  * - Per-frame assertions: verify state at each frame during replay
  */
-import type { EmulatorBridge } from '@gba-kit/gba-browser';
+import { type EmulatorBridge, FrameClock } from '@gba-kit/gba-browser';
 import { ScriptingEngine, type ScriptingHost } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
@@ -43,7 +43,7 @@ export interface ReplayDebugState {
 }
 
 /**
- * Replay recorded segments visually, one frame per animation frame.
+ * Replay recorded segments visually, at the GBA's frame rate.
  *
  * Iterates segment-by-segment, reporting the active segment index via
  * `onSegmentChange` so the UI can highlight the corresponding script line.
@@ -91,11 +91,8 @@ export function replayVisual(
     activeButtons = newButtons;
   }
 
-  function step() {
-    if (cancelled) {
-      return;
-    }
-
+  /** Run one GBA frame of the replay; returns false once every segment has run. */
+  function advance(): boolean {
     if (segmentIndex >= segments.length) {
       // Done — release all buttons
       for (const bit of activeButtons) {
@@ -104,7 +101,7 @@ export function replayVisual(
       activeButtons = new Set();
       onSegmentChange({ segmentIndex: segments.length - 1, running: false });
       onComplete();
-      return;
+      return false;
     }
 
     const seg = segments[segmentIndex]!;
@@ -123,7 +120,21 @@ export function replayVisual(
       segmentIndex++;
       frameInSegment = 0;
     }
+    return true;
+  }
 
+  const clock = new FrameClock();
+
+  function step(now: number) {
+    if (cancelled) {
+      return;
+    }
+    const frames = clock.framesDue(now);
+    for (let i = 0; i < frames; i++) {
+      if (!advance()) {
+        return;
+      }
+    }
     requestAnimationFrame(step);
   }
 

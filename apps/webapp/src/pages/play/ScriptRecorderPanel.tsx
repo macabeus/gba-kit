@@ -1,5 +1,6 @@
 import type { EmulatorBridge } from '@gba-kit/gba-browser';
 import { computeRomHash } from '@gba-kit/gba-browser';
+import { FRAME_RATE } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -29,7 +30,7 @@ interface ScriptRecorderPanelProps {
 }
 
 function formatTime(frames: number): string {
-  const seconds = frames / 59.7275;
+  const seconds = frames / FRAME_RATE;
   if (seconds < 60) {
     return `${seconds.toFixed(1)}s`;
   }
