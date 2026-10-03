@@ -29,6 +29,7 @@ import type { DmaController } from './dma.js';
 import { ERASED_BYTE, FLASH_BANK_BYTES, GbaFlash } from './flash.js';
 import type { InputController } from './input.js';
 import type { InterruptController } from './interrupts.js';
+import { GamePakPrefetch } from './prefetch.js';
 import type { EepromSnapshot, SystemBusSnapshot } from './savestate.js';
 import { type SerialPort, isSerialRegister } from './serial.js';
 import type { TimerController } from './timers.js';
@@ -146,9 +147,6 @@ const SRAM_REGION = 0x0e;
 
 /** WAITCNT bit 14: the game pak prefetch buffer. */
 const WAITCNT_PREFETCH = 1 << 14;
-
-/** The prefetch buffer holds 8 halfwords (GBATEK "GBA GamePak Prefetch"). */
-const PREFETCH_HALFWORDS = 8;
 
 /** The halfwords the APU decodes: SOUND1CNT_L-SOUNDBIAS (0x8C and 0x8E are unused) and wave RAM. */
 function isApuRegister(offset: number): boolean {
@@ -297,11 +295,8 @@ export class GbaSystemBus implements MemoryBus {
   readonly #cyclesN32 = new Uint8Array(256);
   readonly #cyclesS32 = new Uint8Array(256);
 
-  /**
-   * The game pak prefetch buffer: the address of the last opcode halfword it has fetched ahead of
-   * the CPU, or 0 when a branch emptied it (mGBA `lastPrefetchedPc`).
-   */
-  #prefetchEnd = 0;
+  /** The game pak prefetch unit, which reads opcodes ahead of the CPU while WAITCNT bit 14 is set. */
+  readonly #prefetch = new GamePakPrefetch();
 
   // Subsystem references (set during GBA construction)
   #interrupts!: InterruptController;
@@ -1120,54 +1115,44 @@ export class GbaSystemBus implements MemoryBus {
     return sequential ? this.#cyclesS16[region]! : this.#cyclesN16[region]!;
   }
 
-  /** An opcode fetch costs what a data access does; a nonsequential one (a branch) empties the prefetch buffer. */
+  /**
+   * An opcode fetch costs what a data access does, and outside the cartridge's ROM it uses the bus
+   * the same way. From the ROM, the prefetch unit may have read it already and serves it from its
+   * buffer.
+   */
   fetchCycles(address: number, width: 2 | 4, sequential: boolean): number {
-    if (!sequential) {
-      this.#prefetchEnd = 0;
+    const region = address >>> 24;
+    if (region < ROM_REGION || region >= SRAM_REGION) {
+      return this.dataCycles(address, width, sequential);
     }
-    return this.accessCycles(address, width, sequential);
+    const price = this.accessCycles(address, width, sequential);
+    const duty = width === 4 ? this.#cyclesS32[region]! : this.#cyclesS16[region]!;
+    return this.#prefetch.fetch(address, width, price, duty, this.#cpuInGamePak());
   }
 
   /**
-   * The game pak prefetch buffer (GBATEK "GBA GamePak Prefetch"): while code runs from ROM with
-   * WAITCNT bit 14 set, the cartridge fetches the next opcodes, up to 8 halfwords, during any cycle
-   * the CPU leaves the cartridge bus alone. Those opcodes then come out of the buffer without wait
-   * states. This prices that the way mGBA's GBAMemoryStall does: the cycles of the stall go to
-   * sequential halfword fetches past `fetchAddress`, the stall lasts at least as long as they do,
-   * the fetch after it becomes sequential, and the fetches the buffer completed are refunded now,
-   * since the CPU pays for each one as it executes it.
+   * A data access by the CPU or DMA. One to the cartridge or its save chip stops the prefetch
+   * unit; one anywhere else leaves the cartridge bus to it.
    */
-  stallCycles(cycles: number, fetchAddress: number, dataAddress?: number): number {
-    const codeRegion = fetchAddress >>> 24;
-    if (
-      (this.#waitcnt & WAITCNT_PREFETCH) === 0 ||
-      fetchAddress < CARTRIDGE_BASE ||
-      codeRegion >= SRAM_REGION ||
-      (dataAddress !== undefined && dataAddress >>> 0 >= CARTRIDGE_BASE)
-    ) {
-      return cycles;
+  dataCycles(address: number, width: 1 | 2 | 4, sequential: boolean): number {
+    const region = address >>> 24;
+    const price = this.accessCycles(address, width, sequential);
+    if (region >= ROM_REGION && region <= SRAM_REGION + 1) {
+      return this.#prefetch.stop(this.#cpuInGamePak()) + price;
     }
-    const seqWaits = this.#cyclesS16[codeRegion]! - 1;
-    const nonseqWaits = this.#cyclesN16[codeRegion]! - 1;
+    this.#prefetch.step(price);
+    return price;
+  }
 
-    // Halfwords already buffered ahead of the fetch take room in the buffer.
-    let buffered = 0;
-    let room = PREFETCH_HALFWORDS;
-    const ahead = (this.#prefetchEnd - fetchAddress) >>> 0;
-    if (ahead < PREFETCH_HALFWORDS * 2) {
-      buffered = ahead >>> 1;
-      room -= buffered;
-    }
+  /** Cycles in which nothing uses the bus: the prefetch unit has the cartridge to itself. */
+  idle(cycles: number): void {
+    this.#prefetch.step(cycles);
+  }
 
-    let stall = seqWaits + 1;
-    let loads = 1;
-    while (stall < cycles && loads < room) {
-      stall += seqWaits;
-      loads++;
-    }
-    this.#prefetchEnd = (fetchAddress + 2 * (loads + buffered - 1)) >>> 0;
-
-    return Math.max(cycles, stall) - (nonseqWaits - seqWaits) - stall;
+  /** Whether the CPU runs code from the cartridge's ROM. */
+  #cpuInGamePak(): boolean {
+    const pc = this.#cpu.registers[15]!;
+    return pc >= CARTRIDGE_BASE && pc >>> 24 < SRAM_REGION;
   }
 
   /**
@@ -1209,6 +1194,8 @@ export class GbaSystemBus implements MemoryBus {
       n16[region] = s16[region] = sram;
       n32[region] = s32[region] = 2 * sram;
     }
+
+    this.#prefetch.enabled = (waitcnt & WAITCNT_PREFETCH) !== 0;
   }
 
   // ─── Open Bus ─────────────────────────────────────────────────────
@@ -1670,7 +1657,7 @@ export class GbaSystemBus implements MemoryBus {
       postflg: this.#postflg,
       lastBiosRead: this.#biosLatch,
       memoryControl: this.#memoryControl,
-      prefetchEnd: this.#prefetchEnd,
+      prefetch: this.#prefetch.serialize(),
       eeprom: this.#eeprom.serialize(),
       flash: this.#flash.serialize(),
     };
@@ -1693,7 +1680,7 @@ export class GbaSystemBus implements MemoryBus {
     this.#postflg = snap.postflg;
     this.#biosLatch = snap.lastBiosRead >>> 0;
     this.#memoryControl = snap.memoryControl ?? MEMORY_CONTROL_RESET;
-    this.#prefetchEnd = snap.prefetchEnd ?? 0;
+    this.#prefetch.deserialize(snap.prefetch);
     this.#updateWaitStates();
     this.#eeprom.deserialize(snap.eeprom);
   }
@@ -1713,7 +1700,7 @@ export class GbaSystemBus implements MemoryBus {
     this.#postflg = 0;
     this.#biosLatch = BIOS_LATCH_AFTER_BOOT;
     this.#memoryControl = MEMORY_CONTROL_RESET;
-    this.#prefetchEnd = 0;
+    this.#prefetch.reset();
     this.#updateWaitStates();
   }
 }

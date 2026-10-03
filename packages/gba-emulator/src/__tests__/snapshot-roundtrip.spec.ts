@@ -343,7 +343,7 @@ describe('snapshot round trip', () => {
     gba.interrupts.requestInterrupt(1); // IME is off: the request only travels to the CPU
     const snap = gba.serialize();
     expect(snap.scheduler.events[EventId.Irq]!.active).toBe(true);
-    expect(snap.bus.prefetchEnd).toBeGreaterThan(0x08000000);
+    expect(snap.bus.prefetch).toMatchObject({ active: true, width: 4 });
 
     const fresh = start();
     fresh.deserialize(snap);
@@ -354,7 +354,7 @@ describe('snapshot round trip', () => {
 
     // A snapshot from before these existed: no prefetch buffer state, no slot for the IRQ event.
     const legacy = { ...snap, bus: { ...snap.bus }, scheduler: { ...snap.scheduler } };
-    delete legacy.bus.prefetchEnd;
+    delete legacy.bus.prefetch;
     legacy.scheduler.events = snap.scheduler.events.slice(0, EventId.Irq);
     const old = start();
     old.deserialize(legacy);

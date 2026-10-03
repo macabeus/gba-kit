@@ -92,40 +92,167 @@ describe('wait states', () => {
     gba.armCpu.registers[2] = 0x07fffff0;
     expect(gba.armCpu.step()).toBe(1 + 4 + 8 + 1);
   });
+});
 
-  // mgba-suite Timing, measured on hardware: for each WAITCNT setting (no prefetch, prefetch, WS0
-  // first access 3, both, WS0 second access 1, ...), then EWRAM and IWRAM.
+/**
+ * The cycles `code` takes, measured the way mgba-suite's Timing tests measure them on hardware:
+ * TM0 counts at F/1 from a store before the code to a load after it, less the count with no code
+ * between (src/timing.c, src/tests/macros.s START and END). `code` holds ARM words, or Thumb
+ * halfwords when `thumb` is set; `regs` are what the test's setup leaves in registers.
+ */
+function measure(code: number[], at: number, waitcnt: number, thumb: boolean, regs: Record<number, number>): number {
+  const count = (body: number[]): number => {
+    let words: number[];
+    let end: number;
+    if (thumb) {
+      // ldr r0, =TM0CNT_LO ; ldr r1, =0x800000 ; str r1, [r0] ; body ; ldrh r2, [r0] ; b .
+      const halves = [0, 0, 0x6001, ...body, 0x8802, 0xe7fe];
+      if (halves.length % 2) {
+        halves.push(0x46c0);
+      }
+      const literal = halves.length * 2;
+      halves[0] = 0x4800 | ((literal - 4) >> 2);
+      halves[1] = 0x4900 | ((literal + 4 - 4) >> 2);
+      end = at + (3 + body.length + 1) * 2;
+      words = [];
+      for (let i = 0; i < halves.length; i += 2) {
+        words.push((halves[i]! | (halves[i + 1]! << 16)) >>> 0);
+      }
+      words.push(0x04000100, 0x00800000);
+    } else {
+      // ldr r0, =TM0CNT_LO ; mov r1, #0x800000 ; str r1, [r0] ; body ; ldrh r2, [r0] ; b .
+      words = [0, 0xe3a01502, 0xe5801000, ...body, 0xe1d020b0, 0xeafffffe, 0x04000100];
+      words[0] = 0xe59f0000 | ((words.length - 1) * 4 - 8);
+      end = at + (words.length - 2) * 4;
+    }
+    const gba = machine(words, at, thumb);
+    gba.bus.write16(WAITCNT, waitcnt);
+    for (const [index, value] of Object.entries(regs)) {
+      gba.armCpu.registers[Number(index)] = value;
+    }
+    runTo(gba, end);
+    return gba.armCpu.registers[2]!;
+  };
+  return count(code) - count([]);
+}
+
+describe('instruction costs measured like mgba-suite Timing', () => {
+  // For each WAITCNT setting (no prefetch, prefetch, WS0 first access 3, both, WS0 second access 1,
+  // ...), then EWRAM and IWRAM; the numbers are the hardware's (mgba-suite src/timing.c).
   const SETTINGS = [0x0000, 0x4000, 0x0004, 0x4004, 0x0010, 0x4010, 0x0014, 0x4014];
-  const cases: Array<[string, number, boolean, number[], number, number]> = [
-    ['ARM nop', 0xe1a00000 /* mov r0, r0 */, false, [6, 6, 6, 6, 4, 4, 4, 4], 6, 1],
-    ['ARM ldrh r2, [sp]', 0xe1dd20b0, false, [10, 6, 9, 6, 9, 4, 8, 4], 8, 3],
-    ['Thumb nop', 0x46c046c0 /* mov r8, r8 */, true, [3, 3, 3, 3, 2, 2, 2, 2], 3, 1],
+  const cases: Array<[string, number[], boolean, number[], number, number, Record<number, number>?]> = [
+    ['ARM nop', [0xe1a00000], false, [6, 6, 6, 6, 4, 4, 4, 4], 6, 1],
+    ['ARM ldrh r2, [sp]', [0xe1dd20b0], false, [10, 6, 9, 6, 9, 4, 8, 4], 8, 3],
+    ['ARM ldr r2, [r3] from 0x08000000', [0xe5932000], false, [17, 17, 15, 15, 15, 15, 13, 13], 15, 10, { 3: ROM }],
+    ['ARM ldr r2, [sp] x2', [0xe59d2000, 0xe59d2000], false, [20, 12, 18, 12, 18, 8, 16, 8], 16, 6],
+    ['ARM ldmia sp, {r2-r7}', [0xe89d00fc], false, [15, 8, 14, 8, 14, 8, 13, 8], 13, 8],
+    [
+      'ARM ldmia r2!, {r3-r7} from 0x07FFFFFC',
+      [0xe8b200f8],
+      false,
+      [36, 36, 34, 34, 28, 29, 26, 27],
+      34,
+      29,
+      { 2: 0x07fffffc },
+    ],
+    ['Thumb nop', [0x46c0], true, [3, 3, 3, 3, 2, 2, 2, 2], 3, 1],
+    [
+      'Thumb nop / ldr r2, [sp] (the suite’s ldrh r2, [sp] in Thumb)',
+      [0x46c0, 0x9a00],
+      true,
+      [10, 6, 9, 6, 9, 5, 8, 5],
+      8,
+      4,
+    ],
+    ['Thumb ldr r2, [r3] from 0x08000000', [0x681a], true, [14, 14, 12, 12, 13, 13, 11, 11], 12, 10, { 3: ROM }],
+    [
+      'Thumb ldmia r2!, {r3-r7} from 0x07FFFFF0',
+      [0xcaf8],
+      true,
+      [18, 18, 16, 16, 17, 17, 15, 15],
+      16,
+      14,
+      { 2: 0x07fffff0 },
+    ],
+    ['Thumb muls r3, r2 by 0xFF', [0x4353], true, [6, 3, 5, 3, 6, 2, 5, 2], 4, 2, { 3: 0x78, 2: 0xff }],
   ];
-  for (const [name, word, thumb, rom, ewram, iwram] of cases) {
-    it(`${name} costs what the hardware takes from ROM under each WAITCNT, from EWRAM and from IWRAM`, () => {
-      const cost = (at: number, waitcnt: number): number => {
-        const gba = machine([word, word], at, thumb);
-        gba.bus.write16(WAITCNT, waitcnt);
-        return gba.armCpu.step();
-      };
-      expect(SETTINGS.map((w) => cost(ROM, w))).toEqual(rom);
-      expect(cost(EWRAM, 0)).toBe(ewram);
-      expect(cost(IWRAM, 0)).toBe(iwram);
+  for (const [name, code, thumb, rom, ewram, iwram, regs = {}] of cases) {
+    it(`${name} takes what the hardware takes from ROM under each WAITCNT, from EWRAM and from IWRAM`, () => {
+      expect(SETTINGS.map((w) => measure(code, ROM, w, thumb, regs))).toEqual(rom);
+      expect(measure(code, EWRAM, 0, thumb, regs)).toBe(ewram);
+      expect(measure(code, IWRAM, 0, thumb, regs)).toBe(iwram);
     });
   }
+});
 
-  it('the prefetch buffer refills after a branch empties it', () => {
-    const bus = new Gba().bus;
-    bus.write16(WAITCNT, 0x4000);
-    // A long stall fills all 8 halfwords; right after it, the buffer has room for one more.
-    const stall = (): number => bus.stallCycles(20, ROM + 8, IWRAM);
-    const first = stall();
-    expect(stall()).toBeGreaterThan(first);
-    bus.fetchCycles(ROM + 0x100, 4, false); // a branch
-    expect(stall()).toBe(first);
-    // Code outside the game pak, or data inside it, leaves the buffer out of it.
-    expect(bus.stallCycles(4, IWRAM + 8, IWRAM)).toBe(4);
-    expect(bus.stallCycles(4, ROM + 8, ROM + 0x200)).toBe(4);
+describe('the game pak prefetch unit', () => {
+  // WAITCNT 0x4000: prefetch on, WS0 N 5 and S 3 cycles per halfword.
+  function prefetching(): Gba {
+    const gba = machine([0xeafffffe], ROM, true);
+    gba.bus.write16(WAITCNT, 0x4000);
+    return gba;
+  }
+
+  it('reads the opcodes after a fetch while the CPU leaves the cartridge alone, and serves them in 1 cycle', () => {
+    const bus = prefetching().bus;
+    expect(bus.fetchCycles(ROM, 2, false)).toBe(5);
+    bus.idle(6); // two S reads: ROM+2 and ROM+4
+    expect([bus.fetchCycles(ROM + 2, 2, true), bus.fetchCycles(ROM + 4, 2, true)]).toEqual([1, 1]);
+    // ROM+6 has been reading since ROM+4 arrived, 2 cycles ago: it arrives 1 cycle later.
+    expect(bus.fetchCycles(ROM + 6, 2, true)).toBe(1);
+  });
+
+  it('holds 8 halfwords, or 4 words in ARM state, and reads on once the CPU takes one', () => {
+    const bus = prefetching().bus;
+    bus.fetchCycles(ROM, 2, false);
+    bus.idle(100);
+    for (let i = 1; i <= 8; i++) {
+      expect(bus.fetchCycles(ROM + 2 * i, 2, true)).toBe(1);
+    }
+    // Taking the first made room, so ROM+18 came in 3 cycles later, while the CPU took the rest.
+    expect(bus.fetchCycles(ROM + 18, 2, true)).toBe(1);
+
+    // In ARM state: 4 words, then the fifth, read from the first hit on, has 6 - 4 cycles to go.
+    bus.fetchCycles(ROM + 0x100, 4, false);
+    bus.idle(100);
+    expect([1, 2, 3, 4, 5].map((i) => bus.fetchCycles(ROM + 0x100 + 4 * i, 4, true))).toEqual([1, 1, 1, 1, 2]);
+  });
+
+  it('a data access to the cartridge, or a fetch of another address, discards what it holds', () => {
+    const bus = prefetching().bus;
+    bus.fetchCycles(ROM, 2, false);
+    bus.idle(6);
+    expect(bus.dataCycles(ROM + 0x200, 2, false)).toBe(5);
+    expect(bus.fetchCycles(ROM + 2, 2, true)).toBe(3);
+    bus.idle(6);
+    expect(bus.fetchCycles(ROM + 0x40, 2, false)).toBe(5);
+    // A data access elsewhere lets it read on.
+    expect(bus.dataCycles(IWRAM, 4, false)).toBe(1);
+    bus.idle(2);
+    expect(bus.fetchCycles(ROM + 0x42, 2, true)).toBe(1);
+  });
+
+  it('a cartridge access as a halfword read ends waits one cycle more while the CPU runs from the cartridge', () => {
+    // NanoBoyAdvance Bus::StopPrefetch: the one-cycle penalty of a game pak access that collides
+    // with the last cycle of a prefetch.
+    const gba = prefetching();
+    gba.armCpu.registers[15] = ROM + 4;
+    const bus = gba.bus;
+    bus.fetchCycles(ROM, 2, false);
+    bus.idle(2);
+    expect(bus.dataCycles(ROM + 0x200, 2, false)).toBe(5 + 1);
+    gba.armCpu.registers[15] = IWRAM;
+    bus.fetchCycles(ROM, 2, false);
+    bus.idle(2);
+    expect(bus.dataCycles(ROM + 0x200, 2, false)).toBe(5);
+  });
+
+  it('with WAITCNT bit 14 clear it reads nothing ahead', () => {
+    const bus = prefetching().bus;
+    bus.write16(WAITCNT, 0);
+    bus.fetchCycles(ROM, 2, false);
+    bus.idle(100);
+    expect(bus.fetchCycles(ROM + 2, 2, true)).toBe(3);
   });
 });
 

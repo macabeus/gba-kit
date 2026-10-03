@@ -71,8 +71,10 @@ export interface DmaMemoryAccess {
   /** Mark/unmark subsequent writes as coming from a DMA channel (watchpoints). */
   setDmaSource?(channel: number, origin: WriteOrigin): void;
   clearDmaSource?(): void;
-  /** What one access costs, wait states included (the bus's `accessCycles`). */
-  accessCycles(address: number, width: 2 | 4, sequential: boolean): number;
+  /** One access made now, and the cycles it takes (the bus's `dataCycles`). */
+  dataCycles(address: number, width: 2 | 4, sequential: boolean): number;
+  /** Cycles in which the channel holds the bus without an access (the bus's `idle`). */
+  idle(cycles: number): void;
 }
 
 /** Cycles from a channel's trigger to its first access (mGBA GBADMAWriteCNT_HI: "DMAs take 3 cycles to start"). */
@@ -312,13 +314,15 @@ export class DmaController {
     memory.setDmaSource?.(index, ch.startOrigin);
     let cycles = 0;
     for (let i = 0; i < ch.wordCount; i++) {
-      cycles += memory.accessCycles(ch.srcAddr, step, i > 0) + memory.accessCycles(ch.dstAddr, step, i > 0);
+      cycles += memory.dataCycles(ch.srcAddr, step, i > 0) + memory.dataCycles(ch.dstAddr, step, i > 0);
       this.#moveUnit(ch, memory, step);
       ch.srcAddr = this.#nextSource(ch.srcAddr, ch.srcControl, step);
       ch.dstAddr = this.#nextAddress(ch.dstAddr, ch.dstControl, step);
     }
     memory.clearDmaSource?.();
-    this.#scheduler.advance(cycles + this.#endCycles(ch.srcAddr, ch.dstAddr));
+    const end = this.#endCycles(ch.srcAddr, ch.dstAddr);
+    memory.idle(end);
+    this.#scheduler.advance(cycles + end);
 
     this.#onTransferComplete(index);
   }
@@ -360,12 +364,14 @@ export class DmaController {
     memory.setDmaSource?.(index, ch.startOrigin);
     let cycles = 0;
     for (let i = 0; i < FIFO_UNITS; i++) {
-      cycles += memory.accessCycles(ch.srcAddr, 4, i > 0) + memory.accessCycles(ch.dstAddr, 4, i > 0);
+      cycles += memory.dataCycles(ch.srcAddr, 4, i > 0) + memory.dataCycles(ch.dstAddr, 4, i > 0);
       this.#moveUnit(ch, memory, 4);
       ch.srcAddr = this.#nextSource(ch.srcAddr, ch.srcControl, 4);
     }
     memory.clearDmaSource?.();
-    this.#scheduler.advance(cycles + this.#endCycles(ch.srcAddr, ch.dstAddr));
+    const end = this.#endCycles(ch.srcAddr, ch.dstAddr);
+    memory.idle(end);
+    this.#scheduler.advance(cycles + end);
 
     if (ch.irqEnable) {
       this.#interrupts.requestInterrupt(DMA_IRQ_FLAGS[index]!);

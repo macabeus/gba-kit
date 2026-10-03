@@ -1,7 +1,7 @@
 /**
- * What `step()` reports an instruction costs: its opcode fetch, its data accesses, its internal
- * cycles and a branch's refill, each access priced by the bus (GBATEK "ARM CPU Instruction Cycle
- * Times"; mGBA src/arm/isa-arm.c and isa-thumb.c).
+ * What `step()` reports an instruction costs: its data accesses, its internal cycles, a branch's
+ * refill and the opcode fetch that ends it, each priced by the bus (GBATEK "ARM CPU Instruction
+ * Cycle Times"; NanoBoyAdvance src/nba/src/arm/handlers).
  */
 import { describe, expect, it } from 'vitest';
 
@@ -46,6 +46,29 @@ class PricedMemory extends GbaMemory {
 
   override fetchCycles(address: number, width: 2 | 4, sequential: boolean): number {
     return this.accessCycles(address, width, sequential);
+  }
+
+  override dataCycles(address: number, width: 1 | 2 | 4, sequential: boolean): number {
+    return this.accessCycles(address, width, sequential);
+  }
+}
+
+/** A zero-wait bus that records the accesses and internal cycles the CPU reports, in order. */
+class RecordingMemory extends GbaMemory {
+  readonly calls: string[] = [];
+
+  override fetchCycles(address: number, _width: 2 | 4, sequential: boolean): number {
+    this.calls.push(`fetch ${sequential ? 'S' : 'N'} ${address.toString(16)}`);
+    return 1;
+  }
+
+  override dataCycles(address: number, _width: 1 | 2 | 4, sequential: boolean): number {
+    this.calls.push(`data ${sequential ? 'S' : 'N'} ${address.toString(16)}`);
+    return 1;
+  }
+
+  override idle(cycles: number): void {
+    this.calls.push(`idle ${cycles}`);
   }
 }
 
@@ -96,7 +119,7 @@ describe('ArmCpu cycle counts on a zero-wait bus', () => {
 describe('ArmCpu cycle counts on a bus with wait states', () => {
   const slowRom = { 0x08: { n: 5, s: 3 }, 0x02: { n: 3, s: 2 } };
 
-  it('every instruction pays its S fetch from the memory it runs in', () => {
+  it('every instruction pays an S fetch from the memory it runs in', () => {
     const cpu = cpuWith(new PricedMemory(slowRom), [0xe2800001 /* add r0, r0, #1 */], false);
     expect(cpu.step()).toBe(3);
   });
@@ -127,18 +150,43 @@ describe('ArmCpu cycle counts on a bus with wait states', () => {
     expect(cpu.step()).toBe(1 + 3 + 3 * 2 + 1);
   });
 
-  it('a bus that overlaps stalls with its own fetches discounts them', () => {
-    // The bus prices every stall at 0, the way a prefetch unit can hide a data access.
+  it('a load into the PC refills from the target, and the refill replaces the nonsequential fetch', () => {
+    // ldr pc, [r1] from ROM: N load, I cycle, N+S refill, S fetch: GBATEK LDR PC 2S+2N+1I.
     const mem = new PricedMemory(slowRom);
-    const calls: Array<[number, number, number | undefined]> = [];
-    mem.stallCycles = (cycles, fetchAddress, dataAddress) => {
-      calls.push([cycles, fetchAddress, dataAddress]);
-      return 0;
-    };
-    const cpu = cpuWith(mem, [0xe5910000 /* ldr r0, [r1] */], false);
+    mem.write32(IWRAM, ROM + 0x100);
+    const cpu = cpuWith(mem, [0xe591f000], false);
     cpu.registers[1] = IWRAM;
-    expect(cpu.step()).toBe(3 + 0 + (5 - 3));
-    expect(calls).toEqual([[2, ROM + 8, IWRAM]]);
+    expect(cpu.step()).toBe(1 + 1 + 5 + 3 + 3);
+    expect(cpu.registers[PC]).toBe(ROM + 0x100);
+  });
+
+  it('a shift by a register spends an I cycle, after which the fetch is nonsequential', () => {
+    // add r0, r0, r1, lsl r2 from ROM: like a multiply, an internal cycle then an N fetch.
+    const cpu = cpuWith(new PricedMemory(slowRom), [0xe0800211], false);
+    expect(cpu.step()).toBe(1 + 5);
+    const thumb = cpuWith(new PricedMemory(slowRom), [0x4088 /* lsls r0, r1 */], true);
+    expect(thumb.step()).toBe(1 + 5);
+  });
+
+  it('reports every access and internal cycle to the bus in the order they happen', () => {
+    // NanoBoyAdvance's ARM_SingleDataTransfer: the load, the I cycle, then the next fetch.
+    const ldr = new RecordingMemory();
+    const cpu = cpuWith(ldr, [0xe5910000 /* ldr r0, [r1] */], false);
+    cpu.registers[1] = IWRAM;
+    cpu.step();
+    expect(ldr.calls).toEqual(['data N 3000000', 'idle 1', 'fetch N 800000c']);
+
+    // A branch refills N then S, and the fetch after it continues the new stream.
+    const b = new RecordingMemory();
+    cpuWith(b, [0xea000000 /* b .+8 */], false).step();
+    expect(b.calls).toEqual(['fetch N 8000008', 'fetch S 800000c', 'fetch S 8000010']);
+
+    // A block transfer: N, then S for each further word, then the I cycle of a load.
+    const ldm = new RecordingMemory();
+    const block = cpuWith(ldm, [0xe891000c /* ldmia r1, {r2, r3} */], false);
+    block.registers[1] = IWRAM;
+    block.step();
+    expect(ldm.calls).toEqual(['data N 3000000', 'data S 3000004', 'idle 1', 'fetch N 800000c']);
   });
 
   it('a PC written from outside refills the pipeline at no cost; a refused instruction costs nothing', () => {

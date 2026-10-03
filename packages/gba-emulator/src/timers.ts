@@ -40,7 +40,7 @@ const TIMER_EVENT_IDS = [
 const TIMER_IRQ_FLAGS = [IrqFlag.Timer0, IrqFlag.Timer1, IrqFlag.Timer2, IrqFlag.Timer3] as const;
 
 /**
- * The clock stands at an instruction's first cycle while it runs. A counter read sees the count as
+ * The clock stands after an instruction's opcode fetch while it runs. A counter read sees the count as
  * of READ_OFFSET cycles earlier, while a control write acts at the clock's cycle, which gives the
  * counts the hardware reads (mGBA io.c GBAIORead, `GBATimerUpdateRegister(gba, 0, 2)`, and
  * GBATimerWriteTMCNT_HI; mgba-suite Timing calibration, "Timer IRQ"). An overflow is serviced once

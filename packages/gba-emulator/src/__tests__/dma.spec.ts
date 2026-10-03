@@ -177,7 +177,8 @@ describe('sound FIFO DMA', () => {
       read32: (a) => a >>> 0,
       write16: (a, v) => writes.push([a, v]),
       write32: (a, v) => writes.push([a, v]),
-      accessCycles: () => 1,
+      dataCycles: () => 1,
+      idle: () => {},
     };
     dma.setMemoryAccess(memory);
     return { dma, writes };

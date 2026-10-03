@@ -134,6 +134,22 @@ export interface FlashSnapshot {
   bank: number;
 }
 
+/** The game pak prefetch unit (prefetch.ts). */
+export interface PrefetchSnapshot {
+  /** Whether it holds or reads opcodes after the CPU's last fetch from the cartridge. */
+  active: boolean;
+  /** Address of the oldest buffered opcode. */
+  head: number;
+  /** Opcodes in the buffer. */
+  count: number;
+  /** Cycles left of the read in progress; 0 when it is not reading. */
+  countdown: number;
+  /** Opcode width: 2 (Thumb) or 4 (ARM). */
+  width: 2 | 4;
+  /** Cycles one read takes. */
+  duty: number;
+}
+
 export interface SystemBusSnapshot {
   ewram: Uint8Array;
   iwram: Uint8Array;
@@ -151,8 +167,8 @@ export interface SystemBusSnapshot {
   lastBiosRead: number;
   /** Internal Memory Control (0x04000800). Older snapshots omit it and restore as 0x0D000020, the BIOS's value. */
   memoryControl?: number;
-  /** The last opcode address the game pak prefetch buffer holds. Older snapshots omit it and restore it empty (0). */
-  prefetchEnd?: number;
+  /** The game pak prefetch unit. Older snapshots omit it and restore it stopped and empty. */
+  prefetch?: PrefetchSnapshot;
   eeprom: EepromSnapshot;
   /** Older snapshots omit it: a flash cartridge's bytes were then in `sram`, which restores into bank 0, in read mode. */
   flash?: FlashSnapshot;

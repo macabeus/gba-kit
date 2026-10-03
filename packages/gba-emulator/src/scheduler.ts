@@ -3,8 +3,9 @@
  *
  * The scheduler owns the machine's clock. `currentCycle` is "now": the run loop adds each
  * instruction's cycles to it as the instruction completes, and a DMA or a BIOS call adds the cycles
- * it holds the bus, so a timer read, a timer start or an event scheduled from an I/O write sees the
- * cycle the instruction began at, wherever it falls in the run.
+ * it holds the bus. An instruction's cycles end with the opcode fetch the next one begins with
+ * (ArmCpu), so a timer read, a timer start or an event scheduled from an I/O write sees the cycle
+ * after its instruction's fetch, where its first data access happens, wherever it falls in the run.
  *
  * Hardware events wait in one slot per `EventId` and fire once the clock reaches them, earliest
  * first. The CPU runs until the next event is due, so an event fires at the end of the instruction

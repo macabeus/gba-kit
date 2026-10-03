@@ -38,23 +38,23 @@ export interface MemoryBus {
 
   /**
    * Cycles one data access of `width` bytes at `address` takes. `sequential` is an S cycle, the
-   * address after the previous access (an LDM/STM past its first word); otherwise an N cycle.
+   * address after the previous access (an LDM/STM past its first word); otherwise an N cycle. This
+   * is the price alone: nothing on the bus happens.
    */
   accessCycles(address: number, width: 1 | 2 | 4, sequential: boolean): number;
 
   /**
-   * Cycles one opcode fetch of `width` bytes at `address` takes, on the same terms. A nonsequential
-   * fetch starts a new stream of code: the CPU branched.
+   * The CPU fetches the opcode at `address` now, and this returns the cycles the fetch takes. The
+   * CPU reports its accesses and internal cycles in the order they happen, so a bus with a prefetch
+   * unit can serve the fetch from what it read ahead during the cycles before.
    */
   fetchCycles(address: number, width: 2 | 4, sequential: boolean): number;
 
-  /**
-   * What `cycles` cost that the CPU spends off the code bus: internal cycles, and the data access
-   * at `dataAddress` when one is given. A bus that prefetches opcodes from `fetchAddress` onward
-   * meanwhile charges less (it may even refund fetches it completes ahead); a plain bus charges
-   * `cycles`.
-   */
-  stallCycles(cycles: number, fetchAddress: number, dataAddress?: number): number;
+  /** The CPU makes the data access at `address` now; returns the cycles it takes. */
+  dataCycles(address: number, width: 1 | 2 | 4, sequential: boolean): number;
+
+  /** The CPU spends `cycles` internal cycles now, during which it leaves the bus alone. */
+  idle(cycles: number): void;
 }
 
 // ─── Debug Hooks ──────────────────────────────────────────────────────

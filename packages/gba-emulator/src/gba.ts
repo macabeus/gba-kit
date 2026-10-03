@@ -173,7 +173,8 @@ export class Gba {
       getOrigin: () => captureOrigin(this.armCpu.registers[15]!, this.armCpu.cpsr),
       setDmaSource: (channel, origin) => this.bus.setDmaSource(channel, origin),
       clearDmaSource: () => this.bus.clearDmaSource(),
-      accessCycles: (addr, width, sequential) => this.bus.accessCycles(addr, width, sequential),
+      dataCycles: (addr, width, sequential) => this.bus.dataCycles(addr, width, sequential),
+      idle: (cycles) => this.bus.idle(cycles),
     });
 
     this.bus.loadBios(BIOS_IMAGE);
@@ -298,6 +299,7 @@ export class Gba {
           outcome = 'stalled';
           break;
         }
+        this.bus.idle(next - scheduler.currentCycle);
         scheduler.advance(next - scheduler.currentCycle);
       } else {
         this.#runCpu(shouldStop);
@@ -320,8 +322,8 @@ export class Gba {
 
   /**
    * Run the CPU until the next event is due. Each instruction moves the clock by its cycles as it
-   * completes, so an I/O access sees the cycle its instruction began at, and an event an access
-   * schedules earlier than the others ends the run in time.
+   * completes, so an I/O access sees the cycle after its instruction's opcode fetch, and an event
+   * an access schedules earlier than the others ends the run in time.
    */
   #runCpu(shouldStop?: StopPredicate): void {
     const cpu = this.armCpu;

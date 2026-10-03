@@ -284,11 +284,18 @@ export class ArmCpu {
   #fetchedOpcode = 0;
 
   /**
-   * Cycles the instruction in progress has used so far: its opcode fetch, its data accesses, its
-   * internal cycles and any refill a branch makes, each priced by the bus (GBATEK "ARM CPU
-   * Instruction Cycle Times"; mGBA `currentCycles` in src/arm/isa-arm.c and isa-thumb.c).
+   * Cycles the instruction in progress has used so far: its data accesses, its internal cycles, any
+   * refill a branch makes and the opcode fetch that ends it, each priced by the bus as it happens
+   * (GBATEK "ARM CPU Instruction Cycle Times"; NanoBoyAdvance arm7tdmi.hh and handlers/).
    */
   #cycles = 0;
+
+  /**
+   * Whether the fetch that ends the instruction in progress is an S access: it is unless the bus
+   * carried a data access or sat through an internal cycle since the last fetch. A refill leaves
+   * it sequential (NanoBoyAdvance `pipe.access`).
+   */
+  #nextFetchSequential = true;
 
   constructor(memory: MemoryBus, options?: { hooks?: DebugHooks; swiHandler?: SwiHandler }) {
     this.memory = memory;
@@ -696,7 +703,10 @@ export class ArmCpu {
    * - Calling the user's handler from [0x03007FFC]
    * - Restoring registers and returning from IRQ
    *
-   * Returns the cycles the entry takes: the pipeline refill at the vector (mGBA ARMRaiseIRQ).
+   * Returns the cycles the entry takes: the N+S refill at the vector. With the S fetch the
+   * interrupted instruction ended with, that is GBATEK's 2S+1N for an exception. The handler's
+   * first instruction starts without a fetch of its own, which gives the time from a request to
+   * the handler that mgba-suite's "Timer IRQ" tests measure on hardware.
    */
   enterIrq(): number {
     this.#cycles = 0;
@@ -760,12 +770,13 @@ export class ArmCpu {
   }
 
   /**
-   * Execute one instruction (ARM or Thumb based on T bit) and return the cycles it took.
-   * Returns 0 when nothing ran: the CPU is halted (`halted`), a debug hook refused the instruction
-   * (`refused`), or the instruction halted the CPU at the sentinel return address.
+   * Execute one instruction (ARM or Thumb based on T bit) and return the cycles it took: its data
+   * accesses, internal cycles and branch refill, then the opcode fetch the next instruction begins
+   * with. Returns 0 when nothing ran: the CPU is halted (`halted`), a debug hook refused the
+   * instruction (`refused`), or the instruction halted the CPU at the sentinel return address.
    *
-   * A PC set from outside (a host, the debugger, a snapshot) refills the pipeline here at no cost:
-   * only a branch the program takes pays for its refill.
+   * A PC set from outside (a host, the debugger, a snapshot) refills the pipeline here at no cost,
+   * the first instruction's fetch included: only a branch the program takes pays for its refill.
    */
   step(): number {
     this.#refused = false;
@@ -842,6 +853,7 @@ export class ArmCpu {
     }
     this.#pipelineAddress = address;
     this.#pipelineThumb = thumb;
+    this.#nextFetchSequential = true;
   }
 
   /**
@@ -862,40 +874,40 @@ export class ArmCpu {
 
   // ─── Cycle Accounting ────────────────────────────────────────────
 
-  /** The address the fetch stage reads while the current instruction executes: [$+8] ARM, [$+4] Thumb. */
-  #fetchAddress(): number {
-    return (this.#pipelineAddress + (this.#pipelineThumb ? 2 : 4)) >>> 0;
+  /**
+   * The opcode fetch that ends an instruction: the one the next instruction's first cycle makes,
+   * [$+8] in ARM state and [$+4] in Thumb state of that instruction. Counting it here puts the
+   * clock, between two instructions, after that fetch, at the cycle the next instruction's first
+   * data access happens, which is when its I/O sees the hardware.
+   */
+  #chargeNextFetch(): void {
+    const width = this.#pipelineThumb ? 2 : 4;
+    const address = (this.#pipelineAddress + 2 * width) >>> 0;
+    this.#cycles += this.memory.fetchCycles(address, width, this.#nextFetchSequential);
   }
 
-  /**
-   * After a data access or internal cycles the next opcode fetch is nonsequential, since the bus
-   * carried something else in between: it costs an N fetch where the instruction's base price
-   * counted an S fetch (mGBA ARM_LOAD_POST_BODY, ARM_STORE_POST_BODY, the multiplies).
-   */
-  #chargeNonsequentialFetch(): void {
-    const address = this.#fetchAddress();
-    const width = this.#pipelineThumb ? 2 : 4;
-    this.#cycles += this.memory.accessCycles(address, width, false) - this.memory.accessCycles(address, width, true);
+  /** A data access, in its place among the instruction's cycles; the next fetch is nonsequential. */
+  #chargeAccess(address: number, width: 1 | 2 | 4, sequential: boolean): void {
+    this.#cycles += this.memory.dataCycles(address, width, sequential);
+    this.#nextFetchSequential = false;
+  }
+
+  /** Internal cycles, which leave the bus alone; the next fetch is nonsequential. */
+  #chargeInternal(cycles: number): void {
+    this.memory.idle(cycles);
+    this.#cycles += cycles;
+    this.#nextFetchSequential = false;
   }
 
   /** A load: its N data cycle, then the I cycle that writes the register (GBATEK LDR: 1S+1N+1I). */
   #chargeLoad(address: number, width: 1 | 2 | 4): void {
-    const cycles = this.memory.accessCycles(address, width, false) + 1;
-    this.#cycles += this.memory.stallCycles(cycles, this.#fetchAddress(), address);
-    this.#chargeNonsequentialFetch();
+    this.#chargeAccess(address, width, false);
+    this.#chargeInternal(1);
   }
 
   /** A store: its N data cycle (GBATEK STR: 2N, the store and the nonsequential fetch after it). */
   #chargeStore(address: number, width: 1 | 2 | 4): void {
-    const cycles = this.memory.accessCycles(address, width, false);
-    this.#cycles += this.memory.stallCycles(cycles, this.#fetchAddress(), address);
-    this.#chargeNonsequentialFetch();
-  }
-
-  /** A multiply's internal cycles: m, plus 1 to accumulate and 1 for a long result (GBATEK MUL..SMLAL). */
-  #chargeMultiply(internal: number): void {
-    this.#cycles += this.memory.stallCycles(internal, this.#fetchAddress());
-    this.#chargeNonsequentialFetch();
+    this.#chargeAccess(address, width, false);
   }
 
   /**
@@ -995,16 +1007,20 @@ export class ArmCpu {
       }
     }
 
-    // Fetch stage: [$+4] enters the pipeline before this instruction touches memory. Its S fetch
-    // is the base price of every instruction.
+    // Fetch stage: [$+4] enters the pipeline before this instruction touches memory. The
+    // instruction before paid for the fetch (#chargeNextFetch).
     const fetchAddress = (instrAddr + 4) >>> 0;
     this.#decodedOpcode = this.#fetchedOpcode;
     this.#fetchedOpcode = this.memory.read16(fetchAddress);
-    this.#cycles = this.memory.fetchCycles(fetchAddress, 2, true);
+    this.#cycles = 0;
+    this.#nextFetchSequential = true;
     this.#pipelineAddress = (instrAddr + 2) >>> 0;
     this.registers[PC] = (instrAddr + 2) >>> 0;
     this.#executeThumb(instr, instrAddr);
 
+    if (!this.#halted) {
+      this.#chargeNextFetch();
+    }
     this.#hooks?.onInstructionPost?.(instrAddr, instr);
     return this.#halted ? 0 : this.#cycles;
   }
@@ -1279,19 +1295,19 @@ export class ArmCpu {
       case 0x2: {
         const amount = rsVal & 0xff;
         [result, carry] = lsl(rdVal, amount, this.getC());
-        this.#cycles += 1;
+        this.#chargeInternal(1);
         break;
       }
       case 0x3: {
         const amount = rsVal & 0xff;
         [result, carry] = lsr(rdVal, amount, this.getC());
-        this.#cycles += 1;
+        this.#chargeInternal(1);
         break;
       }
       case 0x4: {
         const amount = rsVal & 0xff;
         [result, carry] = asr(rdVal, amount, this.getC());
-        this.#cycles += 1;
+        this.#chargeInternal(1);
         break;
       }
       case 0x5: {
@@ -1311,7 +1327,7 @@ export class ArmCpu {
       case 0x7: {
         const amount = rsVal & 0xff;
         [result, carry] = ror(rdVal, amount, this.getC());
-        this.#cycles += 1;
+        this.#chargeInternal(1);
         break;
       }
       case 0x8:
@@ -1348,7 +1364,7 @@ export class ArmCpu {
         // MUL Rd, Rs is MULS Rd, Rs, Rd: Rd is the multiplier.
         result = Math.imul(rdVal, rsVal);
         carry = multiplyCarry(rsVal, rdVal, 0);
-        this.#chargeMultiply(multiplierCycles(rdVal, true));
+        this.#chargeInternal(multiplierCycles(rdVal, true));
         break;
       case 0xe:
         result = rdVal & ~rsVal;
@@ -1549,12 +1565,13 @@ export class ArmCpu {
       }
     }
 
-    // Fetch stage: [$+8] enters the pipeline before this instruction touches memory. Its S fetch
-    // is the base price of every instruction, one whose condition fails included.
+    // Fetch stage: [$+8] enters the pipeline before this instruction touches memory, one whose
+    // condition fails included. The instruction before paid for the fetch (#chargeNextFetch).
     const fetchAddress = (instrAddr + 8) >>> 0;
     this.#decodedOpcode = this.#fetchedOpcode;
     this.#fetchedOpcode = this.memory.read32(fetchAddress);
-    this.#cycles = this.memory.fetchCycles(fetchAddress, 4, true);
+    this.#cycles = 0;
+    this.#nextFetchSequential = true;
     this.#pipelineAddress = (instrAddr + 4) >>> 0;
     this.registers[PC] = (instrAddr + 4) >>> 0;
 
@@ -1564,6 +1581,9 @@ export class ArmCpu {
       this.#executeArm(instr, instrAddr);
     }
 
+    if (!this.#halted) {
+      this.#chargeNextFetch();
+    }
     this.#hooks?.onInstructionPost?.(instrAddr, instr);
     return this.#halted ? 0 : this.#cycles;
   }
@@ -1710,7 +1730,7 @@ export class ArmCpu {
       // Register-specified shift amount (Rs), read in an I cycle (GBATEK ARM.5: +1I).
       const rsReg = (instr >>> 8) & 0xf;
       amount = this.registers[rsReg]! & 0xff;
-      this.#cycles += 1;
+      this.#chargeInternal(1);
     } else {
       // Immediate-specified shift amount
       amount = (instr >>> 7) & 0x1f;
@@ -1892,7 +1912,7 @@ export class ArmCpu {
     const multiplier = this.registers[rs]!;
     const accumulator = accumulate ? this.registers[rn]! : 0;
     const result = (Math.imul(multiplicand, multiplier) + accumulator) | 0;
-    this.#chargeMultiply(multiplierCycles(multiplier, true) + (accumulate ? 1 : 0));
+    this.#chargeInternal(multiplierCycles(multiplier, true) + (accumulate ? 1 : 0));
 
     this.registers[rd] = result >>> 0;
 
@@ -1915,7 +1935,7 @@ export class ArmCpu {
     const multiplier = this.registers[bits(instr, 11, 8)]!;
     const accLo = accumulate ? this.registers[rdLo]! : 0;
     const accHi = accumulate ? this.registers[rdHi]! : 0;
-    this.#chargeMultiply(multiplierCycles(multiplier, isSigned) + (accumulate ? 2 : 1));
+    this.#chargeInternal(multiplierCycles(multiplier, isSigned) + (accumulate ? 2 : 1));
 
     // 32x32 -> 64 with BigInt for 64-bit precision, plus RdHi:RdLo for UMLAL/SMLAL.
     const product = isSigned
@@ -1947,11 +1967,11 @@ export class ArmCpu {
     const address = this.registers[rn]!;
 
     // A load and a store to the same address, each N, then the I cycle that writes Rd: GBATEK SWP
-    // 1S+2N+1I, with the nonsequential fetch after it like any load.
+    // 1S+2N+1I.
     const width = byteMode ? 1 : 4;
-    const access = this.memory.accessCycles(address, width, false);
-    this.#cycles += this.memory.stallCycles(2 * access + 1, this.#fetchAddress(), address);
-    this.#chargeNonsequentialFetch();
+    this.#chargeAccess(address, width, false);
+    this.#chargeAccess(address, width, false);
+    this.#chargeInternal(1);
 
     if (byteMode) {
       const temp = this.memory.read8(address);
@@ -2183,7 +2203,6 @@ export class ArmCpu {
     // The first word is an N cycle and the rest S cycles; an LDM adds the I cycle that writes the
     // last register (GBATEK LDM: nS+1N+1I, STM: (n-1)S+2N).
     const firstAddress = address;
-    let cycles = load ? 1 : 0;
 
     if (load) {
       if (writeback) {
@@ -2192,7 +2211,7 @@ export class ArmCpu {
       let pcValue = 0;
       for (let i = 0; i < 16; i++) {
         if (list & (1 << i)) {
-          cycles += this.memory.accessCycles(address, 4, address !== firstAddress);
+          this.#chargeAccess(address, 4, address !== firstAddress);
           const value = this.memory.read32(address);
           if (i === PC) {
             pcValue = value;
@@ -2204,8 +2223,7 @@ export class ArmCpu {
           address = (address + 4) >>> 0;
         }
       }
-      this.#cycles += this.memory.stallCycles(cycles, this.#fetchAddress(), firstAddress);
-      this.#chargeNonsequentialFetch();
+      this.#chargeInternal(1);
       if (loadsPc) {
         if (sBit) {
           this.#restoreCpsrFromSpsr();
@@ -2228,7 +2246,7 @@ export class ArmCpu {
           } else {
             value = userBank ? this.#readUserRegister(i) : this.registers[i]!;
           }
-          cycles += this.memory.accessCycles(address, 4, !first);
+          this.#chargeAccess(address, 4, !first);
           this.memory.write32(address, value);
           address = (address + 4) >>> 0;
           if (first && writeback) {
@@ -2237,8 +2255,6 @@ export class ArmCpu {
           first = false;
         }
       }
-      this.#cycles += this.memory.stallCycles(cycles, this.#fetchAddress(), firstAddress);
-      this.#chargeNonsequentialFetch();
     }
   }
 
@@ -2312,7 +2328,7 @@ export class ArmCpu {
       this.#enterSwi();
       return;
     }
-    this.#cycles += cycles;
+    this.#chargeInternal(cycles);
     if (!this.#halted) {
       this.#branchTo(this.registers[PC]!);
     }

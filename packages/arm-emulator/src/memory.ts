@@ -189,9 +189,11 @@ export class GbaMemory implements MemoryBus {
     return 1;
   }
 
-  stallCycles(cycles: number, _fetchAddress: number, _dataAddress?: number): number {
-    return cycles;
+  dataCycles(_address: number, _width: 1 | 2 | 4, _sequential: boolean): number {
+    return 1;
   }
+
+  idle(_cycles: number): void {}
 
   #recordWrite(address: number, size: 1 | 2 | 4, value: number): void {
     const entry: MemoryWrite = { address, size, value };
