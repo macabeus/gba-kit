@@ -208,6 +208,46 @@ describe('the EEPROM serial order', () => {
   });
 });
 
+describe('the EEPROM window at 0x0D', () => {
+  /** A ROM of `size` bytes that declares `id`, whose halfword at `offset` is `value`. */
+  function busWith(id: string | null, size: number, offset: number, value: number): GbaSystemBus {
+    const rom = new Uint8Array(size);
+    if (id !== null) {
+      writeText(rom, 0x400, id);
+    }
+    rom[offset] = value & 0xff;
+    rom[offset + 1] = value >>> 8;
+    const bus = new GbaSystemBus();
+    bus.loadRom(rom);
+    return bus;
+  }
+
+  it.each(['SRAM_V113', 'FLASH1M_V103'])('is ROM on a %s cartridge, and takes no writes', (id) => {
+    // Without an EEPROM, 0x0D is the last mirror of the ROM, its second 16 MB (mGBA memory.c
+    // GBALoad16, ROM2_EX).
+    const bus = busWith(id, 0x1002000, 0x1001000, 0xbeef);
+    bus.write16(0x0d000000, 1);
+    expect(bus.read16(0x0d001000)).toBe(0xbeef);
+    expect(bus.read32(0x0d001000) & 0xffff).toBe(0xbeef);
+    expect(bus.describeAddress(0x0d001000)).toEqual({ region: 'ROM' });
+    expect(bus.peek(0x0d001000, 2).data).toEqual(Uint8Array.of(0xef, 0xbe));
+  });
+
+  it.each(['EEPROM_V121', null])('is the EEPROM throughout on a %s cartridge of 16 MB or less', (id) => {
+    const bus = busWith(id, 0x2000, 0x1000, 0xbeef);
+    expect(bus.read16(0x0d001000)).toBe(1); // an idle EEPROM answers 1
+    expect(bus.describeAddress(0x0d001000)).toEqual({ region: 'EEPROM' });
+    expect(bus.peek(0x0d001000, 2).readable).toBe(0);
+  });
+
+  it('is the EEPROM only from 0x0DFFFF00 on a 32 MB cartridge, which has ROM below it', () => {
+    // GBATEK "GBA Cart Backup EEPROM": a 32 MB ROM leaves the EEPROM the top 256 bytes of 0x0D.
+    const bus = busWith('EEPROM_V121', 0x2000000, 0x1fffe00, 0xbeef);
+    expect(bus.read16(0x0dfffe00)).toBe(0xbeef);
+    expect(bus.read16(0x0dffff00)).toBe(1);
+  });
+});
+
 describe('the EEPROM address width', () => {
   it.each([
     ['4 Kbit', 512, 6, 40],

@@ -97,6 +97,11 @@ const SAVE_VERSION_DIGITS = 3;
 /** The EEPROM chip's array: 64 Kbit, which a 4 Kbit cartridge uses the first 512 bytes of. */
 const EEPROM_BYTES = 0x2000;
 
+/** A ROM larger than this (32 MB) leaves the EEPROM only the last 256 bytes of 0x0D, from this offset on. */
+const LARGE_ROM_BYTES = 0x1000000;
+const LARGE_ROM_EEPROM_OFFSET = 0x1ffff00;
+const EEPROM_REGION = 0x0d;
+
 /**
  * The CPU as the bus sees it: where it executes, which decides whether the BIOS is readable, and
  * the opcodes in its prefetch pipeline, which are what an open-bus read returns. `ArmCpu` is one.
@@ -634,7 +639,11 @@ export class GbaSystemBus implements MemoryBus {
       case 0x09:
       case 0x0a:
       case 0x0b:
-      case 0x0c: {
+      case 0x0c:
+      case 0x0d: {
+        if (this.#isEeprom(addr)) {
+          return null; // a protocol, not bytes
+        }
         const romOffset = addr & 0x01ffffff;
         return romOffset < this.#rom.length ? this.#rom[romOffset]! : null;
       }
@@ -643,7 +652,7 @@ export class GbaSystemBus implements MemoryBus {
         // what a CPU read returns, which for a flash chip in ID mode is its ID
         return this.#hasSaveWindow() ? this.#readSave8(addr) : null;
       default:
-        return null; // EEPROM (a protocol, not bytes), and everything unmapped
+        return null; // everything unmapped
     }
   }
 
@@ -748,14 +757,16 @@ export class GbaSystemBus implements MemoryBus {
       case 0x0a:
       case 0x0b:
       case 0x0c:
-        // The wait-state mirrors all address the same cartridge, so what decides is
-        // the offset into it — past the end of the loaded ROM nothing answers, and a read
-        // there returns the address the cartridge bus last carried.
-        return (addr & 0x01ffffff) < this.#rom.length ? { region: 'ROM' } : null;
       case 0x0d:
-        // Not cartridge data: a wide read here is an EEPROM serial transaction that
-        // returns one data bit. Decoded, so not refused — but it is its own region.
-        return { region: 'EEPROM' };
+        // Where the EEPROM answers, a wide read is a serial transaction that returns one
+        // data bit: decoded, so not refused, but its own region. The wait-state mirrors all
+        // address the same cartridge elsewhere, so what decides is the offset into it — past
+        // the end of the loaded ROM nothing answers, and a read there returns the address the
+        // cartridge bus last carried.
+        if (this.#isEeprom(addr)) {
+          return { region: 'EEPROM' };
+        }
+        return (addr & 0x01ffffff) < this.#rom.length ? { region: 'ROM' } : null;
       case 0x0e:
       case 0x0f:
         // Reported whether or not a save chip was detected. Detection is a pattern
@@ -849,8 +860,8 @@ export class GbaSystemBus implements MemoryBus {
       case 0x0c:
         return this.#readRom16(addr);
       case 0x0d:
-        // EEPROM serial read — return data bit in bit 0
-        return this.#eeprom.read();
+        // The EEPROM's serial data bit in bit 0 where it answers, the ROM elsewhere
+        return this.#isEeprom(addr) ? this.#eeprom.read() : this.#readRom16(addr);
       case 0x0e:
       case 0x0f: {
         // The save chip sits on an 8-bit bus: a wider read returns its byte on every lane
@@ -899,8 +910,8 @@ export class GbaSystemBus implements MemoryBus {
       case 0x0c:
         return this.#readRom32(addr);
       case 0x0d:
-        // EEPROM serial read
-        return this.#eeprom.read();
+        // The EEPROM's serial data bit where it answers, the ROM elsewhere
+        return this.#isEeprom(addr) ? this.#eeprom.read() : this.#readRom32(addr);
       case 0x0e:
       case 0x0f: {
         // The save chip sits on an 8-bit bus: a wider read returns its byte on every lane
@@ -993,8 +1004,10 @@ export class GbaSystemBus implements MemoryBus {
         this.#write16To(this.oam, addr & 0x3ff, value);
         break;
       case 0x0d:
-        // EEPROM serial write — only bit 0 matters; serial port, no addressable byte.
-        this.#eeprom.write(value & 1);
+        // EEPROM serial write — only bit 0 matters; serial port, no addressable byte. ROM drops it.
+        if (this.#isEeprom(addr)) {
+          this.#eeprom.write(value & 1);
+        }
         committed = false;
         break;
       case 0x0e:
@@ -1044,8 +1057,10 @@ export class GbaSystemBus implements MemoryBus {
         this.#write32To(this.oam, addr & 0x3ff, value);
         break;
       case 0x0d:
-        // EEPROM serial write — serial port, no addressable byte.
-        this.#eeprom.write(value & 1);
+        // EEPROM serial write — serial port, no addressable byte. ROM drops it.
+        if (this.#isEeprom(addr)) {
+          this.#eeprom.write(value & 1);
+        }
         committed = false;
         break;
       case 0x0e:
@@ -1062,6 +1077,23 @@ export class GbaSystemBus implements MemoryBus {
     if (committed && this.#watchpoints.length > 0) {
       this.#notifyWrite(this.#canonicalAddress(addr), value >>> 0, 4);
     }
+  }
+
+  // ─── Cartridge EEPROM (0x0D) ──────────────────────────────────────
+
+  /**
+   * Whether the EEPROM answers at `address`, which it does only in the 0x0D region. The chip sits on the ROM's address
+   * bus and takes over the top of it: all of 0x0D with a ROM of 16 MB or less, and 0x0DFFFF00 up
+   * with a 32 MB ROM (GBATEK "GBA Cart Backup EEPROM"). A cartridge that declares SRAM or flash has
+   * no EEPROM, and its ROM answers there (mGBA memory.c GBALoad16, ROM2_EX). One that declares
+   * nothing is taken to have it, as mGBA's save autodetection enables it on the first write to 0x0D.
+   */
+  #isEeprom(address: number): boolean {
+    const type = this.#save.type;
+    if (address >>> 24 !== EEPROM_REGION || (type !== 'eeprom' && type !== null)) {
+      return false;
+    }
+    return this.#rom.length <= LARGE_ROM_BYTES || (address & 0x01ffffff) >= LARGE_ROM_EEPROM_OFFSET;
   }
 
   // ─── Cartridge Save Window (0x0E) ─────────────────────────────────
