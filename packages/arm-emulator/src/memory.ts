@@ -135,6 +135,14 @@ export class GbaMemory implements MemoryBus {
     return view.getUint32(offset, true); // little-endian
   }
 
+  fetch16(address: number): number {
+    return this.read16(address);
+  }
+
+  fetch32(address: number): number {
+    return this.read32(address);
+  }
+
   write8(address: number, value: number): void {
     const resolved = this.#resolve(address);
     if (!resolved) {

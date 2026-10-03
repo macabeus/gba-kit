@@ -83,6 +83,21 @@ describe('GbaSystemBus.poke', () => {
 });
 
 describe('read watchpoints', () => {
+  it('fire on loads, not on the opcodes the CPU fetches past a branch', () => {
+    const gba = new Gba();
+    const rom = new Uint8Array(16);
+    const view = new DataView(rom.buffer);
+    [0xe59f1004 /* ldr r1, [pc, #4] */, 0xeafffffe /* b . */, 0x12345678, 0x9abcdef0].forEach((word, i) =>
+      view.setUint32(i * 4, word, true),
+    );
+    gba.loadRom(rom);
+    const seen: Array<{ address: number; value: number }> = [];
+    gba.bus.addReadWatchpoint(0x08000008, 8, ({ address, value }) => seen.push({ address, value }));
+    gba.runFrame();
+    // `b .` fetches the two words after it on every pass; only the ldr reads the table.
+    expect(seen).toEqual([{ address: 0x0800000c, value: 0x9abcdef0 }]);
+  });
+
   it('reads a word with its top bit set as an unsigned number, wherever it comes from', () => {
     const bus = new GbaSystemBus();
     const rom = new Uint8Array(8);

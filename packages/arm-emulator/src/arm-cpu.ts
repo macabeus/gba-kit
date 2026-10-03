@@ -845,11 +845,11 @@ export class ArmCpu {
   /** Refill the pipeline from `address`: what a branch does in its two refill cycles. */
   #fillPipeline(address: number, thumb: boolean): void {
     if (thumb) {
-      this.#decodedOpcode = this.memory.read16(address);
-      this.#fetchedOpcode = this.memory.read16((address + 2) >>> 0);
+      this.#decodedOpcode = this.memory.fetch16(address);
+      this.#fetchedOpcode = this.memory.fetch16((address + 2) >>> 0);
     } else {
-      this.#decodedOpcode = this.memory.read32(address);
-      this.#fetchedOpcode = this.memory.read32((address + 4) >>> 0);
+      this.#decodedOpcode = this.memory.fetch32(address);
+      this.#fetchedOpcode = this.memory.fetch32((address + 4) >>> 0);
     }
     this.#pipelineAddress = address;
     this.#pipelineThumb = thumb;
@@ -1011,7 +1011,7 @@ export class ArmCpu {
     // instruction before paid for the fetch (#chargeNextFetch).
     const fetchAddress = (instrAddr + 4) >>> 0;
     this.#decodedOpcode = this.#fetchedOpcode;
-    this.#fetchedOpcode = this.memory.read16(fetchAddress);
+    this.#fetchedOpcode = this.memory.fetch16(fetchAddress);
     this.#cycles = 0;
     this.#nextFetchSequential = true;
     this.#pipelineAddress = (instrAddr + 2) >>> 0;
@@ -1569,7 +1569,7 @@ export class ArmCpu {
     // condition fails included. The instruction before paid for the fetch (#chargeNextFetch).
     const fetchAddress = (instrAddr + 8) >>> 0;
     this.#decodedOpcode = this.#fetchedOpcode;
-    this.#fetchedOpcode = this.memory.read32(fetchAddress);
+    this.#fetchedOpcode = this.memory.fetch32(fetchAddress);
     this.#cycles = 0;
     this.#nextFetchSequential = true;
     this.#pipelineAddress = (instrAddr + 4) >>> 0;

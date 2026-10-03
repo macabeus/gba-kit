@@ -1403,6 +1403,31 @@ describe('ArmCpu', () => {
       fromLegacy.run(100);
       expect(fromLegacy.registers[0]).toBe(5);
     });
+
+    it('fills the pipeline through the bus fetch path, not through loads', () => {
+      class CountingMemory extends GbaMemory {
+        loads = 0;
+        fetches = 0;
+        override read32(address: number): number {
+          this.loads++;
+          return super.read32(address);
+        }
+        override fetch32(address: number): number {
+          this.fetches++;
+          return super.read32(address);
+        }
+      }
+      const mem = new CountingMemory();
+      const cpu = new ArmCpu(mem);
+      loadArmInstructions(mem, CODE, [0xe59f1004 /* ldr r1, [pc, #4] */, armMovImm(0, 1), armBx(LR), 0x12345678]);
+      cpu.cpsr = MODE_SYS;
+      cpu.registers[PC] = CODE;
+      cpu.registers[LR] = SENTINEL_ADDR;
+      cpu.run(100);
+      expect(cpu.registers[1]).toBe(0x12345678);
+      expect(mem.loads).toBe(1); // the ldr
+      expect(mem.fetches).toBeGreaterThan(3);
+    });
   });
 
   describe('stores of R15', () => {

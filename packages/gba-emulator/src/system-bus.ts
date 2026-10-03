@@ -384,7 +384,7 @@ export class GbaSystemBus implements MemoryBus {
   /**
    * Register a read watchpoint over [address, address+length); returns a disposer.
    * Fires after the load, with the value it returned. Every load through the bus
-   * counts, the CPU's instruction fetch included; a debugger's `peek` does not.
+   * counts, a DMA's included; the CPU's opcode fetches and a debugger's `peek` do not.
    */
   addReadWatchpoint(address: number, length: number, onRead: (info: WatchpointRead) => void): () => void {
     const len = length >= 1 ? length : 1;
@@ -885,6 +885,15 @@ export class GbaSystemBus implements MemoryBus {
       this.#notifyRead(this.#canonicalAddress(address & ~3), value >>> 0, 4);
     }
     return value;
+  }
+
+  /** An opcode fetch reads what a load reads; read watchpoints see loads only. */
+  fetch16(address: number): number {
+    return this.#read16(address);
+  }
+
+  fetch32(address: number): number {
+    return this.#read32(address);
   }
 
   #read32(address: number): number {

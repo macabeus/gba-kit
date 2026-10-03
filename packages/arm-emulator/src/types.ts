@@ -32,6 +32,13 @@ export interface MemoryBus {
   read8(address: number): number;
   read16(address: number): number;
   read32(address: number): number;
+  /**
+   * The CPU's opcode fetches into its pipeline. They read what `read16`/`read32` read, but they are
+   * not loads: the pipeline also fetches the words after a branch, which never execute, so a bus
+   * that reports loads to a debugger leaves these out.
+   */
+  fetch16(address: number): number;
+  fetch32(address: number): number;
   write8(address: number, value: number): void;
   write16(address: number, value: number): void;
   write32(address: number, value: number): void;

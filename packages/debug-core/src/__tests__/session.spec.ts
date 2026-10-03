@@ -1370,12 +1370,16 @@ describe('Session views and tools', () => {
   it('describes a watched word whose top bit is set by its bits, and watches nothing past the bus', async () => {
     const h = await boot('thumb-O0');
     expect(h.session.dataBreakpointTarget('0x1ffffffff')).toBeNull();
-    const target = h.session.dataBreakpointTarget('0x8000000')!;
-    expect(target).toMatchObject({ address: 0x08000000, length: 4 });
+    // s_file_static is loaded by every update, and is -3 after the first
+    const address = h.session.evaluate('s_file_static').address!;
+    const hex = `0x${address.toString(16)}`;
+    const target = h.session.dataBreakpointTarget(hex)!;
+    expect(target).toMatchObject({ address, length: 4 });
     h.session.setDataBreakpoints([{ ...target, access: 'read' }]);
+    expect(h.run()?.description).toContain(`${hex} read (0x0, 4 bytes at ${hex}) by `);
     const stop = h.run();
     expect(stop?.reason).toBe('data breakpoint');
-    expect(stop?.description).toMatch(/^0x8000000 read \(0x[0-9a-f]{8}, 4 bytes at 0x8000000\) by /);
+    expect(stop?.description).toContain(`${hex} read (0xfffffffd, 4 bytes at ${hex}) by `);
     expect(stop?.description).not.toContain('0x-');
   });
 

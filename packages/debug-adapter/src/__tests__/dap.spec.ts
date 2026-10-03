@@ -519,15 +519,23 @@ describe('breakpoints', () => {
     // nothing watches all of memory: the run reaches the source breakpoint
     expect((await stopped(client, 'continue', { threadId: 1 })).reason).toBe('breakpoint');
 
-    // the first ROM word, whose top bit is set, reads as its bits rather than a negative number
+    // a word with its top bit set (s_file_static is -3 after the first update) reads as its bits
+    // rather than a negative number
     await stopped(client, 'restart');
-    const rom = await client.body<DebugProtocol.SetDataBreakpointsResponse['body']>('setDataBreakpoints', {
-      breakpoints: [{ dataId: '134217728:4:0x8000000', accessType: 'read' }],
+    const address = Number(
+      (await client.body<DebugProtocol.EvaluateResponse['body']>('evaluate', { expression: '&s_file_static' }))
+        .memoryReference,
+    );
+    const hex = `0x${address.toString(16)}`;
+    const raw = await client.body<DebugProtocol.SetDataBreakpointsResponse['body']>('setDataBreakpoints', {
+      breakpoints: [{ dataId: `${address}:4:${hex}`, accessType: 'read' }],
     });
-    expect(rom.breakpoints[0]!.verified).toBe(true);
+    expect(raw.breakpoints[0]!.verified).toBe(true);
+    await client.body('setBreakpoints', { source: { path: MAIN }, breakpoints: [] });
+    expect((await stopped(client, 'continue', { threadId: 1 })).description).toContain(`${hex} read (0x0, 4 bytes`);
     const stop = await stopped(client, 'continue', { threadId: 1 });
     expect(stop.reason).toBe('data breakpoint');
-    expect(stop.description).toMatch(/^0x8000000 read \(0x[0-9a-f]{1,8}, 4 bytes at 0x8000000\)/);
+    expect(stop.description).toContain(`${hex} read (0xfffffffd, 4 bytes at ${hex})`);
     expect(stop.description).not.toContain('0x-');
   });
 
