@@ -10,6 +10,8 @@ import { disassembleArm, disassembleThumb } from '@gba-kit/arm-emulator/disassem
 import { Gba } from '@gba-kit/gba-emulator';
 import type { GbaSnapshot } from '@gba-kit/gba-emulator/savestate';
 
+import { FrameClock } from './frame-clock.js';
+
 /** Keyboard mapping: key → GBA button bit */
 const KEY_MAP: Record<string, number> = {
   ArrowRight: 4,
@@ -47,6 +49,7 @@ export class EmulatorBridge {
   #ctx: CanvasRenderingContext2D | null = null;
   #state: EmulatorState = 'idle';
   #animFrameId = 0;
+  readonly #frameClock = new FrameClock();
   #callbacks: EmulatorCallbacks | null = null;
   #breakpoints: Map<number, Breakpoint> = new Map();
   #hitBreakpoint = false;
@@ -128,7 +131,10 @@ export class EmulatorBridge {
     this.#updateDebugHooks();
     this.#resumeAddress = this.#gba.armCpu.registers[15]!;
 
-    this.#emulationLoop();
+    // The loop starts at the next animation frame, so every time the clock sees is an
+    // animation-frame timestamp.
+    this.#frameClock.reset();
+    this.#animFrameId = requestAnimationFrame(this.#emulationLoop);
   }
 
   /** Pause emulation */
@@ -417,15 +423,21 @@ export class EmulatorBridge {
 
   // ─── Internal ─────────────────────────────────────────────────────
 
-  #emulationLoop = (): void => {
+  /** One animation-frame callback: run the GBA frames the elapsed time holds, then paint the last. */
+  #emulationLoop = (now: number): void => {
     if (this.#state !== 'running') {
       return;
     }
 
-    this.#gba.runFrame();
-    this.#resumeAddress = null;
-    this.#renderFrame();
-    this.#callbacks?.onFrame();
+    const frames = this.#frameClock.framesDue(now);
+    for (let i = 0; i < frames && !this.#hitBreakpoint; i++) {
+      this.#gba.runFrame();
+      this.#resumeAddress = null;
+    }
+    if (frames > 0) {
+      this.#renderFrame();
+      this.#callbacks?.onFrame();
+    }
 
     if (this.#hitBreakpoint) {
       this.#setState('paused');

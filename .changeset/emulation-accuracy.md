@@ -65,6 +65,11 @@ faster than before: about 480 frames per second headless, against about 355.
   with its interrupt, reading the idle line's ones, and the SIO registers read as the
   hardware does with nothing connected.
 
+**The Play page runs at the GBA's 59.73 frames per second on every display.** Its loop ran
+one frame per `requestAnimationFrame`, which is the display's refresh rate, so a game ran
+twice as fast on a 120 Hz screen. `FrameClock` (gba-browser) turns the time between two
+callbacks into the GBA frames it holds, and the script replayer paces by it too.
+
 The debugger follows the new machine. A read watchpoint fires on data loads and
 executed fetches, and stays quiet on opcodes the CPU prefetched. The call stack
 unwinds through a BIOS service call (`FrameMethod` `'service'`). The browser bridge

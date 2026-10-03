@@ -62,6 +62,9 @@ class FakeImageData {
   }
 }
 
+/** Animation-frame callbacks the bridge asked for; a test runs them when it wants a frame. */
+const animationFrames: FrameRequestCallback[] = [];
+
 const saved: Partial<Record<'ImageData' | 'document' | 'requestAnimationFrame' | 'cancelAnimationFrame', unknown>> = {};
 
 beforeAll(() => {
@@ -77,8 +80,13 @@ beforeAll(() => {
       return canvas;
     },
   };
-  g['requestAnimationFrame'] = (): number => 1;
-  g['cancelAnimationFrame'] = (): void => {};
+  g['requestAnimationFrame'] = (callback: FrameRequestCallback): number => {
+    animationFrames.push(callback);
+    return animationFrames.length;
+  };
+  g['cancelAnimationFrame'] = (): void => {
+    animationFrames.length = 0;
+  };
 });
 
 afterAll(() => {
@@ -154,7 +162,8 @@ describe('EmulatorBridge over a machine the debug session moves', () => {
     let seen = 0;
     bridge.gba.armCpu.setDebugHooks({ onInstructionPost: () => void seen++ });
 
-    bridge.run(); // runs one frame before the (stubbed) animation frame is asked for
+    bridge.run();
+    animationFrames.shift()!(performance.now()); // the loop's first animation frame runs one frame
     bridge.pause();
     expect(seen).toBeGreaterThan(0);
 
