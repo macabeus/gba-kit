@@ -221,6 +221,26 @@ describe('sound FIFO DMA', () => {
     expect(writes).toHaveLength(4);
     expect(dma.readControl(1) & ENABLE).toBe(0);
   });
+
+  it('a snapshot from before the run, holding the CNT_L count of a FIFO channel, restores a 4-word request', () => {
+    const { dma } = controller();
+    program(dma, 1, EWRAM, MMIO.FIFO_A, REPEAT | WORD);
+    // The earlier controller set a FIFO channel's count from CNT_L (0 meaning 0x4000) and kept
+    // the run's fields out of its snapshot.
+    const snap = dma.serialize();
+    snap.channels[1]!.wordCount = 0x4000;
+    delete snap.waiting;
+    delete snap.running;
+    delete snap.current;
+    delete snap.gamePakAccessed;
+    delete snap.busValue;
+
+    const { dma: restored, writes: restoredWrites } = controller();
+    restored.deserialize(snap);
+    restored.requestSoundFifo(MMIO.FIFO_A);
+    expect(restoredWrites).toHaveLength(4);
+    expect(restored.serialize().channels[1]!.wordCount).toBe(4);
+  });
 });
 
 describe('video capture', () => {

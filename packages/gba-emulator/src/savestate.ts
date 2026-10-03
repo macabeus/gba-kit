@@ -99,7 +99,10 @@ export interface DmaSnapshot {
   channels: DmaChannelSnapshot[];
   /** The channels waiting for the bus, bit n for DMAn. Older snapshots omit it and restore as 0. */
   waiting?: number;
-  /** Whether a run holds the bus. Older snapshots omit it and restore as false. */
+  /**
+   * Whether a run holds the bus. Older snapshots omit it and restore as false, with each sound FIFO
+   * channel's count at the 4 words of its next request.
+   */
   running?: boolean;
   /** The channel that moved the run's last unit. Older snapshots omit it and restore as -1. */
   current?: number;

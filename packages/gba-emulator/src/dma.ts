@@ -10,7 +10,8 @@
  * EWRAM (the BIOS and the unused region after it) answers nothing, and the channel writes what
  * its latch holds from its last read (mGBA dma.c GBADMAService; mgba-suite "DMA tests").
  *
- * The channels share one bus master. A channel asks for the bus 3 cycles after its trigger, and
+ * The channels share one bus master. A channel asks for the bus 3 cycles after its trigger, a
+ * sound FIFO channel as soon as its FIFO asks for data (mGBA audio.c GBAAudioSampleFIFO), and
  * once one has it the CPU stops until no channel is left. That run begins and ends with an
  * internal cycle, 2I however many channels it serves back to back (GBATEK "DMA Transfers":
  * "Internal time for DMA processing is 2I"; NanoBoyAdvance dma.cc Run). It moves one unit at a
@@ -567,6 +568,15 @@ export class DmaController {
       ch.irqEnable = s.irqEnable;
       ch.enabled = s.enabled;
       ch.latch = s.latch ?? 0;
+    }
+    // A snapshot from before the run kept a sound FIFO channel's CNT_L count, which no transfer
+    // used. It was taken between transfers, so the channel's next request moves a fresh 4 words.
+    if (snap.running === undefined) {
+      for (let i = 1; i <= 2; i++) {
+        if (this.#isSoundFifo(i)) {
+          this.#channels[i]!.wordCount = FIFO_UNITS;
+        }
+      }
     }
     this.#waiting = snap.waiting ?? 0;
     this.#running = snap.running ?? false;
