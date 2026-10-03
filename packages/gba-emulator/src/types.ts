@@ -132,6 +132,8 @@ export const enum EventId {
   DispcntLatch,
   /** Setting IME reaching the CPU's IRQ line while a request is already signalled (InterruptController) */
   ImeLine,
+  /** A DMA run that paused for an event taking the bus again (DmaController) */
+  DmaResume,
   /** Sentinel — total count of event types */
   Count,
 }

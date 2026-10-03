@@ -242,3 +242,56 @@ describe('video capture', () => {
     expect(gba.bus.read16(r.cntH) & ENABLE).toBe(0);
   });
 });
+
+describe('priority', () => {
+  /**
+   * DMA3 fills 0x4000 halfwords of EWRAM with 0xAAAA from a fixed IWRAM source, which takes about
+   * 53 lines, while an HBlank DMA0 copies the last halfword DMA3 writes into a log, one entry a line.
+   */
+  function dma0DuringDma3(): Gba {
+    const gba = new Gba();
+    gba.loadRom(romOf([0xeafffffe])); // b .
+    gba.armCpu.cpsr = 0x1f;
+    gba.armCpu.registers[15] = ROM;
+    gba.bus.write16(IWRAM, 0xaaaa);
+    const r0 = registers(0);
+    gba.bus.write32(r0.sad, EWRAM + 0x7ffe);
+    gba.bus.write32(r0.dad, IWRAM + 0x100);
+    gba.bus.write16(r0.cntL, 1);
+    gba.bus.write16(r0.cntH, ENABLE | HBLANK | REPEAT | SRC_FIXED);
+    const r3 = registers(3);
+    gba.bus.write32(r3.sad, IWRAM);
+    gba.bus.write32(r3.dad, EWRAM);
+    gba.bus.write16(r3.cntL, 0x4000);
+    gba.bus.write16(r3.cntH, ENABLE | SRC_FIXED);
+    return gba;
+  }
+
+  it('a higher-priority channel triggered during a transfer runs before it ends', () => {
+    // GBATEK "DMA Transfers": "the one with the highest priority is executed first, and the lower
+    // priority DMA(s) are paused"; mGBA dma.c re-arbitrates after every unit.
+    const gba = dma0DuringDma3();
+    gba.runFrame();
+    const log = Array.from({ length: 80 }, (_, i) => gba.bus.read16(IWRAM + 0x100 + i * 2));
+    const before = log.indexOf(0xaaaa);
+    expect(before).toBeGreaterThan(40);
+    expect(log.slice(0, before).every((v) => v === 0)).toBe(true);
+    expect(log.slice(before).every((v) => v === 0xaaaa)).toBe(true);
+  });
+
+  it('a paused transfer survives a snapshot and resumes where it was', () => {
+    const a = dma0DuringDma3();
+    for (let i = 0; i < 10; i++) {
+      a.runScanline();
+    }
+    const snap = a.serialize();
+    expect(snap.dma.waiting).toBe(1 << 3);
+    expect(snap.dma.running).toBe(true);
+    const b = new Gba();
+    b.loadRom(romOf([0xeafffffe]));
+    b.deserialize(snap);
+    a.runFrame();
+    b.runFrame();
+    expect(b.serialize()).toEqual(a.serialize());
+  });
+});

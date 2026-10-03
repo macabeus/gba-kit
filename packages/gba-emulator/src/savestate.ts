@@ -97,6 +97,14 @@ export interface DmaChannelSnapshot {
 
 export interface DmaSnapshot {
   channels: DmaChannelSnapshot[];
+  /** The channels waiting for the bus, bit n for DMAn. Older snapshots omit it and restore as 0. */
+  waiting?: number;
+  /** Whether a run holds the bus. Older snapshots omit it and restore as false. */
+  running?: boolean;
+  /** The channel that moved the run's last unit. Older snapshots omit it and restore as -1. */
+  current?: number;
+  /** Whether that channel has made its game pak N access. Older snapshots omit it and restore as false. */
+  gamePakAccessed?: boolean;
 }
 
 // ─── Input ────────────────────────────────────────────────────────────

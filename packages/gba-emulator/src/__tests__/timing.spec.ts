@@ -340,8 +340,50 @@ describe('DMA and interrupt timing', () => {
     expect(gba.bus.read16(IWRAM + 0x100)).toBe(0);
     gba.scheduler.tick(1);
     expect(gba.bus.read16(IWRAM + 0x11e)).toBe(0x10f);
-    // 16 reads and writes of a zero-wait memory, and the 2 internal cycles that end the transfer.
+    // 16 reads and writes of a zero-wait memory, and the internal cycles a run begins and ends with.
     expect(gba.scheduler.currentCycle - start).toBe(3 + 16 * 2 + 2);
+  });
+
+  it('channels that want the bus at once share one run: 2I, the higher priority first', () => {
+    // GBATEK "DMA Transfers": "2N+2(n-1)S+xI" per run; NanoBoyAdvance dma.cc Run() spends one
+    // internal cycle before the channels it serves back to back and one after. DMA0 overwrites
+    // the words DMA1 copies, so DMA1 copies DMA0's words only if DMA0 goes first.
+    const gba = new Gba();
+    for (let i = 0; i < 4; i++) {
+      gba.bus.write16(IWRAM + i * 2, 0x100 + i);
+      gba.bus.write16(IWRAM + 0x300 + i * 2, 0x300 + i);
+    }
+    for (const [channel, src, dst] of [
+      [1, IWRAM, IWRAM + 0x200],
+      [0, IWRAM + 0x300, IWRAM],
+    ] as const) {
+      const base = 0x040000b0 + channel * 12;
+      gba.bus.write32(base, src);
+      gba.bus.write32(base + 4, dst);
+      gba.bus.write16(base + 8, 4);
+    }
+    const start = gba.scheduler.currentCycle;
+    gba.bus.write16(0x040000c6, 0x8000); // DMA1 enabled first, at the same cycle
+    gba.bus.write16(0x040000ba, 0x8000); // DMA0
+    gba.scheduler.tick(3);
+    expect(gba.scheduler.currentCycle - start).toBe(3 + 1 + 2 * 4 * 2 + 1);
+    expect(gba.bus.read16(IWRAM + 0x206)).toBe(0x303);
+  });
+
+  it('a channel makes its first game pak access nonsequential and every other one sequential', () => {
+    // WAITCNT=4: a ROM halfword is 4 cycles N and 3 cycles S (GBATEK "Waitstate Control"). From ROM
+    // to ROM the first read is N and the writes are S: 1 + (4 + 3) + 3 * (3 + 3) + 1 (NanoBoyAdvance
+    // dma.cc RunChannel; mgba-suite Timing "Short DMA (16/ROM to ROM)", ".N." column).
+    const gba = new Gba();
+    gba.loadRom(new Uint8Array(0x100));
+    gba.bus.write16(WAITCNT, 0x0004);
+    gba.bus.write32(0x040000d4, ROM);
+    gba.bus.write32(0x040000d8, ROM + 0x80);
+    gba.bus.write16(0x040000dc, 4);
+    const start = gba.scheduler.currentCycle;
+    gba.bus.write16(0x040000de, 0x8000);
+    gba.scheduler.tick(3);
+    expect(gba.scheduler.currentCycle - start).toBe(3 + 1 + (4 + 3) + 3 * (3 + 3) + 1);
   });
 
   it('an interrupt request reaches the CPU 7 cycles after it is raised', () => {
