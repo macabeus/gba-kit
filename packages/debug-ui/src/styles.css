@@ -533,24 +533,8 @@
 }
 
 /* ─── memory diff ─────────────────────────────────────────────────── */
-/* a capture card carries its tag's colour, so `A B A` reads off the strip before any
-   filter runs — and the matrix's column headers carry the same four, since that is
-   where a row reading `0 1 0` is matched against the pattern that was asked for */
-.gk-diff-card {
-  border-left-width: 3px;
-}
-.gk-diff-card.gk-tag-1 {
-  border-left-color: var(--gk-accent);
-}
-.gk-diff-card.gk-tag-2 {
-  border-left-color: var(--gk-good);
-}
-.gk-diff-card.gk-tag-3 {
-  border-left-color: var(--gk-warn);
-}
-.gk-diff-card.gk-tag-4 {
-  border-left-color: var(--gk-bad);
-}
+/* equal tags get equal colour in the matrix's column headers, which is where a row
+   reading `0 1 0` is matched against the pattern that was asked for */
 .gk-diff-tag.gk-tag-1 {
   color: var(--gk-accent);
 }

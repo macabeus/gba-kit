@@ -342,7 +342,7 @@ export function useMemoryDiff(transport: Transport): {
    * mean, and a matrix left standing under a changed set of columns is misread by eye.
    * Nothing is read back where no filter has run, since there is no matrix yet.
    *
-   * It reads and does not show, so a caller that also changes the capture strip can put
+   * It reads and does not show, so a caller that also changes the capture graph can put
    * both on screen together — or neither, when the read fails.
    */
   const reread = (at: number): Promise<DiffFilterBody | null> =>

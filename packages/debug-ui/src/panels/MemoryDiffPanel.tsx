@@ -2,11 +2,12 @@
  * Capture RAM, compare the captures, and find the variable behind a feature.
  *
  * The workflow this is shaped around: capture with the menu on item A, move to item
- * B, capture, move back to A, capture — then ask for the addresses that are equal
- * wherever the tags are equal and different wherever they differ. Everything that
- * merely moves — the mixer, the counters, the RNG — fails that on the first pair that
- * shares a tag. What is left is a handful of rows, and the matrix of values across the
- * captures says which of them is the answer faster than any filter expression could.
+ * B, capture, move back to A, capture. Each capture arrives joined to the one before it
+ * by a `changed` arrow, and a `same` arrow from the first capture to the third asks for
+ * the value to come back. Everything that merely moves — the mixer, the counters, the
+ * RNG — fails that arrow. What is left is a handful of rows, and the matrix of values
+ * across the captures says which of them is the answer faster than any filter
+ * expression could.
  *
  * An exact-value search is one of the modes, for the states that do put a number on
  * the screen.
@@ -70,7 +71,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
   const saves = useSaveStates(transport);
   const watches = useWatchpoints(transport);
   const [size, setSize] = useState<1 | 2 | 4>(1);
-  /** every arrow drawn, which is the query: the strip and the graph are two ways of drawing it */
+  /** every arrow drawn on the graph, which is the query */
   const [edges, setEdges] = useState<GraphEdge[]>([]);
   /** an exact value a capture held, as typed */
   const [typed, setTyped] = useState<Record<number, string>>({});
@@ -186,8 +187,8 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
           onChange={(e) => setNextName(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && !busy && void diff.capture(nextName.trim() || undefined)}
           // the name stays after a capture: a run comes back to the same state, and the
-          // sentence under the strip reads in the user's words rather than in ①②③
-          title="What this capture shows, so the strip reads as the run it describes"
+          // sentence under the graph reads in the user's words rather than in ①②③
+          title="What this capture shows, so the graph reads as the run it describes"
         />
         {adoptable.length > 0 && (
           <Menu

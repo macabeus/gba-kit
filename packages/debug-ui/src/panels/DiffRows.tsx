@@ -240,10 +240,10 @@ function Caveat({ text, title }: { text: string; title: string }) {
   );
 }
 
-/** Captures are named by their place in the strip, the way a screenshot of one is read. */
+/** Captures are numbered in the order the matrix's columns read them, the way a screenshot of one is read. */
 export const CIRCLED = [...'①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'];
 
-/** Equal tags get equal colour, so `A B A` is visible before any filter has run. */
+/** Equal tags get equal colour, so the column headers read `A B A` above the values they head. */
 export function tagClass(tags: string[], tag: string): string {
   const order = [...new Set(tags.filter((t) => t))];
   return `gk-tag-${(order.indexOf(tag) % 4) + 1}`;

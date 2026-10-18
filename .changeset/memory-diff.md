@@ -60,8 +60,8 @@ stops one, which also makes it visible when a DAP client replaces the list with 
 Captures live in the session and nowhere else: they are never written under `.gba-kit/`,
 and the 288 KB of RAM each holds never crosses to a client, which gets the counts, the
 groups and a page of rows. A save state can be adopted as a capture, since a state
-already carries both RAM regions. A session holds twenty of them — as many as the strip
-has circled numbers to name — and says so rather than taking a twenty-first.
+already carries both RAM regions. A session holds twenty of them — as many as there
+are circled numbers, ① to ⑳, to name them — and says so rather than taking a twenty-first.
 
 Results are grouped by what holds them, in four tiers the panel keeps visually
 distinct: an object the program states an extent for (with its typed member path,
