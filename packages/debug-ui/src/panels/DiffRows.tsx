@@ -240,7 +240,7 @@ function Caveat({ text, title }: { text: string; title: string }) {
   );
 }
 
-/** Captures are numbered in the order the matrix's columns read them, the way a screenshot of one is read. */
+/** Captures are numbered in the order the matrix's columns read them. */
 export const CIRCLED = [...'①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'];
 
 /** Equal tags get equal colour, so the column headers read `A B A` above the values they head. */

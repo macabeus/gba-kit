@@ -224,8 +224,8 @@ function pointerAt(reader: ValueReader, address: number): number | null {
 }
 
 /**
- * Where the typed pointers of a program are aimed. An address a pointer points at has no
- * symbol of its own — it exists only while the pointer holds that value — so a static
+ * Where the typed pointers of a program are aimed. An address only a pointer reaches has
+ * no symbol of its own — it exists only while the pointer holds that value — so a static
  * lookup can never name it, and following the pointers is the only way `gMenuInfo` ever
  * reaches `gMenuInfo->cursorIndex`.
  *

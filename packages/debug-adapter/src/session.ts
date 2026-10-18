@@ -1519,7 +1519,7 @@ export class GbaDebugSession extends DebugSession {
         const a = args as Args<'gba-kit/capture'>;
         const tag = optionalString(a?.tag, 'tag');
         if (a?.state === undefined && a?.path === undefined) {
-          // a capture reads the machine, so it needs it stopped like every other read
+          // a capture reads the machine, so its errors are answered like every other inspection's
           this.#inspect(response, () => {
             response.body = { capture: captureInfo(s.captureMemory(tag)) };
           });

@@ -230,7 +230,7 @@ describe('session transport', () => {
     expect(Object.keys(listed.captures[0]!)).not.toContain('ram');
 
     const [a, b, c] = listed.captures.map((capture) => capture.id) as [number, number, number];
-    // the arc back to ① is the constraint that does the work: the two links alone keep
+    // the `same` link back to ① is the constraint that does the work: the two links alone keep
     // everything that merely churns, since "changed, then changed again" is what churn is
     const query = {
       edges: [
@@ -284,7 +284,7 @@ describe('session transport', () => {
     expect(retagged.captures.map((c) => c.tag)).toEqual(['A', 'C', 'A']);
 
     // a capture a standing filter compared, forgotten — the panel re-reads the result
-    // straight after, and a matrix of three columns over a strip of two cards is read wrong
+    // straight after, and a matrix of three columns over two captures is read wrong
     await transport.request('gba-kit/diffFilter', {
       query: { edges: [{ from: a, to: b, relation: 'changed' }] },
       size: 2,

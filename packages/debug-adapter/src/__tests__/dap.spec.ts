@@ -1228,7 +1228,7 @@ describe('emulator requests', () => {
     const client = await launch({ projectDir });
     type Filter = GbaKitRequests['gba-kit/diffFilter']['body'];
 
-    // `g_keys` follows the buttons: A, then B, then A again gives it the tag pattern
+    // `g_keys` follows the buttons: A, then B, then A again gives it the values the links ask for
     for (const [mask, tag] of [
       [1, 'A'],
       [2, 'B'],
@@ -1308,7 +1308,7 @@ describe('emulator requests', () => {
     expect(back.total).toBe(whole.total);
     expect(back.rows.map((r) => r.address)).toContain(gKeys);
 
-    // an arc says two captures hold one value, so a link that asks them to differ cannot
+    // a `same` link says two captures hold one value, so a link that asks them to differ cannot
     // be satisfied — and says so rather than answering with no rows
     const refused = await client.request('gba-kit/diffFilter', {
       query: {

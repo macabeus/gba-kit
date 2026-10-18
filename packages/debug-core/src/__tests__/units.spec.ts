@@ -765,7 +765,7 @@ describe('memory diff', () => {
   const IWRAM = RAM_REGIONS.iwram;
   const EWRAM = RAM_REGIONS.ewram;
   const screen = { width: 1, height: 1, rgba: new Uint8Array(4) };
-  /** nothing here reads the machine or the program: only `value` mode needs the first, and rows the second */
+  /** nothing here reads the program, which only rows need */
   const context = {
     machine: () => {
       throw new Error('no machine in this test');
@@ -805,7 +805,7 @@ describe('memory diff', () => {
     expect(mask.count(2)).toBe(1);
   });
 
-  /** the strip as the panel draws it: each capture linked to the next, plus the arcs given. */
+  /** each capture linked to the next, as the panel links a new capture, plus a `same` link for each pair given. */
   const strip = (diff: MemoryDiff, relation: Relation, ...arcs: Array<[number, number]>) => ({
     edges: [
       ...diff
@@ -829,7 +829,7 @@ describe('memory diff', () => {
     expect(Object.keys(RANK_LEVELS)).toEqual(['likely', 'possible', 'unlikely']);
   });
 
-  it('an arc back to an earlier capture is what separates a value from what merely churns', () => {
+  it('a `same` link back to an earlier capture is what separates a value from what merely churns', () => {
     const diff = new MemoryDiff(context);
     const cursor = IWRAM.base + 0x40;
     const counter = IWRAM.base + 0x44;
@@ -871,7 +871,7 @@ describe('memory diff', () => {
     expect(diff.apply(between('decreased'), 1).total).toBe(1);
     expect(diff.rows(0, 4)[0]!.address).toBe(down);
 
-    // no narrowing to undo: the widest query answers with everything, straight after the narrowest
+    // the widest query answers with everything, straight after the narrowest
     const same = diff.apply(between('same'), 1);
     expect(same.total).toBe(IWRAM.size + EWRAM.size - 2);
     expect(same.asked).toBe(true);
@@ -944,7 +944,7 @@ describe('memory diff', () => {
     );
   });
 
-  it('the captures can be put in the order the links are read along', () => {
+  it('the captures can be put in an order that names each of them once', () => {
     const diff = new MemoryDiff(context);
     capture(diff, 'A', { [IWRAM.base + 8]: 1 });
     capture(diff, 'B', { [IWRAM.base + 8]: 2 });
@@ -1080,17 +1080,17 @@ describe('memory diff', () => {
       { from: second, to: third, relation: 'changed' as const },
     ];
 
-    // three captures the strip calls three states: a value taking two of them is not
+    // three captures the chain calls three states: a value taking two of them is not
     // answering the question, so the criterion is not awarded
     diff.apply({ edges: chain, values: [] }, 1);
     expect(diff.rows(0, 4)[0]!.reasons.join(' ')).not.toContain('one per state');
 
-    // with the arc back to ① the strip describes two states, which is what `1 2 1` takes
+    // with a `same` link back to ① the query describes two states, which is what `1 2 1` takes
     diff.apply({ edges: [...chain, { from: first, to: third, relation: 'same' }], values: [] }, 1);
     expect(diff.rows(0, 4)[0]!.reasons).toContain('2 distinct values, one per state');
   });
 
-  it('a session holds as many captures as the strip can name, and says so past that', () => {
+  it('a session holds as many captures as the panel can number, and says so past that', () => {
     const diff = new MemoryDiff(context);
     for (let i = 0; i < DIFF_LIMITS.captures; i++) {
       capture(diff, `#${i}`, {});

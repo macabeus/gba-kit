@@ -1,8 +1,7 @@
 /**
  * The captures as a graph, which is what the query already is: nodes are the captures,
- * arrows are the edges, and an arrow may join any two of them rather than only
- * neighbours. That is what the picture is for — a repeat is drawn where it happened
- * instead of chosen out of a list.
+ * arrows are the edges, and an arrow may join any two of them, so a repeat is drawn
+ * where it happened.
  *
  * Where a node sits says one thing and one thing only: the order the captures are read
  * in, left to right, which is the order of the value columns under it. Nothing else about

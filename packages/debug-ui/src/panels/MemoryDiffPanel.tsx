@@ -9,7 +9,7 @@
  * across the captures says which of them is the answer faster than any filter
  * expression could.
  *
- * An exact-value search is one of the modes, for the states that do put a number on
+ * A capture can also be given a value it held, for the states that do put a number on
  * the screen.
  */
 import type { DiffRowBody, MuteSource, MuteTally, SavedStateInfo } from '@gba-kit/debug-core/protocol';
@@ -23,9 +23,9 @@ import { DiffGraph, type GraphEdge, RELATION_WORD } from './DiffGraph.js';
 import { CIRCLED, DiffGroups } from './DiffRows.js';
 
 /**
- * The query as one sentence, under whichever picture is drawing it. A graph is quick to
- * read wrongly and a query nobody can say out loud is one nobody can check, so the words
- * are what both views are held to.
+ * The query as one sentence, under the graph that draws it. A graph is quick to read
+ * wrongly and a query nobody can say out loud is one nobody can check, so the words are
+ * what the graph is held to.
  */
 export function querySentence(
   captures: Array<{ id: number; tag: string }>,
@@ -376,7 +376,7 @@ export function MemoryDiffPanel({ transport }: { transport: Transport }) {
 /**
  * What to call an address a row found. A typed path names the address only where the
  * program states an extent covering it — everywhere else the path is a landmark's
- * hypothesis, and a label is a claim that outlives this panel: it reaches disassembly,
+ * hypothesis or a pointer's current aim, and a label is a claim that outlives this panel: it reaches disassembly,
  * the `.sym` export and the project's labels file, none of which say which tier it came
  * from. What survives that round trip is an identifier, which is what `labelName` makes.
  */

@@ -168,7 +168,7 @@ export function menuPlacement(
  * The open list renders into the nearest `.gk-root`, the element that carries the theme,
  * at fixed viewport coordinates read off the trigger every animation frame. So a menu
  * inside a clipped or zoomed container (a graph node, a scrolled table) opens at the
- * panel's own size, stays whole on screen, and follows its trigger as the container pans.
+ * panel's own size, stays on screen, and follows its trigger as the container pans.
  */
 export function Menu({
   label,

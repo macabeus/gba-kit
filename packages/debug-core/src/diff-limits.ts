@@ -8,19 +8,18 @@
  * nothing.
  */
 
-/** What a result is worth placing, how much of one a response carries, and how far back undo reaches. */
+/** What a result is worth placing, how much of one a response carries, and how many captures a session holds. */
 export const DIFF_LIMITS = {
   /** beyond this a result is a count and a page of addresses: nobody reads 290,000 ranked rows */
   detail: 5000,
   /** a page of rows, and the most one response may carry — which is every row that was placed */
   rowsDefault: 512,
   rowsMax: 5000,
-  /** how many filters undo reaches back through; each step holds a whole candidate set, at 36 KB */
   undoDepth: 20,
   /**
    * How many captures one session holds. A capture is 288 KB of RAM and a thumbnail,
-   * and the strip names them `①`…`⑳`: past the last circled number a card has no name
-   * to be picked out of the strip by, which is what a capture is chosen by everywhere.
+   * and the panel numbers them `①`…`⑳`: past the last circled number a capture has no
+   * number to be picked out by.
    */
   captures: 20,
 } as const;

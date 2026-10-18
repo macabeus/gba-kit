@@ -11,7 +11,7 @@ Find the variable behind a feature by capturing RAM and comparing the captures
 The `Memory search` tab becomes `Memory diff`, at the same panel id. Take a capture with
 the menu on item A, move to item B, capture, move back, capture — then draw what the
 value did between them. The captures are a graph: nodes to place, and arrows carrying
-`changed`, `same`, `went up`, `went down` or nothing at all. A new capture arrives joined
+`changed`, `same`, `went up` or `went down`. A new capture arrives joined
 to the one before it, which is the run as it was played.
 
 An arrow is not obliged to join neighbours, and that is what does the work: between
@@ -21,8 +21,8 @@ back to the first capture keeps 90. Where a node sits says one thing only — th
 captures are read in, left to right, which is the order of the value columns under the
 graph.
 
-With the noise baseline as well, the same three captures take 294,912 addresses to 4 in
-29 ms, and the cursor leads them, the one row the panel calls `likely` — writing 0, 1 and 2 to it moves the highlight between
+With the noise baseline as well, the same three captures take 294,912 addresses to 3 in
+17 ms, and the cursor leads them — writing 0, 1 and 2 to it moves the highlight between
 the three save slots, and a data breakpoint on it names `FileSelectScreenUpdateCursor`.
 
 A query is a standing description of the run, not a step in a narrowing: it is answered
@@ -98,7 +98,7 @@ path would leave the project on export and never come back. Every byte of one `s
 carries the same path, so a row at a byte inside an object leads with its address and
 carries the path as a landmark (`0x03002921 in gEntityInfo[0].xPosBg2 + 0x1`), is
 labelled by its address, and is not formatted through a type that covers four bytes it
-does not — a value read at the object would say a row the filter kept as `unchanged` had
+does not — a value read at the object would say a row the filter kept as `same` had
 changed.
 
 Each row also offers `Watch` and `Break on write`. A watch is the typed path where the

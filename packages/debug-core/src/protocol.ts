@@ -308,7 +308,7 @@ export interface GbaKitRequests {
    * the way `loadState` does, and the machine being debugged does not move either way.
    */
   'gba-kit/capture': { args?: { tag?: string; state?: string; path?: string }; body: { capture: CaptureInfo } };
-  /** Give a capture another tag; equal tags are what the tag filter matches on. */
+  /** Give a capture another tag. */
   'gba-kit/retagCapture': { args: { id: number; tag: string }; body: { captures: CaptureInfo[] } };
   'gba-kit/forgetCapture': { args: { id: number }; body: { captures: CaptureInfo[] } };
 
@@ -337,7 +337,7 @@ export interface GbaKitRequests {
     body: { mutes: MuteBody[] };
   };
 
-  /** Put the captures in this order, which is the sequence the links are read along. */
+  /** Put the captures in this order, which the rows' values follow. */
   'gba-kit/reorderCaptures': { args: { ids: number[] }; body: { captures: CaptureInfo[] } };
 
   /**
@@ -565,7 +565,7 @@ export function muteBody(mute: Mute): MuteBody {
 }
 
 /**
- * A row as a body carries it. The tiers are three separate words rather than one
+ * A row as a body carries it. The tiers are four separate words rather than one
  * name with a caveat, because a containment the program never stated must not read
  * like one it did.
  */
@@ -805,7 +805,7 @@ export function captureIds(raw: unknown): number[] {
   return raw.map((id) => captureId(id));
 }
 
-/** The `tag` of a `gba-kit/retagCapture`: what the tag filter matches on, so it has to be text. */
+/** The `tag` of a `gba-kit/retagCapture`, which has to be text. */
 export function captureTag(raw: unknown): string {
   if (typeof raw !== 'string') {
     throw new Error(`'tag' must be a string, not ${String(raw)}`);

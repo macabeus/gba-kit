@@ -2187,7 +2187,7 @@ describe('the memory diff', () => {
     expect(h.session.memoryDiff.captures()).toHaveLength(1);
   });
 
-  /** the strip as the panel draws it: each capture linked to the next, and an arc back to the first. */
+  /** each capture linked to the next, as the panel links a new capture, and a `same` link back to the first. */
   const backAndForth = (session: { memoryDiff: { captures(): Array<{ id: number }> } }) => {
     const ids = session.memoryDiff.captures().map((c) => c.id);
     return {
@@ -2206,7 +2206,7 @@ describe('the memory diff', () => {
     const samples = addressOf(session, 'g_samples');
 
     // `g_samples` is written every frame from the frame counter, so it differs across the
-    // arc the strip draws back to ①; only `g_frame` itself is put back
+    // `same` link back to ①; only `g_frame` itself is put back
     put(session, counter, 0x1234);
     session.captureMemory('A');
     run(2);

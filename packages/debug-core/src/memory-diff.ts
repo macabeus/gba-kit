@@ -7,18 +7,13 @@
  * only a state the user can reproduce. So the unit here is a *capture* — both RAM
  * regions, frozen — and the question is asked of several of them at once.
  *
- * Tags are what make that one question rather than a sequence of guesses. Capture on
- * item A, on item B, on item A again; tag them `A`, `B`, `A`; then ask for the
- * addresses that are **equal wherever the tags are equal and different wherever they
- * differ**. The sound mixer fails that on the first pair sharing a tag, and so does
- * every counter and every RNG; a menu cursor cannot. Iterative narrowing stays
- * available for states that cannot be reproduced, but the tag pattern is the fast
- * path, and on the measured target it took 294,912 addresses to five with no mutes at
- * all.
+ * Links between the captures are what make that one question rather than a sequence of
+ * guesses. Capture on item A, on item B, on item A again; link the first two `changed`
+ * and the first and third `same`. The sound mixer fails the `same` link, and so does
+ * every counter and every RNG; a menu cursor cannot.
  *
- * Candidates are a bitset rather than a list of addresses: `unchanged` between two
- * captures answers 291,679 of them, which is 2.3 MB as a `number[]` for every undo
- * step and 36 KB as bits.
+ * Candidates are a bitset rather than a list of addresses: `same` between two captures
+ * answers 291,679 of them, which is 2.3 MB as a `number[]` and 36 KB as bits.
  *
  * A mute is a view over that set, not a filter into it: the bits a mute covers stay
  * in the candidate set and are dropped when the set is reported. That is what makes
@@ -51,7 +46,7 @@ const REGIONS: readonly RamRegion[] = ['iwram', 'ewram'];
 export interface Capture {
   /** stable within a session; a panel's ①②③ is its position, this is its identity */
   id: number;
-  /** what the user calls it; equal tags are what the tag filter matches on */
+  /** what the user calls it */
   tag: string;
   frame: number;
   createdAt: string;
@@ -88,8 +83,7 @@ export function rankLevel(score: number): RankLevel {
 export const RELATIONS: readonly Relation[] = ['changed', 'same', 'increased', 'decreased'];
 
 /**
- * One expectation, between two captures. The links along the strip and an arc back to a
- * capture a later one repeats are the same thing: `same` between captures that are not
+ * One expectation, between two captures. `same` between captures that are not
  * neighbours is what says "I went back", and it is the constraint that does the work —
  * "changed, then changed again" is what every churning byte does.
  */
@@ -145,7 +139,7 @@ export interface DiffResult {
   hidden: Record<string, number>;
 }
 
-/** What the engine reaches outside itself for: the live machine, and what the program says about an address. */
+/** What the engine reaches outside itself for: what the program says about an address. */
 export interface DiffContext {
   info(): DebugInfo | null;
 }
@@ -313,7 +307,7 @@ function captureReader(capture: Capture): ValueReader {
  * Whether a type is worth formatting a row's value through: a scalar, an enum, a bool,
  * a bitfield — and only where the row's own bytes are that object's bytes. A byte of a
  * `u32` is not the `u32`: formatting it through the word would print a number the row's
- * filter never looked at, so a row kept by `unchanged` would read as one that changed.
+ * filter never looked at, so a row kept by `same` would read as one that changed.
  */
 function formattable(placement: Placement, size: 1 | 2 | 4): TypeDesc | null {
   const type = placement.type;
@@ -326,7 +320,7 @@ function formattable(placement: Placement, size: 1 | 2 | 4): TypeDesc | null {
   return start === placement.address && width === size ? type : null;
 }
 
-/** `①`, `②`, … for a capture at a position, so a refusal names it the way the strip does. */
+/** `①`, `②`, … for a capture at a position, so a refusal names it the way the panel does. */
 const CIRCLED = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩', '⑪', '⑫'];
 
 const positionName = (captures: Capture[], id: number): string => {
@@ -335,15 +329,8 @@ const positionName = (captures: Capture[], id: number): string => {
 };
 
 /**
- * Why no value could satisfy this query, or null. Links between neighbours could never
- * contradict each other, but an arc back to an earlier capture can: `①` up to `②`, `②` up
- * to `③` and `③` the same as `①` describes a value that is both larger than itself and
- * equal to it. That is one click away here, and a query nothing can satisfy has to say so
- * rather than answer with no rows and look like a feature that found nothing.
- */
-/**
- * How many distinct states the query describes, and which captures take part. Captures an
- * arc joins hold one state between them, so `A, B, A` describes two — and a
+ * How many distinct states the query describes, and which captures take part. Captures a
+ * `same` link joins hold one state between them, so `A, B, A` describes two — and a
  * candidate taking exactly that many distinct values is answering the question that was
  * asked rather than merely moving.
  */
@@ -365,6 +352,12 @@ export function queryStates(asked: DiffQuery, captures: Capture[]): { count: num
   return { count: new Set([...named].map(find)).size, taking };
 }
 
+/**
+ * Why no value could satisfy this query, or null: `①` up to `②`, `②` up to `③` and `③`
+ * the same as `①` describes a value that is both larger than itself and equal to it. A
+ * query nothing can satisfy says so rather than answer with no rows and look like a
+ * feature that found nothing.
+ */
 export function queryProblem(asked: DiffQuery, captures: Capture[]): string | null {
   const query = { edges: asked.edges ?? [], values: asked.values ?? [] };
   const known = new Set(captures.map((c) => c.id));
@@ -502,9 +495,9 @@ export class MemoryDiff {
   }
 
   /**
-   * Put the captures in this order. A strip read left to right is the run the links
-   * describe, and captures adopted from save states arrive in no order at all — so the
-   * sequence is the user's to state, not the order they happened to be taken in.
+   * Put the captures in this order, which the rows' values follow. Captures adopted from
+   * save states arrive in no order at all, so the sequence is the user's to state, not
+   * the order they happened to be taken in.
    */
   reorder(ids: number[]): Capture[] {
     const byId = new Map(this.#captures.map((c) => [c.id, c]));
@@ -645,7 +638,7 @@ export class MemoryDiff {
   /**
    * What the whole query asks of one address. Everything it needs from the captures is
    * worked out once here and closed over, so the scan is a loop over memory rather than
-   * a loop over the query. An `any` link asks nothing and is dropped before the loop.
+   * a loop over the query.
    */
   #predicate(
     query: Required<DiffQuery>,
@@ -770,9 +763,9 @@ export class MemoryDiff {
 
   /**
    * Where the program's typed pointers are aimed, according to the captures themselves.
-   * An address a pointer points at has no symbol of its own, so this is the only way one
-   * is ever named — and reading it from the captures rather than from the live machine is
-   * what makes the name true of the columns the row shows.
+   * An address only a pointer reaches has no symbol of its own, so this is how one is
+   * named — and reading it from the captures rather than from the live machine is what
+   * makes the name true of the columns the row shows.
    */
   #pointers(info: DebugInfo | null): PointerIndex | undefined {
     if (!info || this.#captures.length === 0) {
@@ -864,7 +857,7 @@ export class MemoryDiff {
       if (near <= 64) {
         row.reasons.push(`${near} changed byte${near === 1 ? '' : 's'} within ±256`);
       }
-      // below two states the strip asks nothing about how a value spreads, so there is
+      // below two states the query asks nothing about how a value spreads, so there is
       // nothing for a candidate to answer well: awarding this to every row would claim a
       // criterion was met that the query never set
       if (rank.states >= 2 && distinct === rank.states) {
@@ -883,7 +876,7 @@ export class MemoryDiff {
 
 interface RankContext {
   states: number;
-  /** which captures carry a tag, since only those are asked to hold one value per tag */
+  /** which captures a link names, since only those are asked to hold one value per state */
   taking: number[];
   per: Record<RamRegion, { prefix: Int32Array; runs: Uint16Array }>;
 }
