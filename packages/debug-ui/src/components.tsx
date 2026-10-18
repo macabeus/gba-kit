@@ -1,6 +1,7 @@
 /** Small building blocks the panels share. */
 import type { TimeStamp } from '@gba-kit/debug-core';
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import { usePixels } from './hooks.js';
 import { base64ToBytes } from './render.js';
@@ -127,12 +128,47 @@ export function menuFocus(key: string, from: number, count: number): number {
   }
 }
 
+/** The room an open menu list keeps from its trigger, and from the viewport's edges. */
+const MENU_GAP = 2;
+const MENU_MARGIN = 4;
+
+/** A box in viewport pixels, the shape `getBoundingClientRect` gives. */
+export interface ViewportBox {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+/**
+ * Where an open menu list goes, in viewport pixels: under its trigger with its right edge on
+ * the trigger's, over the trigger when the room below is too short, and inside the viewport
+ * either way.
+ */
+export function menuPlacement(
+  trigger: ViewportBox,
+  list: { width: number; height: number },
+  viewport: { width: number; height: number },
+): { top: number; left: number } {
+  const below = trigger.bottom + MENU_GAP;
+  const above = trigger.top - MENU_GAP - list.height;
+  const lowest = viewport.height - MENU_MARGIN - list.height;
+  const top = below <= lowest ? below : above >= MENU_MARGIN ? above : Math.max(MENU_MARGIN, lowest);
+  const left = Math.max(MENU_MARGIN, Math.min(trigger.right - list.width, viewport.width - MENU_MARGIN - list.width));
+  return { top, left };
+}
+
 /**
  * A button that opens a short list of actions under itself. The trigger is the editor's
- * own toolbar button, so it sits beside one; the list closes as soon as focus leaves it,
- * which covers a click elsewhere, Tab and Escape alike without listening to the whole
- * document. It is `hidden` rather than unmounted while shut, so the items are there to
- * be focused the moment it opens — and nothing hidden can be focused or read out.
+ * own toolbar button, so it sits beside one; the list closes as soon as focus leaves the
+ * menu, which covers a click elsewhere, Tab and Escape alike without listening to the whole
+ * document. While shut the list is `hidden` in place, so nothing in it can be focused or
+ * read out.
+ *
+ * The open list renders into the nearest `.gk-root`, the element that carries the theme,
+ * at fixed viewport coordinates read off the trigger every animation frame. So a menu
+ * inside a clipped or zoomed container (a graph node, a scrolled table) opens at the
+ * panel's own size, stays whole on screen, and follows its trigger as the container pans.
  */
 export function Menu({
   label,
@@ -151,6 +187,7 @@ export function Menu({
   const [open, setOpen] = useState(false);
   /** the item to put the focus on once the list is open, since a hidden one takes none */
   const [focusAt, setFocusAt] = useState<number | null>(null);
+  const [place, setPlace] = useState<{ top: number; left: number } | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const list = useRef<HTMLDivElement>(null);
 
@@ -163,11 +200,76 @@ export function Menu({
     }
   }, [focusAt]);
 
+  // placed before the first paint, then kept on the trigger as whatever holds it moves
+  useLayoutEffect(() => {
+    if (!open) {
+      setPlace(null);
+      return;
+    }
+    let frame = 0;
+    const follow = (): void => {
+      const box = trigger.current?.getBoundingClientRect();
+      const shown = list.current;
+      if (box && shown) {
+        const next = menuPlacement(
+          box,
+          { width: shown.offsetWidth, height: shown.offsetHeight },
+          { width: window.innerWidth, height: window.innerHeight },
+        );
+        setPlace((was) => (was?.top === next.top && was.left === next.left ? was : next));
+      }
+      frame = requestAnimationFrame(follow);
+    };
+    follow();
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
+
+  const host = open ? (trigger.current?.closest<HTMLElement>('.gk-root') ?? document.body) : null;
+  const listElement = (
+    <div
+      className="gk-menu-list"
+      role="menu"
+      ref={list}
+      hidden={!open}
+      style={!open ? undefined : place ? { top: place.top, left: place.left } : { visibility: 'hidden' }}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') {
+          setOpen(false);
+          trigger.current?.focus();
+          return;
+        }
+        const to = menuFocus(e.key, buttons().indexOf(e.target as HTMLButtonElement), items.length);
+        if (to >= 0) {
+          e.preventDefault();
+          buttons()[to]?.focus();
+        }
+      }}
+    >
+      {items.map((item) => (
+        <button
+          type="button"
+          role="menuitem"
+          key={item.label}
+          className="gk-menu-item"
+          disabled={item.disabled}
+          onClick={() => {
+            setOpen(false);
+            item.onSelect();
+          }}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     <div
       className="gk-menu"
       onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget)) {
+        // the open list sits outside this element in the document, and inside it in React's tree
+        const to = e.relatedTarget as Node | null;
+        if (!e.currentTarget.contains(to) && !list.current?.contains(to)) {
           setOpen(false);
         }
       }}
@@ -199,40 +301,7 @@ export function Menu({
       >
         {face ?? <Icon name="ellipsis" />}
       </button>
-      <div
-        className="gk-menu-list"
-        role="menu"
-        ref={list}
-        hidden={!open}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') {
-            setOpen(false);
-            trigger.current?.focus();
-            return;
-          }
-          const to = menuFocus(e.key, buttons().indexOf(e.target as HTMLButtonElement), items.length);
-          if (to >= 0) {
-            e.preventDefault();
-            buttons()[to]?.focus();
-          }
-        }}
-      >
-        {items.map((item) => (
-          <button
-            type="button"
-            role="menuitem"
-            key={item.label}
-            className="gk-menu-item"
-            disabled={item.disabled}
-            onClick={() => {
-              setOpen(false);
-              item.onSelect();
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
+      {host ? createPortal(listElement, host) : listElement}
     </div>
   );
 }

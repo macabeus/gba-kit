@@ -421,11 +421,10 @@
   position: relative;
   display: inline-flex;
 }
+/* fixed, at the coordinates Menu reads off its trigger, so no container clips or zooms it */
 .gk-menu-list {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 5;
+  position: fixed;
+  z-index: 1000;
   min-width: 190px;
   display: flex;
   flex-direction: column;
