@@ -53,6 +53,7 @@ export function webviewHtml(options: {
     --gk-muted: var(--vscode-descriptionForeground);
     --gk-dim: var(--vscode-descriptionForeground);
     --gk-accent: var(--vscode-textLink-foreground);
+    --gk-derived: var(--vscode-charts-purple, #c084fc);
     --gk-accent-bg: var(--vscode-list-hoverBackground);
     --gk-good: var(--vscode-testing-iconPassed, #4ade80);
     --gk-warn: var(--vscode-editorWarning-foreground, #fbbf24);

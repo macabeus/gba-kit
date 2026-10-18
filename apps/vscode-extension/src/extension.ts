@@ -121,6 +121,7 @@ class Panels {
           .openTextDocument({ language, content })
           .then((doc) => vscode.window.showTextDocument(doc, vscode.ViewColumn.Active));
       },
+      watch: (expression) => void addWatchExpression(expression),
       // the editor's own dialogs, the way `gba-kit.importLabels` reaches a file the user picks
       pickFile: async ({ title, filters, maxBytes }) => {
         const files = await vscode.window.showOpenDialog({ canSelectMany: false, title, filters });
@@ -515,6 +516,24 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {}
+
+/**
+ * Put an expression in VS Code's Watch pane. The editor exposes no API for it, and the
+ * only thing that feeds the watch list is the command its Variables view runs on the
+ * variable you right-clicked — which takes the variable, so an expression goes in as
+ * one. An editor that renames or drops it leaves the expression on the clipboard and
+ * says so, rather than a `Watch` that quietly does nothing.
+ */
+async function addWatchExpression(expression: string): Promise<void> {
+  try {
+    await vscode.commands.executeCommand('debug.addToWatchExpressions', {
+      variable: { name: expression, evaluateName: expression },
+    });
+  } catch {
+    await vscode.env.clipboard.writeText(expression);
+    void vscode.window.showWarningMessage(`This editor took no watch expression; '${expression}' is on the clipboard.`);
+  }
+}
 
 /** `node` on the PATH, so the adapter can run as its own process. */
 function findNode(): string | null {

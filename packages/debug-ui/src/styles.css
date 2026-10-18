@@ -18,6 +18,7 @@
   --gk-muted: #64748b;
   --gk-dim: #94a3b8;
   --gk-accent: #38bdf8;
+  --gk-derived: #c084fc;
   --gk-accent-bg: rgba(56, 189, 248, 0.15);
   --gk-good: #4ade80;
   --gk-warn: #fbbf24;
@@ -420,11 +421,10 @@
   position: relative;
   display: inline-flex;
 }
+/* fixed, at the coordinates Menu reads off its trigger, so no container clips or zooms it */
 .gk-menu-list {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 5;
+  position: fixed;
+  z-index: 1000;
   min-width: 190px;
   display: flex;
   flex-direction: column;
@@ -530,4 +530,135 @@
 }
 .gk-card-actions {
   justify-content: flex-end;
+}
+
+/* ─── memory diff ─────────────────────────────────────────────────── */
+/* equal tags get equal colour in the matrix's column headers, which is where a row
+   reading `0 1 0` is matched against the pattern that was asked for */
+.gk-diff-tag.gk-tag-1 {
+  color: var(--gk-accent);
+}
+.gk-diff-tag.gk-tag-2 {
+  color: var(--gk-good);
+}
+.gk-diff-tag.gk-tag-3 {
+  color: var(--gk-warn);
+}
+.gk-diff-tag.gk-tag-4 {
+  color: var(--gk-bad);
+}
+.gk-diff-tag {
+  font-size: 11px;
+}
+/* the graph: a canvas of captures to place, and arrows to draw between any two */
+.gk-graph {
+  height: 300px;
+  border: 1px solid var(--gk-border);
+  border-radius: 3px;
+}
+.gk-graph-node {
+  box-sizing: border-box;
+  width: 170px;
+  padding: 4px;
+  border: 1px solid var(--gk-border);
+  border-radius: 3px;
+  background: var(--gk-bg);
+}
+/* every field in a node is the node's width: one that keeps its own spills out of it */
+.gk-graph-node .gk-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+.gk-graph-node canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+}
+.gk-graph-row {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  padding: 3px 0;
+}
+.gk-graph-row .gk-input,
+.gk-graph-title {
+  flex: 1;
+  min-width: 0;
+}
+.gk-graph-title {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* an arrow's label sits above the nodes, since a backward arrow passes behind one */
+.gk-graph-label {
+  position: absolute;
+  z-index: 10;
+  pointer-events: all;
+}
+.gk-graph-sign {
+  font-family: var(--gk-mono);
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* the four tiers are four treatments, never the same one with different words */
+.gk-tier {
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.gk-tier-sized {
+  color: var(--gk-good);
+}
+/* a pointer aimed here is a different kind of claim from an object declared here, and
+   its own colour, since --gk-accent is already spent on a value that changed */
+.gk-tier-through {
+  color: var(--gk-derived);
+}
+.gk-tier-inferred {
+  color: var(--gk-warn);
+}
+.gk-tier-unnamed {
+  color: var(--gk-dim);
+}
+/* a mute's source is not a tier: it says who asked for it, not how well named anything is */
+.gk-mute-yours {
+  color: var(--gk-fg);
+}
+.gk-mute-found {
+  color: var(--gk-muted);
+}
+tr.gk-tier-sized td:nth-child(2),
+tr.gk-tier-through td:nth-child(2) {
+  color: var(--gk-fg);
+}
+tr.gk-tier-inferred td:nth-child(2),
+tr.gk-tier-unnamed td:nth-child(2) {
+  font-family: var(--gk-mono);
+}
+.gk-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--gk-fg);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--gk-border);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.gk-group-head:hover {
+  background: var(--gk-accent-bg);
+}
+.gk-mute-row {
+  align-items: center;
+  gap: 6px;
 }

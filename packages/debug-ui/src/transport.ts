@@ -50,6 +50,12 @@ export interface Transport {
   /** Show text to the user in an editor (a recording's script, an exported symbol file), when the host has one. */
   openText?(content: string, language: string, title: string): void;
   /**
+   * Put an expression in the host's watch pane, when it has one — `gEntityInfo[3].xPosBg2`
+   * from a memory diff's row, which the adapter then evaluates every time the machine
+   * stops. A host with nowhere to put one offers no watch action at all.
+   */
+  watch?(expression: string): void;
+  /**
    * Ask the user for a file and read it, when the host has a way to open one. Null
    * when they picked nothing. `filters` is extension lists by description, the way an
    * editor's open dialog takes them, and `maxBytes` is what the caller can take: a
@@ -86,6 +92,7 @@ export type TransportToHost =
   /** the last listener of a feed left: the host may stop sending it */
   | { type: 'unsubscribe'; what: Feed }
   | { type: 'openText'; content: string; language: string; title: string }
+  | { type: 'watch'; expression: string }
   | { type: 'pickFile'; id: number; title: string; filters: Record<string, string[]>; maxBytes: number }
   /** `bytes` is base64: nothing has crossed webview→host as a typed array here, and text always has */
   | {
@@ -216,6 +223,7 @@ export function createMessageTransport(port: MessagePort): Transport {
     onAudio: (listener) => listen('audio', listeners.audio, listener),
     onLabels: (listener) => listen('labels', listeners.labels, listener),
     openText: (content, language, title) => port.post({ type: 'openText', content, language, title }),
+    watch: (expression) => port.post({ type: 'watch', expression }),
     async pickFile(options) {
       const picked = (await send({ type: 'pickFile', id: nextId++, ...options })) as {
         name: string;
@@ -239,6 +247,7 @@ export interface TransportBackend {
   /** the webview's last listener of the feed left */
   unsubscribe(what: Feed): void;
   openText?(content: string, language: string, title: string): void;
+  watch?(expression: string): void;
   pickFile?: Transport['pickFile'];
   saveFile?: Transport['saveFile'];
   /** a webview asked for a tool panel; the host brings the view that holds it up and tells it which */
@@ -289,6 +298,9 @@ export async function serveTransport(
       return;
     case 'openText':
       backend.openText?.(message.content, message.language, message.title);
+      return;
+    case 'watch':
+      backend.watch?.(message.expression);
       return;
     case 'pickFile':
       await answer(

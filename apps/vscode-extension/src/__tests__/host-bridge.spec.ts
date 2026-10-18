@@ -121,6 +121,19 @@ describe('host bridge', () => {
     expect(posted.length).toBe(2);
   });
 
+  it('hands a watch expression to the host, and passes over a host with no watch pane', async () => {
+    const posted: HostToTransport[] = [];
+    const watched: string[] = [];
+    const bridge = new HostBridge({ post: (m) => posted.push(m), watch: (expression) => watched.push(expression) });
+    await bridge.receive({ type: 'watch', expression: 'gEntityInfo[3].xPosBg2' });
+    expect(watched).toEqual(['gEntityInfo[3].xPosBg2']);
+
+    // a host with nowhere to put one is told and says nothing back: the webview asked, it did not wait
+    const silent = new HostBridge({ post: (m) => posted.push(m) });
+    await silent.receive({ type: 'watch', expression: 'u8(0x03002921)' });
+    expect(posted).toEqual([]);
+  });
+
   it('opens the file dialogs the host has, and answers when it has none', async () => {
     const posted: HostToTransport[] = [];
     const asked: unknown[] = [];
