@@ -68,8 +68,8 @@ export function disassembleArm(instruction: number, address: number): string {
 
 export interface DisassembleOptions {
   /**
-   * Name for an address an instruction refers to — a branch target, a literal-pool
-   * word — appended as `<name>` / `<name+0xNN>`. Return null for no name.
+   * Name for an address — a branch target, or the value a literal-pool load reads —
+   * appended as `<name>` / `<name+0xNN>`. Return null for no name.
    */
   symbolize?: (address: number) => string | null;
 }
@@ -78,14 +78,15 @@ export interface DisassembledInstruction {
   text: string;
   /** Bytes the instruction occupies: 4 for ARM and for a merged Thumb `bl` pair, else 2. */
   size: 2 | 4;
-  /** The code or data address the instruction refers to, when it names one. */
+  /** The code or data address the instruction refers to, when it names one; for a literal-pool load, the pool word's address. */
   target?: number;
 }
 
 /**
  * Disassemble the Thumb instruction at `address`, reading halfwords through
  * `read16`. A `bl` prefix/suffix pair is presented as one 4-byte `bl <target>`
- * instead of two halves.
+ * instead of two halves, and a literal-pool load shows the word it reads:
+ * `ldr r0, 0x0800100c @ =0x03001234 <gState>`.
  */
 export function disassembleThumbAt(
   read16: (address: number) => number,
@@ -96,25 +97,35 @@ export function disassembleThumbAt(
   // The halfword after it is read only for a `bl` prefix, which alone pairs with it.
   const second = isThumbBlPrefix(first) ? read16((address + 2) >>> 0) & 0xffff : 0;
   const word = isThumbBlSuffix(second) ? (first | (second << 16)) >>> 0 : first;
-  return present(decode('thumb', word, address), options);
+  const read32 = (a: number): number => ((read16(a) & 0xffff) | ((read16((a + 2) >>> 0) & 0xffff) << 16)) >>> 0;
+  return present(decode('thumb', word, address), read32, options);
 }
 
-/** Disassemble the ARM instruction at `address`, reading words through `read32`. */
+/** Disassemble the ARM instruction at `address`, reading words through `read32`; a literal-pool load shows the word it reads. */
 export function disassembleArmAt(
   read32: (address: number) => number,
   address: number,
   options: DisassembleOptions = {},
 ): DisassembledInstruction {
-  return present(decode('arm', read32(address) >>> 0, address), options);
+  return present(decode('arm', read32(address) >>> 0, address), read32, options);
 }
 
-/** The instruction's text, with the name of the address it refers to when `symbolize` has one. */
-function present(insn: Insn, options: DisassembleOptions): DisassembledInstruction {
-  const text = textOf(insn);
+/**
+ * The instruction's text, then what a reader wants next to it: for a literal-pool load the word it
+ * reads (`@ =0x03001234`, as a decompilation project's assembly comments it), and the name of that
+ * word, or of the address the instruction refers to, when `symbolize` has one.
+ */
+function present(
+  insn: Insn,
+  read32: (address: number) => number,
+  options: DisassembleOptions,
+): DisassembledInstruction {
   const target = targetOf(insn);
   if (target === undefined) {
-    return { text, size: insn.size };
+    return { text: textOf(insn), size: insn.size };
   }
-  const name = options.symbolize?.(target);
+  const loaded = insn.flow.kind === 'pool-load' ? read32(target) >>> 0 : undefined;
+  const text = loaded === undefined ? textOf(insn) : `${textOf(insn)} @ =${addr(loaded)}`;
+  const name = options.symbolize?.(loaded ?? target);
   return { text: name ? `${text} <${name}>` : text, size: insn.size, target };
 }

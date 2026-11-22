@@ -6,7 +6,7 @@ The disassembler reads the instruction tables of [`@match-kit/isa`](https://gith
 
 **The text changes** to GNU as unified syntax, the spelling of a project's `.s` files:
 
-- A PC-relative load names the address it reads: `ldr r0, 0x0800100c`, where it was `ldr r0, [pc, #0x8] ; =0x0800100c`. An `add rd, pc, #imm` is `adr r1, 0x08001008`.
+- A PC-relative load names the address it reads, and `disassembleThumbAt` / `disassembleArmAt` add the word found there: `ldr r0, 0x0800100c @ =0x03001234 <gState>`, where it was `ldr r0, [pc, #0x8] ; =0x0800100c`. `symbolize` now names that word, not the pool's address. An `add rd, pc, #imm` is `adr r1, 0x08001008`.
 - A register list names every register: `push {r4, r5, r6, r7, lr}`, where it was `push {r4-r7, lr}`.
 - A small immediate is decimal and a zero offset is left out: `adds r0, r1, #1`, `ldrh r0, [r1]`.
 - An encoding that is no ARMv4T instruction prints as its bytes and what it is: `.inst.n 0xDE00 @ undefined`, where it was `dw 0x…` or, for `0xDExx`, a branch.
