@@ -174,6 +174,10 @@ importers:
         version: 4.1.1(@types/node@25.5.0)(jsdom@30.0.1)(vite@8.0.2(@types/node@25.5.0)(esbuild@0.27.4)(jiti@2.6.1)(tsx@4.21.0))
 
   packages/arm-emulator:
+    dependencies:
+      '@match-kit/isa':
+        specifier: link:../../../decompiler/matchkit-isa/packages/isa
+        version: link:../../../decompiler/matchkit-isa/packages/isa
     devDependencies:
       '@types/node':
         specifier: ^25.5.0

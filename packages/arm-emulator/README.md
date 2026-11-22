@@ -40,6 +40,8 @@ const mnemonic = disassembleThumb(0x4770, 0x08000000);
 // "bx lr"
 ```
 
+The instruction tables are [`@match-kit/isa`](https://github.com/macabeus/match-kit/tree/main/packages/isa)'s, so the text is GNU as unified syntax, as a decompilation project's `.s` files spell it. An encoding that is no ARMv4T instruction prints as its bytes: `.inst.n 0xDE00 @ undefined`.
+
 ## Exports
 
 ### Main entry (`@gba-kit/arm-emulator`)

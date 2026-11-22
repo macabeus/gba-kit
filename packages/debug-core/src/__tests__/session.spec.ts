@@ -698,7 +698,9 @@ describe.each(VARIANTS)('Session on %s', (variant) => {
     expect(h.session.callStack().map((f) => f.name)).toContain('main');
     // The swi's own frame: the BIOS returns to the instruction after it.
     const afterSwi = h.session.callStack().find((f) => f.method === 'service')!.address;
-    expect(h.session.disassemble(afterSwi - (variant.startsWith('thumb') ? 2 : 4), 1)[0]!.text).toMatch(/^swi #0x5/);
+    expect(h.session.disassemble(afterSwi - (variant.startsWith('thumb') ? 2 : 4), 1)[0]!.text).toMatch(
+      /^swi #(5|0x50000)$/,
+    );
     const halted = h.session.position;
     h.session.stepInstruction();
     expect(h.session.pc).toBe(0x18); // the IRQ vector
@@ -1550,7 +1552,7 @@ describe('Session views and tools', () => {
     expect(s.machine.thumb).toBe(false);
     expect(s.disassemble(s.pc, 1)[0]).toMatchObject({
       size: 4,
-      text: expect.stringMatching(/^strcc r3, \[r1\], #0x4/),
+      text: expect.stringMatching(/^strcc r3, \[r1\], #4/),
     });
     const thumb = await Session.create(new ManualHost(), {
       rom: fixture('thumb-O0').rom,
