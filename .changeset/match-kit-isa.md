@@ -4,7 +4,7 @@
 
 The disassembler reads the instruction tables of [`@match-kit/isa`](https://github.com/macabeus/match-kit/tree/main/packages/isa), in place of its own 700 lines. `disassembleThumb`, `disassembleArm`, `disassembleThumbAt` and `disassembleArmAt` keep their signatures, `size`, `target` and `symbolize`.
 
-**The text changes** to GNU as unified syntax, the spelling of a project's `.s` files:
+**The text changes** to GNU as unified syntax, the syntax `arm-none-eabi-as` reads:
 
 - A PC-relative load names the address it reads, and `disassembleThumbAt` / `disassembleArmAt` add the word found there: `ldr r0, 0x0800100c @ =0x03001234 <gState>`, where it was `ldr r0, [pc, #0x8] ; =0x0800100c`. `symbolize` now names that word, not the pool's address. An `add rd, pc, #imm` is `adr r1, 0x08001008`.
 - A register list names every register: `push {r4, r5, r6, r7, lr}`, where it was `push {r4-r7, lr}`.

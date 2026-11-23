@@ -1,8 +1,8 @@
 /**
  * ARM7TDMI Disassembler — ARM and Thumb instruction disassembly
  *
- * The instruction tables are @match-kit/isa's ARMv4T ones, so the debugger's listing spells
- * an instruction as a decompilation project's `.s` files do (GNU as unified syntax), and the
+ * The instruction tables are @match-kit/isa's ARMv4T ones, so the debugger's listing is in
+ * GNU as unified syntax (what `arm-none-eabi-as` reads), and the
  * text assembles back to the same bytes. This module is the debugger's
  * presentation of them: addresses as numbers, and a symbol name appended when there is one.
  *
@@ -112,7 +112,7 @@ export function disassembleArmAt(
 
 /**
  * The instruction's text, then what a reader wants next to it: for a literal-pool load the word it
- * reads (`@ =0x03001234`, as a decompilation project's assembly comments it), and the name of that
+ * reads (`@ =0x03001234`, a GNU as comment), and the name of that
  * word, or of the address the instruction refers to, when `symbolize` has one.
  */
 function present(
