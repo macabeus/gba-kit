@@ -8,7 +8,7 @@
  *
  * Execution does not go through here: the CPU has its own decoder (arm-cpu.ts).
  */
-import { type Insn, decode, formatDecoding, formatRaw, isThumbBlPrefix, isThumbBlSuffix } from '@match-kit/isa/armv4t';
+import { type Insn, decode, formatLoose, formatRaw, isThumbBlPrefix, isThumbBlSuffix } from '@match-kit/isa/armv4t';
 
 /** Format an address */
 function addr(v: number): string {
@@ -23,7 +23,7 @@ const NUMERIC = { labelFor: (target: number): string => addr(target) };
  * half of a `bl` pair) is shown as its bytes with what it is: `.inst.n 0xDE00 @ undefined`.
  */
 function textOf(insn: Insn): string {
-  return formatDecoding(insn, NUMERIC) ?? formatRaw(insn);
+  return formatLoose(insn, NUMERIC) ?? formatRaw(insn);
 }
 
 /** The code or data address the instruction names: a branch or call target, a literal-pool word, an `adr`. */
