@@ -31,7 +31,7 @@ function targetOf(insn: Insn): number | undefined {
   const flow = insn.flow;
   switch (flow.kind) {
     case 'branch':
-    case 'bl':
+    case 'call':
     case 'adr':
     case 'mode-switch':
       return flow.target;
