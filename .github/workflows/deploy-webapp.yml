@@ -3,15 +3,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+permissions:
+  contents: read
+# One deployment at a time; a queued one waits for the running one to finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-24.04
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -24,5 +24,17 @@ jobs:
       - uses: actions/upload-pages-artifact@v5
         with:
           path: apps/webapp/dist
+  # A job of its own: deploy-pages looks the artifact up by listing the run's artifacts, and the
+  # listing does not always show an artifact in the second after its upload.
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
       - id: deploy
         uses: actions/deploy-pages@v5
