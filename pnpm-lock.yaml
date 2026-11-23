@@ -176,8 +176,8 @@ importers:
   packages/arm-emulator:
     dependencies:
       '@match-kit/isa':
-        specifier: link:../../../decompiler/matchkit-isa/packages/isa
-        version: link:../../../decompiler/matchkit-isa/packages/isa
+        specifier: ^0.1.0
+        version: 0.1.0
     devDependencies:
       '@types/node':
         specifier: ^25.5.0
@@ -855,6 +855,10 @@ packages:
 
   '@marijn/find-cluster-break@1.0.2':
     resolution: {integrity: sha512-l0h88YhZFyKdXIFNfSWpyjStDjGHwZ/U7iobcK1cQQD8sejsONdQtTVU+1wVN1PBw40PiiHB1vA5S7VTfQiP9g==}
+
+  '@match-kit/isa@0.1.0':
+    resolution: {integrity: sha512-dGrPCDpVAxqxxAKJgP1kOqrsQKFcIn5rPSxh/pZmNSUAQ3+zXUUUFebGodweJMXXAskmszxc501ntxbdKk3zyg==}
+    engines: {node: '>=24'}
 
   '@napi-rs/wasm-runtime@1.1.1':
     resolution: {integrity: sha512-p64ah1M1ld8xjWv3qbvFwHiFVWrq1yFvV4f7w+mzaqiR4IlSgkqhcRdHwsGgomwzBH51sRY4NEowLxnaBjcW/A==}
@@ -4102,6 +4106,8 @@ snapshots:
       read-yaml-file: 1.1.0
 
   '@marijn/find-cluster-break@1.0.2': {}
+
+  '@match-kit/isa@0.1.0': {}
 
   '@napi-rs/wasm-runtime@1.1.1':
     dependencies:

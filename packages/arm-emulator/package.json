@@ -49,7 +49,7 @@
     "lint": "eslint src/"
   },
   "dependencies": {
-    "@match-kit/isa": "link:../../../decompiler/matchkit-isa/packages/isa"
+    "@match-kit/isa": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
